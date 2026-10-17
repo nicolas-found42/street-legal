@@ -1,0 +1,10 @@
+[package]
+name = "slr-fmt-texture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slr-fmt-core = { path = "../slr-fmt-core" }
+zune-jpeg = "0.5"
+zune-core = "0.5"

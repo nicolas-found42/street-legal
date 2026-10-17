@@ -31,8 +31,12 @@ pub struct Report {
     pub failures: Vec<(PathBuf, String)>,
     pub scx_v3: usize,
     pub scx_v4: usize,
+    pub scx_v3_groups: usize,
+    pub scx_v3_verts: usize,
+    pub scx_v3_tris: usize,
     pub scx_meshes: usize,
     pub scx_triangles: usize,
+    pub scy: usize,
     pub rpak_entries: usize,
     pub tufa_modules: usize,
     pub vehicle_cfgs: usize,
@@ -56,10 +60,22 @@ pub fn verify(root: &Path) -> Result<Report> {
                     rep.rpak_entries += pk.entries.len();
                     Ok(Some("rpk"))
                 }
-                "scx" => {
+                "scx" | "scy" => {
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;
                     match scx::parse(&data).map_err(|e| e.to_string())? {
-                        scx::Scx::V3 { .. } => rep.scx_v3 += 1,
+                        scx::Scx::V3 { groups, .. } => {
+                            rep.scx_v3 += 1;
+                            if ext == "scy" {
+                                rep.scy += 1;
+                            }
+                            rep.scx_v3_groups += groups.len();
+                            rep.scx_v3_verts +=
+                                groups.iter().map(|g| g.mesh.positions.len()).sum::<usize>();
+                            rep.scx_v3_tris += groups
+                                .iter()
+                                .map(|g| g.mesh.indices.len() / 3)
+                                .sum::<usize>();
+                        }
                         scx::Scx::V4 { meshes, .. } => {
                             rep.scx_v4 += 1;
                             rep.scx_meshes += meshes.len();
@@ -67,7 +83,7 @@ pub fn verify(root: &Path) -> Result<Report> {
                                 meshes.iter().map(|m| m.indices.len() / 3).sum::<usize>();
                         }
                     }
-                    Ok(Some("scx"))
+                    Ok(Some(if ext == "scy" { "scy" } else { "scx" }))
                 }
                 "class" => {
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;
@@ -83,7 +99,7 @@ pub fn verify(root: &Path) -> Result<Report> {
                     // Extensionless save files start with SDAT.
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;
                     if data.starts_with(b"SDAT") {
-                        sdat::parse(&data).map_err(|e| e.to_string())?;
+                        sdat::parse(&data, None).map_err(|e| e.to_string())?;
                         Ok(Some("sdat"))
                     } else {
                         Ok(None)

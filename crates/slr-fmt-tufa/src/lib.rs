@@ -15,8 +15,8 @@
 //! (index into the exe's table at VA 0x5f0914, see [`OPWORDS`]), a `u16` operand and, only when the
 //! opword's class nibble is 1, 2 or 4, a `u32` immediate (exe `FUN_0041a5f0` / `FUN_0041a5c0`).
 
-use crate::reader::Reader;
-use crate::{FormatError, Result};
+use slr_fmt_core::reader::Reader;
+use slr_fmt_core::{FormatError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -46,6 +46,8 @@ impl Module {
     }
 }
 
+/// Chunk-list splitter: the exe side is class loader `JVM::addClass`.
+/// exe: FUN_00411b20
 pub fn parse(data: &[u8]) -> Result<Vec<Module>> {
     let mut r = Reader::new(data);
     let mut modules: Vec<Module> = Vec::new();
@@ -164,6 +166,9 @@ impl Node {
 
 impl Module {
     /// Decode every `TREE` body of a version 0x11ae1 module. `data` is the whole file.
+    /// Serialized `TREE` node decode (1 opcode byte + u16 operand + optional u32 immediate).
+    /// exe: FUN_0041a5f0
+    /// exe: FUN_0041a5c0
     pub fn trees(&self, data: &[u8]) -> Result<Vec<Vec<Node>>> {
         if self.version != 0x11ae1 {
             return Err(FormatError::UnsupportedVersion(self.version));
@@ -231,6 +236,8 @@ pub enum PoolEntry {
 
 impl Module {
     /// Parse the `CONS` chunk exactly. `data` is the whole file.
+    /// `CONS` constant-pool parse (u32 count + typed entries).
+    /// exe: FUN_00407660
     pub fn pool(&self, data: &[u8]) -> Result<Vec<PoolEntry>> {
         let ch =
             self.chunks
@@ -338,15 +345,21 @@ impl Module {
     }
 
     /// `MTHD`: two arrays of 5-dword records (order as in the file: exe object +0x16 then +0x14).
+    /// `MTHD`: two arrays of 5-dword records.
+    /// exe: FUN_004195b0
     pub fn methods(&self, data: &[u8]) -> Result<Option<[Vec<MethodRec>; 2]>> {
         self.two_arrays::<5>(data, b"MTHD")
     }
 
     /// `FILD`: two arrays of 4-dword records.
+    /// `FILD`: two arrays of 4-dword records.
+    /// exe: FUN_00419b60
     pub fn fields(&self, data: &[u8]) -> Result<Option<[Vec<FieldRec>; 2]>> {
         self.two_arrays::<4>(data, b"FILD")
     }
 
+    /// `CLSS`: 5 head dwords + tail dwords.
+    /// exe: FUN_00411b20
     pub fn class_rec(&self, data: &[u8]) -> Result<ClassRec> {
         let mut r = self
             .chunk_reader(data, b"CLSS")

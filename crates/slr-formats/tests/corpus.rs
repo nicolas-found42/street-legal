@@ -1,110 +1,150 @@
-//! Corpus-wide verification against the read-only reference install.
-//! Skipped (with a note) when `reference/raw` is absent. Override with `SLR_REFERENCE`.
+//! Corpus-wide verification, two profiles.
+//!
+//! - Stock (default): the clean install in `stock/` (override with `SLR_STOCK`).
+//!   This is the source of truth for stock parity.
+//! - Modded compatibility: the modded install in `reference/raw`
+//!   (override with `SLR_REFERENCE`).
+//!
+//! Each profile's tests skip with a note when its directory is absent, so
+//! `cargo test --workspace` stays green on machines without the data
+//! (CI, fresh worktrees).
 
 use slr_formats::{cfg, corpus, rpak, tufa};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn root() -> Option<PathBuf> {
+/// Expected corpus counts for one profile, derived by running the parsers.
+struct Counts {
+    /// Total files walked (`.DS_Store` excluded).
+    files: usize,
+    rpk: usize,
+    scx: usize,
+    scx_v3: usize,
+    scy: usize,
+    scx_v3_groups: usize,
+    scx_v3_verts: usize,
+    scx_v3_tris: usize,
+    class_files: usize,
+    cfg: usize,
+    sdat: usize,
+    /// All TUFA modules, including the older-version ones the exe cannot read.
+    tufa_modules: usize,
+    /// Version 0x11ae1 modules (the ones `pool`/`methods`/`trees` decode).
+    modules: usize,
+    pool_entries: usize,
+    methods: usize,
+    fields: usize,
+    bodies: usize,
+    nodes: usize,
+    /// Older-version (0x108f5) modules the stock exe cannot decode.
+    unsupported: usize,
+}
+
+// Derived 2026-10-17 by running the parsers over the clean stock install.
+const STOCK: Counts = Counts {
+    files: 7858,
+    rpk: 61,
+    scx: 2921,
+    scx_v3: 390,
+    scy: 13,
+    scx_v3_groups: 961,
+    scx_v3_verts: 178473,
+    scx_v3_tris: 70247,
+    class_files: 1452,
+    cfg: 1012,
+    sdat: 9,
+    tufa_modules: 1502,
+    modules: 1491,
+    pool_entries: 94703,
+    methods: 3414,
+    fields: 2730,
+    bodies: 5262,
+    nodes: 269034,
+    unsupported: 11,
+};
+
+// The modded install keeps the previously asserted counts.
+const MODDED: Counts = Counts {
+    files: 8411,
+    rpk: 80,
+    scx: 3028,
+    scx_v3: 441,
+    scy: 21,
+    scx_v3_groups: 1102,
+    scx_v3_verts: 288510,
+    scx_v3_tris: 107663,
+    class_files: 1501,
+    cfg: 1053,
+    sdat: 11,
+    tufa_modules: 1557,
+    modules: 1546,
+    pool_entries: 102711,
+    methods: 3591,
+    fields: 3531,
+    bodies: 5816,
+    nodes: 320522,
+    unsupported: 11,
+};
+
+fn stock_root() -> Option<PathBuf> {
+    let p = std::env::var_os("SLR_STOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stock"));
+    p.is_dir().then_some(p)
+}
+
+fn modded_root() -> Option<PathBuf> {
     let p = std::env::var_os("SLR_REFERENCE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../reference/raw"));
     p.is_dir().then_some(p)
 }
 
-#[test]
-fn every_parsable_file_in_the_reference_install_parses() {
-    let Some(root) = root() else {
-        eprintln!("reference/raw not present; skipping");
-        return;
-    };
-    let rep = corpus::verify(&root).unwrap();
-    eprintln!("{rep:#?}");
-    assert!(rep.failures.is_empty(), "failures: {:#?}", rep.failures);
-    assert_eq!(rep.files, 8411);
-    assert_eq!(rep.by_ext["rpk"], 80);
-    assert_eq!(rep.parsed["rpk"], 80);
-    assert_eq!(rep.by_ext["scx"], 3028);
-    assert_eq!(rep.scx_v3 + rep.scx_v4, 3028);
-    assert_eq!(rep.by_ext["class"], 1501);
-    assert_eq!(rep.parsed["class"], 1501);
-    assert_eq!(rep.parsed["cfg"], 1053);
-    assert_eq!(rep.parsed["sdat"], 11);
+/// Roots of the profiles present on this machine, stock first.
+fn present() -> Vec<(&'static str, PathBuf)> {
+    [("stock", stock_root()), ("modded", modded_root())]
+        .into_iter()
+        .filter_map(|(name, root)| root.map(|p| (name, p)))
+        .collect()
 }
 
-#[test]
-fn cars_rpk_tree_is_sane() {
-    let Some(root) = root() else { return };
-    let pk = rpak::Package::open(root.join("cars.rpk")).unwrap();
-    assert_eq!(pk.links[0].name, "system.rpk");
-    assert_eq!(pk.entries.len(), 110);
-    let liberty = pk.entries.iter().find(|e| e.alias == "Liberty").unwrap();
-    assert!(!pk.descriptor(liberty).is_empty());
-}
-
-#[test]
-fn engine_block_class_names_its_base() {
-    let Some(root) = root() else { return };
-    let data =
-        std::fs::read(root.join("parts/engines/Baiern_Emer/scripts/Emer_StreetGT_block.class"))
-            .unwrap();
-    let mods = tufa::parse(&data).unwrap();
-    assert_eq!(mods[0].version, 0x11ae1);
-    assert_eq!(
-        mods[0].class_name(),
-        Some("java.game.parts.engines.Baiern_Emer.Emer_StreetGT_block")
+fn check_verify(name: &str, root: &Path, c: &Counts) {
+    let rep = corpus::verify(root).unwrap();
+    eprintln!("{name}: {rep:#?}");
+    assert!(
+        rep.failures.is_empty(),
+        "{name} failures: {:#?}",
+        rep.failures
     );
+    assert_eq!(rep.files, c.files, "{name} file count");
+    assert_eq!(rep.by_ext["rpk"], c.rpk, "{name} rpk files");
+    assert_eq!(rep.parsed["rpk"], c.rpk, "{name} parsed rpk");
+    assert_eq!(rep.by_ext["scx"], c.scx, "{name} scx files");
     assert_eq!(
-        mods[0].base_class(),
-        Some("java.game.parts.enginepart.block.block_inline.Block_Inline_OHC")
+        rep.scx_v3 + rep.scx_v4,
+        c.scx + c.scy,
+        "{name} scx versions"
     );
+    assert_eq!(rep.scx_v3, c.scx_v3 + c.scy, "{name} scx v3");
+    assert_eq!(rep.scy, c.scy, "{name} scy files");
+    assert_eq!(
+        rep.parsed.get("scy").copied().unwrap_or(0),
+        c.scy,
+        "{name} parsed scy"
+    );
+    assert_eq!(rep.scx_v3_groups, c.scx_v3_groups, "{name} scx v3 groups");
+    assert_eq!(rep.scx_v3_verts, c.scx_v3_verts, "{name} scx v3 verts");
+    assert_eq!(rep.scx_v3_tris, c.scx_v3_tris, "{name} scx v3 tris");
+    assert_eq!(rep.by_ext["class"], c.class_files, "{name} class files");
+    assert_eq!(rep.parsed["class"], c.class_files, "{name} parsed class");
+    assert_eq!(rep.parsed["cfg"], c.cfg, "{name} parsed cfg");
+    assert_eq!(rep.parsed["sdat"], c.sdat, "{name} parsed sdat");
+    assert_eq!(rep.tufa_modules, c.tufa_modules, "{name} tufa modules");
 }
 
-#[test]
-fn all_24_racer_vehicles_decode() {
-    let Some(root) = root() else { return };
-    let mut n = 0;
-    for p in corpus::walk(&root.join("cars/racers")).unwrap() {
-        let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        if name.starts_with("_main_") && name.ends_with(".cfg") {
-            let c = cfg::Cfg::open(&p).unwrap();
-            let v = cfg::VehicleCfg::from_cfg(&c).unwrap_or_else(|| panic!("{name} not a vehicle"));
-            assert_eq!(v.wheels.len(), 4, "{name}");
-            assert!(
-                v.body_mass > 300.0 && v.body_mass < 3000.0,
-                "{name}: {}",
-                v.body_mass
-            );
-            assert_eq!(v.gear_ratios.len(), 5.max(v.gear_ratios.len()));
-            assert!(
-                v.wheels.iter().filter(|w| w.steered()).count() == 2,
-                "{name}"
-            );
-            assert!(v.wheels.iter().any(|w| w.driven()), "{name}");
-            n += 1;
-        }
-    }
-    assert_eq!(n, 24);
-}
-
-#[test]
-fn baiern_coupesport_matches_the_cfg_numbers() {
-    let Some(root) = root() else { return };
-    let c =
-        cfg::Cfg::open(root.join("cars/racers/Baiern_data/scripts/_main_CoupeSport.cfg")).unwrap();
-    let v = cfg::VehicleCfg::from_cfg(&c).unwrap();
-    assert!((v.body_mass - 838.5).abs() < 0.01, "{}", v.body_mass);
-    assert_eq!(v.gear_ratios, vec![4.2, 2.5, 1.3, 1.0, 0.758]);
-    assert_eq!(v.reverse_ratio, -4.4);
-    assert_eq!(v.rearend_ratio, 4.41);
-    assert_eq!(v.wheels[0].radius, 0.315);
-}
-
-#[test]
-fn every_tufa_tree_decodes_exactly() {
-    let Some(root) = root() else { return };
+fn check_tufa_trees(name: &str, root: &Path, c: &Counts) {
     let (mut classes, mut bodies, mut nodes) = (0, 0, 0);
     let (mut unsupported, mut mod_incompatible) = (0, 0);
-    for path in corpus::walk(&root).unwrap() {
+    for path in corpus::walk(root).unwrap() {
         if path.extension().and_then(|e| e.to_str()) != Some("class") {
             continue;
         }
@@ -122,25 +162,23 @@ fn every_tufa_tree_decodes_exactly() {
                     if p.contains("MW_Mod") || p.contains("DestructionTools") {
                         mod_incompatible += 1; // compiled by a newer compiler than the stock exe's
                     } else {
-                        panic!("{}: {e}", path.display());
+                        panic!("{name} {}: {e}", path.display());
                     }
                 }
             }
         }
     }
-    eprintln!("classes {classes} bodies {bodies} nodes {nodes} unsupported {unsupported} mod_incompatible {mod_incompatible}");
-    // 1,546 modules decode exactly (5,816 bodies, 320,522 nodes). The only older-version (0x108f5)
-    // modules are the 11 in system/Scripts/render/osd/Dialog.class, whose encoding the exe cannot read.
-    assert_eq!((classes, bodies, nodes), (1546, 5816, 320_522));
-    assert_eq!((unsupported, mod_incompatible), (11, 0));
+    eprintln!("{name} classes {classes} bodies {bodies} nodes {nodes} unsupported {unsupported} mod_incompatible {mod_incompatible}");
+    // The only older-version (0x108f5) modules are the 11 in
+    // system/Scripts/render/osd/Dialog.class, whose encoding the exe cannot read.
+    assert_eq!((classes, bodies, nodes), (c.modules, c.bodies, c.nodes));
+    assert_eq!((unsupported, mod_incompatible), (c.unsupported, 0));
 }
 
-#[test]
-fn every_tufa_constant_pool_parses_exactly() {
-    let Some(root) = root() else { return };
+fn check_tufa_pool(name: &str, root: &Path, c: &Counts) {
     let (mut modules, mut entries) = (0usize, 0usize);
     let mut by_type = [0usize; 8];
-    for path in corpus::walk(&root).unwrap() {
+    for path in corpus::walk(root).unwrap() {
         if path.extension().and_then(|e| e.to_str()) != Some("class") {
             continue;
         }
@@ -151,7 +189,7 @@ fn every_tufa_constant_pool_parses_exactly() {
             }
             let pool = m
                 .pool(&data)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
             modules += 1;
             entries += pool.len();
             for e in &pool {
@@ -168,15 +206,14 @@ fn every_tufa_constant_pool_parses_exactly() {
             }
         }
     }
-    eprintln!("pool modules {modules} entries {entries} by_type {by_type:?}");
-    assert_eq!(modules, 1546);
+    eprintln!("{name} pool modules {modules} entries {entries} by_type {by_type:?}");
+    assert_eq!(modules, c.modules, "{name} pool modules");
+    assert_eq!(entries, c.pool_entries, "{name} pool entries");
 }
 
-#[test]
-fn every_tufa_method_field_and_class_chunk_parses_exactly() {
-    let Some(root) = root() else { return };
+fn check_tufa_methods_fields(name: &str, root: &Path, c: &Counts) {
     let (mut mods, mut methods, mut fields) = (0usize, 0usize, 0usize);
-    for path in corpus::walk(&root).unwrap() {
+    for path in corpus::walk(root).unwrap() {
         if path.extension().and_then(|e| e.to_str()) != Some("class") {
             continue;
         }
@@ -188,20 +225,193 @@ fn every_tufa_method_field_and_class_chunk_parses_exactly() {
             mods += 1;
             if let Some(a) = m
                 .methods(&data)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()))
             {
                 methods += a[0].len() + a[1].len();
             }
             if let Some(a) = m
                 .fields(&data)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()))
             {
                 fields += a[0].len() + a[1].len();
             }
             m.class_rec(&data)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
         }
     }
-    eprintln!("modules {mods} methods {methods} fields {fields}");
-    assert_eq!(mods, 1546);
+    eprintln!("{name} modules {mods} methods {methods} fields {fields}");
+    assert_eq!(mods, c.modules, "{name} method/field modules");
+    assert_eq!(methods, c.methods, "{name} methods");
+    assert_eq!(fields, c.fields, "{name} fields");
+}
+
+#[test]
+fn stock_install_parses_cleanly() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_verify("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_install_parses_cleanly() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_verify("modded", &root, &MODDED);
+}
+
+#[test]
+fn stock_tufa_trees_decode_exactly() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_tufa_trees("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_tufa_trees_decode_exactly() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_tufa_trees("modded", &root, &MODDED);
+}
+
+#[test]
+fn stock_tufa_constant_pool_parses_exactly() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_tufa_pool("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_tufa_constant_pool_parses_exactly() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_tufa_pool("modded", &root, &MODDED);
+}
+
+#[test]
+fn stock_tufa_method_field_and_class_chunk_parses_exactly() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_tufa_methods_fields("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_tufa_method_field_and_class_chunk_parses_exactly() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_tufa_methods_fields("modded", &root, &MODDED);
+}
+
+#[test]
+fn cars_rpk_tree_is_sane() {
+    let profiles = present();
+    if profiles.is_empty() {
+        eprintln!("no corpus present; skipping");
+        return;
+    }
+    for (name, root) in &profiles {
+        let pk = rpak::Package::open(root.join("cars.rpk")).unwrap();
+        assert_eq!(pk.links[0].name, "system.rpk", "{name}");
+        assert_eq!(pk.entries.len(), 110, "{name}");
+        let liberty = pk.entries.iter().find(|e| e.alias == "Liberty").unwrap();
+        assert!(!pk.descriptor(liberty).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn engine_block_class_names_its_base() {
+    let profiles = present();
+    if profiles.is_empty() {
+        eprintln!("no corpus present; skipping");
+        return;
+    }
+    for (name, root) in &profiles {
+        let data =
+            std::fs::read(root.join("parts/engines/Baiern_Emer/scripts/Emer_StreetGT_block.class"))
+                .unwrap();
+        let mods = tufa::parse(&data).unwrap();
+        assert_eq!(mods[0].version, 0x11ae1, "{name}");
+        assert_eq!(
+            mods[0].class_name(),
+            Some("java.game.parts.engines.Baiern_Emer.Emer_StreetGT_block"),
+            "{name}"
+        );
+        assert_eq!(
+            mods[0].base_class(),
+            Some("java.game.parts.enginepart.block.block_inline.Block_Inline_OHC"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn all_24_racer_vehicles_decode() {
+    let profiles = present();
+    if profiles.is_empty() {
+        eprintln!("no corpus present; skipping");
+        return;
+    }
+    for (name, root) in &profiles {
+        let mut n = 0;
+        for p in corpus::walk(&root.join("cars/racers")).unwrap() {
+            let file = p.file_name().unwrap().to_string_lossy().into_owned();
+            if file.starts_with("_main_") && file.ends_with(".cfg") {
+                let c = cfg::Cfg::open(&p).unwrap();
+                let v = cfg::VehicleCfg::from_cfg(&c)
+                    .unwrap_or_else(|| panic!("{name} {file} not a vehicle"));
+                assert_eq!(v.wheels.len(), 4, "{name} {file}");
+                assert!(
+                    v.body_mass > 300.0 && v.body_mass < 3000.0,
+                    "{name} {file}: {}",
+                    v.body_mass
+                );
+                assert_eq!(
+                    v.gear_ratios.len(),
+                    5.max(v.gear_ratios.len()),
+                    "{name} {file}"
+                );
+                assert!(
+                    v.wheels.iter().filter(|w| w.steered()).count() == 2,
+                    "{name} {file}"
+                );
+                assert!(v.wheels.iter().any(|w| w.driven()), "{name} {file}");
+                n += 1;
+            }
+        }
+        assert_eq!(n, 24, "{name} racer count");
+    }
+}
+
+#[test]
+fn baiern_coupesport_matches_the_cfg_numbers() {
+    let profiles = present();
+    if profiles.is_empty() {
+        eprintln!("no corpus present; skipping");
+        return;
+    }
+    for (name, root) in &profiles {
+        let c = cfg::Cfg::open(root.join("cars/racers/Baiern_data/scripts/_main_CoupeSport.cfg"))
+            .unwrap();
+        let v = cfg::VehicleCfg::from_cfg(&c).unwrap();
+        assert!((v.body_mass - 838.5).abs() < 0.01, "{name} {}", v.body_mass);
+        assert_eq!(v.gear_ratios, vec![4.2, 2.5, 1.3, 1.0, 0.758], "{name}");
+        assert_eq!(v.reverse_ratio, -4.4, "{name}");
+        assert_eq!(v.rearend_ratio, 4.41, "{name}");
+        assert_eq!(v.wheels[0].radius, 0.315, "{name}");
+    }
 }
