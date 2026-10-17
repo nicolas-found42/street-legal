@@ -20,18 +20,23 @@
 //! Chunk tags seen in the corpus: `RSD\0`, `PHYS`, `POLY` (plus `EXTP` in the city root
 //! descriptor only). Layouts below mirror the exe's map loader:
 //!
-//! - `RSD\0`: text lines (`gametype ...`, `params ...`, sometimes `flags ...`); the
-//!   `0x352`/`0x15` gametypes carry opaque token bytes instead of text.
+//! - `RSD\0`: text lines (`gametype ...`, `params ...`); the `0x352`/`0x15` gametypes
+//!   carry opaque token bytes instead of text. Named-placement (`b == 0x21`) records
+//!   each own exactly one text `RSD` whose `params x,y,z` is the placement point.
 //!
 //!   exe: FUN_0053dee0 (RSD line parse via FUN_005d7190/FUN_00551240)
 //! - `PHYS`: `u32 nplanes`, then `nplanes` x 7-dword planes
-//!   (`u32 w0`, `u32 i0/i1/i2`, `f32 nx/ny/nz`), then `u32 nverts`, then `nverts`
-//!   x `f32 x/y/z` vertices. `w0`/`i*` meanings are open; positions are centimetres.
+//!   (`u32 w0`, `u32 i0/i1/i2` vertex indices, `f32 nx/ny/nz` unit normal), then
+//!   `u32 nverts`, then `nverts` x `f32 x/y/z` vertices (centimetres). Every plane's
+//!   indices land inside the chunk's own vertex array; the normal is perpendicular
+//!   to the indexed triangle and the winding is uniform (CCW into the normal).
 //!
 //!   exe: FUN_0053dee0 (PHYS branch: n1 x 7 dwords, n2 x 3 dwords)
-//! - `POLY`: `u32 1`, `u32 ngroups`, then per group `u32 f0(=1)`, `u32 nvert`,
-//!   `u32 nidx`, `nvert` x 56-byte vertices, `nidx` x 12-byte index triples.
-//!   Vertex attribute split is open (first 6 floats read as position+normal).
+//! - `POLY`: `u32 1`, `u32 ngroups` (always 1 in the corpus; 1,769 chunks), then per
+//!   group `u32 mat`, `u32 nvert`, `u32 ntri`, `nvert` x 56-byte vertices, `ntri` x
+//!   12-byte triangle index triples. Vertex bytes decode as position (3f, cm) +
+//!   normal (3f, unit) + color (u32 diffuse `A8R8G8B8`, u32 specular-gloss remainder)
+//!   + uv (2f) + reserved (2 u32, zero in the corpus) + second coords (2f).
 //!
 //!   exe: FUN_0053dee0 (POLY branch: groups of 14-dword verts, 3-dword indices)
 //! - `EXTP`: `size/4` x `u32` exterior-package type ids.
@@ -40,7 +45,8 @@
 //!
 //! Record field offsets (`a`/`b` at +8/+9, `x`/`y` at +14/+18, name length at +22,
 //! name/bbox at +23, stride `71+n`) mirror the exe's record parser; `k1` chains match
-//! (`k1` of a child equals the parent record's `k2`).
+//! (`k1` of a child range's records equals the parent record's `k2`; `k2` values are
+//! globally unique per map).
 //! exe: FUN_00544010 (record walk, stride puVar2+0xc)
 
 use slr_fmt_core::reader::Reader;
@@ -166,13 +172,15 @@ pub enum Chunk {
         bytes: Vec<u8>,
         lines: Option<Vec<String>>,
     },
-    /// `PHYS`: collision planes plus vertices. `plane = [w0, i0, i1, i2]` semantics open.
+    /// `PHYS`: collision planes plus vertices. Each plane's `refs` are indices into
+    /// `verts`; `normal` is the unit face normal of the indexed triangle.
     Phys {
         offset: usize,
         planes: Vec<PhysPlane>,
         verts: Vec<[f32; 3]>,
     },
-    /// `POLY`: render groups. Vertex attribute split open; kept as raw 56-byte verts.
+    /// `POLY`: render groups. See [`PolyVertex`] for the 56-byte vertex split;
+    /// `indices` holds triangle index triples into `verts`.
     Poly {
         offset: usize,
         groups: Vec<PolyGroup>,
@@ -233,7 +241,59 @@ impl Chunk {
     }
 }
 
-/// One `PHYS` plane: open id word, three open refs, unit-ish normal.
+impl Chunk {
+    /// Placement point of a text `RSD` chunk: the `x,y,z` head of its `params`
+    /// line. Returns `None` for binary (`0x352`/`0x15`) chunks.
+    ///
+    /// exe: `FUN_0053dee0` keeps the `params` line bytes (`FUN_00551240` with
+    /// `s___s__2048s`) alongside the gametype id; the first three floats are the
+    /// placement position the `b == 0x21` record's bounds are built around.
+    #[must_use]
+    pub fn rsd_point(&self) -> Option<[f32; 3]> {
+        match self {
+            Chunk::Rsd { lines, .. } => rsd_params_point(lines.as_ref()?),
+            _ => None,
+        }
+    }
+
+    /// Gametype id of a text `RSD` chunk (`gametype 0x...` head line).
+    /// Returns `None` for binary chunks.
+    #[must_use]
+    pub fn rsd_gametype(&self) -> Option<u32> {
+        match self {
+            Chunk::Rsd { lines, .. } => rsd_gametype(lines.as_ref()?),
+            _ => None,
+        }
+    }
+}
+
+/// Parse the `gametype 0x...` head line of a text `RSD` chunk.
+fn rsd_gametype(lines: &[String]) -> Option<u32> {
+    let head = lines.first()?;
+    let hex = head
+        .strip_prefix("gametype 0x")
+        .or_else(|| head.strip_prefix("gametype "))?;
+    u32::from_str_radix(hex.trim_end_matches(['\r', ' ', '\t']), 16).ok()
+}
+
+/// Parse the `x,y,z` head of a text `RSD` chunk's `params` line.
+fn rsd_params_point(lines: &[String]) -> Option<[f32; 3]> {
+    let params = lines.iter().find(|l| l.starts_with("params "))?;
+    let mut nums = params["params ".len()..].split(',');
+    let (x, y, z) = (
+        nums.next()?.trim().parse().ok()?,
+        nums.next()?.trim().parse().ok()?,
+        nums.next()?.trim().parse().ok()?,
+    );
+    [x, y, z].into()
+}
+
+/// One `PHYS` plane: material-ish `w0` word, three vertex indices, unit normal.
+///
+/// `refs` indexes the parent chunk's own vertex array (always in range in the
+/// corpus); `normal` is the unit face normal of that triangle (dot with either
+/// edge ~0, winding uniform CCW into the normal). `w0`'s meaning is open: it is
+/// a small id (0-8 dominate) but varies independently of plane/vertex counts.
 #[derive(Debug, Clone)]
 pub struct PhysPlane {
     pub w0: u32,
@@ -241,12 +301,140 @@ pub struct PhysPlane {
     pub normal: [f32; 3],
 }
 
-/// One `POLY` group: raw vertices (56 bytes each) and index triples (12 bytes each).
+impl PhysPlane {
+    /// Edge lengths of the indexed triangle (centimetres), or `None` when a ref
+    /// is out of range (never in the corpus).
+    #[must_use]
+    pub fn edge_lengths(&self, verts: &[[f32; 3]]) -> Option<[f32; 3]> {
+        let [a, b, c] = [
+            verts.get(self.refs[0] as usize)?,
+            verts.get(self.refs[1] as usize)?,
+            verts.get(self.refs[2] as usize)?,
+        ];
+        let dist = |p: &[f32; 3], q: &[f32; 3]| {
+            ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2)).sqrt()
+        };
+        Some([dist(a, b), dist(b, c), dist(c, a)])
+    }
+}
+
+/// One decoded `POLY` vertex (56 bytes on disk).
+///
+/// ```text
+/// +00 pos[3f]  position, centimetres (world bounds per map)
+/// +12 nrm[3f]  unit surface normal
+/// +24 dif[u32]  diffuse color A8R8G8B8 (near-white tints dominate)
+/// +28 spc[u32]  specular-gloss remainder (`0xFFFFFFFF` on flat faces)
+/// +32 uv[2f]   texture coords (world-scale on roads, 0..1 on props)
+/// +40 aux[8B]  auxiliary lane, content varies (see below)
+/// +48 q[2f]    second coords (placement-frame xz on roads, zero on props)
+/// ```
+///
+/// The auxiliary lane takes two observed shapes: zeros (most verts), or finite
+/// floats mirroring scaled position/uv magnitudes (city road skirts, test_track
+/// sign quads); a few city2 verts carry small-int tuples such as `(0, 1)`.
+/// Its exact role (second-uv set vs shader params) is open.
+///
+/// Attribute roles for `pos`/`nrm` mirror the SCX v3 vertex head (pos 3f + normal
+/// 3f + uv 2f; `slr-fmt-scx`). The color/uv/aux/second-coords split is
+/// geometric validation, not exe-proven: the exe's POLY branch (`FUN_0053dee0`)
+/// copies 14-dword verts opaquely, and no FVF/stride consumer has been traced.
+#[derive(Debug, Clone, Copy)]
+pub struct PolyVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    /// Diffuse color as `A8R8G8B8`.
+    pub diffuse: u32,
+    /// Second color word (specular/gloss remainder).
+    pub specular: u32,
+    pub uv: [f32; 2],
+    /// Auxiliary 8-byte lane: raw bytes (zeros, float pairs, or small ints).
+    pub aux: [u8; 8],
+    pub second: [f32; 2],
+}
+
+impl PolyVertex {
+    /// Decode one 56-byte vertex body.
+    #[must_use]
+    pub fn decode(raw: &[u8; 56]) -> Self {
+        let f = |o: usize| f32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+        let u = |o: usize| u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+        let mut aux = [0u8; 8];
+        aux.copy_from_slice(&raw[40..48]);
+        Self {
+            pos: [f(0), f(4), f(8)],
+            normal: [f(12), f(16), f(20)],
+            diffuse: u(24),
+            specular: u(28),
+            uv: [f(32), f(36)],
+            aux,
+            second: [f(48), f(52)],
+        }
+    }
+
+    /// Auxiliary lane as two little-endian words.
+    #[must_use]
+    pub fn aux_words(&self) -> [u32; 2] {
+        [
+            u32::from_le_bytes([self.aux[0], self.aux[1], self.aux[2], self.aux[3]]),
+            u32::from_le_bytes([self.aux[4], self.aux[5], self.aux[6], self.aux[7]]),
+        ]
+    }
+
+    /// Auxiliary lane as two little-endian floats.
+    #[must_use]
+    pub fn aux_floats(&self) -> [f32; 2] {
+        [
+            f32::from_le_bytes([self.aux[0], self.aux[1], self.aux[2], self.aux[3]]),
+            f32::from_le_bytes([self.aux[4], self.aux[5], self.aux[6], self.aux[7]]),
+        ]
+    }
+
+    /// Unit-length check for the normal (exact-zero normals on billboard quads
+    /// excluded by the caller).
+    #[must_use]
+    pub fn normal_len(&self) -> f32 {
+        (self.normal[0].powi(2) + self.normal[1].powi(2) + self.normal[2].powi(2)).sqrt()
+    }
+}
+
+/// One `POLY` group: raw vertices (56 bytes each) and triangle index triples
+/// (12 bytes each) into `verts`.
+///
+/// `mat` (file word `f0`, formerly misread as a group-local count) is a
+/// zero-based material id: it spans `0..ngroups-in-file` per map (city 0..107
+/// over 624 groups, city2 0..74 over 748, ROC 0..41 over 155, test 0..85 over
+/// 242). The exe copies it opaquely (`*puVar8 = uVar6` per group head).
 #[derive(Debug, Clone)]
 pub struct PolyGroup {
-    pub f0: u32,
+    pub mat: u32,
     pub verts: Vec<[u8; 56]>,
     pub indices: Vec<[u8; 12]>,
+}
+
+impl PolyGroup {
+    /// Compatibility alias for the material word (file word `f0`).
+    #[must_use]
+    pub fn f0(&self) -> u32 {
+        self.mat
+    }
+
+    /// Decoded vertices.
+    #[must_use]
+    pub fn decoded(&self) -> Vec<PolyVertex> {
+        self.verts.iter().map(PolyVertex::decode).collect()
+    }
+
+    /// Triangle index triples as `(a, b, c)` vertex indices.
+    pub fn triangles(&self) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+        self.indices.iter().map(|t| {
+            (
+                u32::from_le_bytes([t[0], t[1], t[2], t[3]]),
+                u32::from_le_bytes([t[4], t[5], t[6], t[7]]),
+                u32::from_le_bytes([t[8], t[9], t[10], t[11]]),
+            )
+        })
+    }
 }
 
 pub fn parse_chunk_at(data: &[u8], offset: usize, end: usize) -> Result<(Chunk, usize)> {
@@ -323,7 +511,7 @@ pub fn parse_chunk_at(data: &[u8], offset: usize, end: usize) -> Result<(Chunk, 
             }
             let mut groups = Vec::with_capacity(ngroups);
             for _ in 0..ngroups {
-                let f0 = p.u32()?;
+                let mat = p.u32()?;
                 let nvert = p.u32()? as usize;
                 let nidx = p.u32()? as usize;
                 let mut verts = Vec::with_capacity(nvert);
@@ -334,7 +522,11 @@ pub fn parse_chunk_at(data: &[u8], offset: usize, end: usize) -> Result<(Chunk, 
                 for _ in 0..nidx {
                     indices.push(p.bytes(12)?.try_into().unwrap());
                 }
-                groups.push(PolyGroup { f0, verts, indices });
+                groups.push(PolyGroup {
+                    mat,
+                    verts,
+                    indices,
+                });
             }
             if p.remaining() != 0 {
                 return Err(FormatError::Inconsistent {
