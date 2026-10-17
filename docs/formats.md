@@ -77,3 +77,19 @@ Bodies are script-ordered little-endian records through the exe's `File` natives
 Numbered companions (`<basename>.<i>`, exe `sprintf "%s.%d"`, store `FUN_00484fa0`
 refs `0x485141`/`0x4850f6`) are JFIF JPEGs (`FF D8 FF E0`), one per JPEG slot
 (stock 131 files; e.g. `ROC_GT2_1` has 19 for 19 slots).
+
+## PTX (`.ptx`)
+`u32 0, u32 mip_count, u32 width, u32 height`, then per mip (smallest first, base last)
+`{u32 total, u32 rgb_size, u32 alpha_size, u32 0, f32 level=(index+1)/mip_count}` +
+`u8[total]` payload (`rgb_size` bytes JPEG + `alpha_size` bytes JPEG). `total ==
+rgb_size + alpha_size` everywhere; RGB SOI (`FFD8`) required, alpha SOI required iff
+`alpha_size > 0`. `width`/`height` are the base mip's JPEG (SOF0) dimensions; per-mip
+JPEGs halve down to 4x4 (non-square bases keep aspect, e.g. 128x256 has 4x8..256x512).
+Verified: stock 127/127 and modded 127/127 files, zero leftover (stock 336 mips:
+97 with alpha on every mip, 30 RGB-only; mip counts `{1:90, 5:3, 6:12, 7:17, 8:5}`;
+modded 339 mips `{1:90, 5:3, 6:9, 7:20, 8:5}`). Container ports `FUN_00507110`
+(header words at `res+4/8/0xc`, first entry at `res+0x10`, per-mip advance
+`next = cur + *cur + 0x14`; `texture_size` clamp at `DAT_006188b8` drops high mips),
+per-mip slices feed the JPEG decode request `FUN_00564b50` from `FUN_00506ad0`
+(`payload+0x14`, `rgb_size`) with the alpha branch in `FUN_00506c70`
+(`alpha_size != 0`). JPEG decode is tier D via `zune-jpeg`: dimensions asserted only.
