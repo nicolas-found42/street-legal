@@ -512,6 +512,9 @@ version = "0.1.0"
 [[package]]
 name = "slr-vm"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "slr-world"

@@ -35,7 +35,7 @@
 //!   12-byte triangle index triples. Vertex bytes decode as position (3f, cm) +
 //!   normal (3f, unit) + color (u32 diffuse `A8R8G8B8`, u32 specular-gloss remainder)
 //!   + uv (2f) + reserved (2 u32, zero in the corpus) + second coords (2f)
-//!   (the map loader's POLY branch: groups of 14-dword verts, 3-dword indices).
+//!     (the map loader's POLY branch: groups of 14-dword verts, 3-dword indices).
 //! - `EXTP`: `size/4` x `u32` exterior-package type ids
 //!   (the map loader's EXTP branch).
 //!
