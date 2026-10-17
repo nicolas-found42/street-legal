@@ -15,8 +15,8 @@
 //! `rsd_offset`/`rsd_size` are absolute file offsets of the entry's resource descriptor
 //! text (`sourcefile ...`, `texture ...`), which reference loose files by relative path.
 
-use crate::reader::{latin1_cstr, Reader};
-use crate::{FormatError, Result};
+use slr_fmt_core::reader::{latin1_cstr, Reader};
+use slr_fmt_core::{FormatError, Result};
 
 #[derive(Debug, Clone)]
 pub struct ExternalLink {

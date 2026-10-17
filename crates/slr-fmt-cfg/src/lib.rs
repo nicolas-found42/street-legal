@@ -5,7 +5,7 @@
 //! line carries the importer's resource id). The keyword vocabulary is the one registered
 //! in the native keyword table at `.rdata` 0x0060e2xx (`mass`, `enginepower`, ...).
 
-use crate::Result;
+use slr_fmt_core::Result;
 
 #[derive(Debug, Clone)]
 pub struct Directive {

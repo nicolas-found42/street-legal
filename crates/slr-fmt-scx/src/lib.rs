@@ -14,8 +14,8 @@
 //! 0x40 normal, 0x200 texcoord) place the attributes. Version 3 (441 files, all map pieces)
 //! uses a different record layout and is only header-validated.
 
-use crate::reader::Reader;
-use crate::{FormatError, Result};
+use slr_fmt_core::reader::Reader;
+use slr_fmt_core::{FormatError, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct Mesh {
