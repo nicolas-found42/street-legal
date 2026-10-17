@@ -401,6 +401,13 @@ name = "slr-fmt-texture"
 version = "0.1.0"
 
 [[package]]
+name = "slr-fmt-traffic"
+version = "0.1.0"
+dependencies = [
+ "slr-fmt-core",
+]
+
+[[package]]
 name = "slr-fmt-tufa"
 version = "0.1.0"
 dependencies = [
@@ -416,6 +423,7 @@ dependencies = [
  "slr-fmt-rpak",
  "slr-fmt-scx",
  "slr-fmt-sdat",
+ "slr-fmt-traffic",
  "slr-fmt-tufa",
 ]
 

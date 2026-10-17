@@ -46,3 +46,20 @@ slot of the same id in `_main_*.cfg`: panel origin = chassis slot - panel slot. 
 ## SDAT
 `"SDAT" u32 0x00020100 u32 type` (`CTRL` tag, `0xFEDCBA98` options, `0x88664422` vehicle); body
 plaintext little-endian records, undecoded. Game saves here are JSON (`saves/slot1.json`).
+
+## TRC (`.trc` traffic road graph)
+`u32 version(=1)`, seven raw header words `(53, 218, 484, 1572, 4, 760, 194816)`,
+then an opaque node/link block to the first lane record at `0x62871`, then
+1,473 lane records tiling the file to EOF with zero leftover bytes. Each lane
+record is `u32 N` + `N` 57-byte lane items + trailer (`89 + 57 * N` bytes on the
+1,461 plain records, ending in floats `13.888889, 0.9, NaN`); 12 records carry
+extra bytes past the terminator (the last record absorbs the file's final
+175 bytes, which open with `N=3` but hold no terminator). Totals: 4,864 lane
+items. Section 1 and the header words' exact roles are unproven (the exe's
+route/traffic natives at `0x0048310f`, `0x0048329e`, `0x00483754`,
+`0x00483b65`, `0x00483d03`, `0x00483e68`, `0x00484050`, `0x00484420`,
+`0x00484730` consume the in-memory graph, whose `.trc` reader was not isolated
+from the surrounding container code at `0x00484fa0`/`0x00485190`/`0x00485448`/
+`0x00485870`); the lane framing above is structural (every record obeys
+`len >= 89 + 57 * N` with the terminator present). Decoder:
+`crates/slr-fmt-traffic` (facade `slr_formats::traffic`).

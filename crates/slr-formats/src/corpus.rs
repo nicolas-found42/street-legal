@@ -1,6 +1,6 @@
 //! Whole-install inventory: classify and parse every file under a reference directory.
 
-use crate::{cfg, rpak, scx, sdat, tufa, Result};
+use crate::{cfg, rpak, scx, sdat, traffic, tufa, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,9 @@ pub struct Report {
     pub rpak_entries: usize,
     pub tufa_modules: usize,
     pub vehicle_cfgs: usize,
+    pub trc_files: usize,
+    pub trc_lanes: usize,
+    pub trc_lane_items: usize,
 }
 
 /// Parse every file whose format this crate understands; collect failures.
@@ -78,6 +81,14 @@ pub fn verify(root: &Path) -> Result<Report> {
                 "cfg" => {
                     cfg::Cfg::open(&p).map_err(|e| e.to_string())?;
                     Ok(Some("cfg"))
+                }
+                "trc" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let trc = traffic::parse(&data).map_err(|e| e.to_string())?;
+                    rep.trc_files += 1;
+                    rep.trc_lanes += trc.lanes.len();
+                    rep.trc_lane_items += trc.lanes.iter().map(|l| l.items.len()).sum::<usize>();
+                    Ok(Some("trc"))
                 }
                 _ => {
                     // Extensionless save files start with SDAT.

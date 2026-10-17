@@ -9,7 +9,7 @@
 //! `cargo test --workspace` stays green on machines without the data
 //! (CI, fresh worktrees).
 
-use slr_formats::{cfg, corpus, rpak, tufa};
+use slr_formats::{cfg, corpus, rpak, traffic, tufa};
 use std::path::{Path, PathBuf};
 
 /// Expected corpus counts for one profile, derived by running the parsers.
@@ -33,6 +33,12 @@ struct Counts {
     nodes: usize,
     /// Older-version (0x108f5) modules the stock exe cannot decode.
     unsupported: usize,
+    /// `.trc` traffic graph files (all parse with zero leftover bytes).
+    trc: usize,
+    /// Lane records across all `.trc` files.
+    trc_lanes: usize,
+    /// Lane items across all `.trc` files.
+    trc_lane_items: usize,
 }
 
 // Derived 2026-10-17 by running the parsers over the clean stock install.
@@ -52,6 +58,9 @@ const STOCK: Counts = Counts {
     bodies: 5262,
     nodes: 269034,
     unsupported: 11,
+    trc: 1,
+    trc_lanes: 1473,
+    trc_lane_items: 4864,
 };
 
 // The modded install keeps the previously asserted counts.
@@ -71,6 +80,9 @@ const MODDED: Counts = Counts {
     bodies: 5816,
     nodes: 320522,
     unsupported: 11,
+    trc: 1,
+    trc_lanes: 1473,
+    trc_lane_items: 4864,
 };
 
 fn stock_root() -> Option<PathBuf> {
@@ -114,6 +126,44 @@ fn check_verify(name: &str, root: &Path, c: &Counts) {
     assert_eq!(rep.parsed["cfg"], c.cfg, "{name} parsed cfg");
     assert_eq!(rep.parsed["sdat"], c.sdat, "{name} parsed sdat");
     assert_eq!(rep.tufa_modules, c.tufa_modules, "{name} tufa modules");
+    assert_eq!(rep.trc_files, c.trc, "{name} trc files");
+    assert_eq!(rep.trc_lanes, c.trc_lanes, "{name} trc lanes");
+    assert_eq!(
+        rep.trc_lane_items, c.trc_lane_items,
+        "{name} trc lane items"
+    );
+}
+
+fn check_trc(name: &str, root: &Path, c: &Counts) {
+    let (mut files, mut lanes, mut items) = (0, 0, 0);
+    for path in corpus::walk(root).unwrap() {
+        if path.extension().and_then(|e| e.to_str()) != Some("trc") {
+            continue;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let trc =
+            traffic::parse(&data).unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
+        // Zero leftover bytes: section 1 plus every lane record tile the file.
+        let mut pos = 32 + trc.section1.len();
+        for l in &trc.lanes {
+            assert_eq!(
+                l.offset,
+                pos,
+                "{name} {} lane at {:#x}",
+                path.display(),
+                l.offset
+            );
+            pos += 4 + l.items.len() * traffic::ITEM_LEN + l.trailer.len();
+        }
+        assert_eq!(pos, data.len(), "{name} {} leftover bytes", path.display());
+        files += 1;
+        lanes += trc.lanes.len();
+        items += trc.lanes.iter().map(|l| l.items.len()).sum::<usize>();
+    }
+    eprintln!("{name} trc files {files} lanes {lanes} items {items}");
+    assert_eq!(files, c.trc, "{name} trc files");
+    assert_eq!(lanes, c.trc_lanes, "{name} trc lanes");
+    assert_eq!(items, c.trc_lane_items, "{name} trc lane items");
 }
 
 fn check_tufa_trees(name: &str, root: &Path, c: &Counts) {
@@ -389,4 +439,22 @@ fn baiern_coupesport_matches_the_cfg_numbers() {
         assert_eq!(v.rearend_ratio, 4.41, "{name}");
         assert_eq!(v.wheels[0].radius, 0.315, "{name}");
     }
+}
+
+#[test]
+fn stock_trc_parses_with_zero_leftover() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_trc("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_trc_parses_with_zero_leftover() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_trc("modded", &root, &MODDED);
 }
