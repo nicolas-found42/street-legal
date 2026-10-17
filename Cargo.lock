@@ -397,6 +397,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slr-fmt-ground"
+version = "0.1.0"
+dependencies = [
+ "slr-fmt-core",
+]
+
+[[package]]
 name = "slr-fmt-rpak"
 version = "0.1.0"
 dependencies = [
@@ -420,6 +427,13 @@ dependencies = [
 [[package]]
 name = "slr-fmt-sound"
 version = "0.1.0"
+
+[[package]]
+name = "slr-fmt-spline"
+version = "0.1.0"
+dependencies = [
+ "slr-fmt-core",
+]
 
 [[package]]
 name = "slr-fmt-texture"
@@ -450,9 +464,11 @@ version = "0.1.0"
 dependencies = [
  "slr-fmt-cfg",
  "slr-fmt-core",
+ "slr-fmt-ground",
  "slr-fmt-rpak",
  "slr-fmt-scx",
  "slr-fmt-sdat",
+ "slr-fmt-spline",
  "slr-fmt-traffic",
  "slr-fmt-tufa",
 ]
