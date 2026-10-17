@@ -57,8 +57,26 @@ slot of the same id in `_main_*.cfg`: panel origin = chassis slot - panel slot. 
 `meshes/<panel>.scx`. Validated by the corpus test (24 cars, plausible dimensions, 4.4k-7k tris).
 
 ## SDAT
-`"SDAT" u32 0x00020100 u32 type` (`CTRL` tag, `0xFEDCBA98` options, `0x88664422` vehicle); body
-plaintext little-endian records, undecoded. Game saves here are JSON (`saves/slot1.json`).
+`"SDAT" u32 0x00020100 u32 type` (`CTRL` tag, `0xFEDCBA98` options, `0x88664422` vehicle).
+Bodies are script-ordered little-endian records through the exe's `File` natives
+(`File.write(int)` `FUN_00485b20`, `write(float)` `FUN_00485bc0`,
+`write(String)` `LAB_00485fd0` = `u32 len` + bytes incl. NUL,
+`write(ResourceRef)` `FUN_00485c60` = `u32`, readers `FUN_00485b70`/`FUN_00485c10`/
+`0x486060`/`FUN_00485ea0`):
+- options: `Config.saveConfig`/`loadConfig` (`system/Scripts/util/Config.class`):
+  `(id=12, ver=0)`, one word per field (stock 37 fields, `windowed` not on disk;
+  modded `Config.class` 42 fields), footer `[0, 0, 8]`.
+- controls: `ControlSet.save`/`load` (`system/Scripts/io/ControlSet.class`):
+  `(id=16, ver=2)`, device-name strings, `u32` count, 78 structs of
+  `{group, vaxisID, deviceID, axisID: u32, from_min/max, to_min/max, dead_zone: f32}`,
+  `vasp` vector (`u32` count + `{id: u32, 5x f32}`), footer `[0, 0, 8]`.
+- vehicle: `Vehicle.save`/`load` (`sl/Scripts/game/Vehicle.class`): `(id=5, ver)`,
+  the `Part.save` part-record run (interior slot grammar open), the JPEG-slot run
+  (`[index, 7, 0]` triples), the resource table (`u32` count + `(index, len, path)`
+  with dense 1-based indices, `RPK` paths for `resID` words), and a trailing `u32`.
+Numbered companions (`<basename>.<i>`, exe `sprintf "%s.%d"`, store `FUN_00484fa0`
+refs `0x485141`/`0x4850f6`) are JFIF JPEGs (`FF D8 FF E0`), one per JPEG slot
+(stock 131 files; e.g. `ROC_GT2_1` has 19 for 19 slots).
 
 ## PTX (`.ptx`)
 `u32 0, u32 mip_count, u32 width, u32 height`, then per mip (smallest first, base last)
