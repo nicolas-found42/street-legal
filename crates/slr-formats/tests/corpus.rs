@@ -9,7 +9,7 @@
 //! `cargo test --workspace` stays green on machines without the data
 //! (CI, fresh worktrees).
 
-use slr_formats::{cfg, corpus, rpak, traffic, tufa};
+use slr_formats::{cfg, corpus, pedestrian, rpak, traffic, tufa};
 use std::path::{Path, PathBuf};
 
 /// Expected corpus counts for one profile, derived by running the parsers.
@@ -43,6 +43,16 @@ struct Counts {
     trc_lanes: usize,
     /// Lane items across all `.trc` files.
     trc_lane_items: usize,
+    /// `.walk` pedestrian-path files (all lines decode to field level).
+    walk: usize,
+    /// `.walk` lines across all `.walk` files.
+    walk_lines: usize,
+    /// Leaf index references across all `.walk` lines.
+    walk_leaf_indices: usize,
+    /// `.rest` pedestrian rest-area files (all lines decode to field level).
+    rest: usize,
+    /// `.rest` lines across all `.rest` files.
+    rest_lines: usize,
 }
 
 // Derived 2026-10-17 by running the parsers over the clean stock install.
@@ -69,6 +79,11 @@ const STOCK: Counts = Counts {
     trc: 1,
     trc_lanes: 1473,
     trc_lane_items: 4864,
+    walk: 1,
+    walk_lines: 1799,
+    walk_leaf_indices: 3718,
+    rest: 1,
+    rest_lines: 755,
 };
 
 // The modded install keeps the previously asserted counts.
@@ -95,6 +110,11 @@ const MODDED: Counts = Counts {
     trc: 1,
     trc_lanes: 1473,
     trc_lane_items: 4864,
+    walk: 1,
+    walk_lines: 1799,
+    walk_leaf_indices: 3718,
+    rest: 1,
+    rest_lines: 755,
 };
 
 fn stock_root() -> Option<PathBuf> {
@@ -152,6 +172,14 @@ fn check_verify(name: &str, root: &Path, c: &Counts) {
     assert_eq!(rep.parsed["sdat"], c.sdat, "{name} parsed sdat");
     assert_eq!(rep.tufa_modules, c.tufa_modules, "{name} tufa modules");
     assert_eq!(rep.trc_files, c.trc, "{name} trc files");
+    assert_eq!(rep.walk_files, c.walk, "{name} walk files");
+    assert_eq!(rep.walk_lines, c.walk_lines, "{name} walk lines");
+    assert_eq!(
+        rep.walk_leaf_indices, c.walk_leaf_indices,
+        "{name} walk leaf indices"
+    );
+    assert_eq!(rep.rest_files, c.rest, "{name} rest files");
+    assert_eq!(rep.rest_lines, c.rest_lines, "{name} rest lines");
     assert_eq!(rep.trc_lanes, c.trc_lanes, "{name} trc lanes");
     assert_eq!(
         rep.trc_lane_items, c.trc_lane_items,
@@ -365,6 +393,99 @@ fn modded_tufa_method_field_and_class_chunk_parses_exactly() {
         return;
     };
     check_tufa_methods_fields("modded", &root, &MODDED);
+}
+
+fn check_pedestrian(name: &str, root: &Path, c: &Counts) {
+    let (mut wfiles, mut wlines, mut leaf) = (0, 0, 0);
+    for path in corpus::walk(root).unwrap() {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("walk") => {
+                let data = std::fs::read(&path).unwrap();
+                let lines = pedestrian::parse_walk(&data)
+                    .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
+                // Ids dense 1-based; every leaf index addresses a walk line.
+                for (i, l) in lines.iter().enumerate() {
+                    assert_eq!(l.id, i as u32 + 1, "{name} {}", path.display());
+                    for idx in l.leaf_indices() {
+                        assert!(
+                            (1..=lines.len() as u32).contains(&idx),
+                            "{name} {} line {} idx {idx}",
+                            path.display(),
+                            l.id
+                        );
+                    }
+                }
+                wfiles += 1;
+                wlines += lines.len();
+                leaf += lines.iter().map(|l| l.leaf_indices().len()).sum::<usize>();
+            }
+            Some("rest") => {
+                let data = std::fs::read(&path).unwrap();
+                let lines = pedestrian::parse_rest(&data)
+                    .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
+                // Per-area dense 0-based indices.
+                let mut seen: [Vec<u32>; 4] = Default::default();
+                for l in &lines {
+                    seen[l.area as usize].push(l.index);
+                }
+                for (area, want) in seen.iter().enumerate().skip(1) {
+                    if want.is_empty() {
+                        continue;
+                    }
+                    let mut got = want.clone();
+                    got.sort_unstable();
+                    assert_eq!(
+                        got,
+                        (0..got.len() as u32).collect::<Vec<_>>(),
+                        "{name} {} area {area}",
+                        path.display()
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    eprintln!("{name} walk files {wfiles} lines {wlines} leaf indices {leaf}");
+    assert_eq!(wfiles, c.walk, "{name} walk files");
+    assert_eq!(wlines, c.walk_lines, "{name} walk lines");
+    assert_eq!(leaf, c.walk_leaf_indices, "{name} walk leaf indices");
+}
+
+fn check_rest(name: &str, root: &Path, c: &Counts) {
+    let (mut files, mut lines) = (0, 0);
+    for path in corpus::walk(root).unwrap() {
+        if path.extension().and_then(|e| e.to_str()) != Some("rest") {
+            continue;
+        }
+        let data = std::fs::read(&path).unwrap();
+        lines += pedestrian::parse_rest(&data)
+            .unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()))
+            .len();
+        files += 1;
+    }
+    eprintln!("{name} rest files {files} lines {lines}");
+    assert_eq!(files, c.rest, "{name} rest files");
+    assert_eq!(lines, c.rest_lines, "{name} rest lines");
+}
+
+#[test]
+fn stock_pedestrian_areas_decode_exactly() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_pedestrian("stock", &root, &STOCK);
+    check_rest("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_pedestrian_areas_decode_exactly() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_pedestrian("modded", &root, &MODDED);
+    check_rest("modded", &root, &MODDED);
 }
 
 #[test]

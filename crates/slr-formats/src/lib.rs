@@ -12,6 +12,7 @@
 
 pub use slr_fmt_cfg as cfg;
 pub use slr_fmt_core::{FormatError, Result};
+pub use slr_fmt_pedestrian as pedestrian;
 pub use slr_fmt_rpak as rpak;
 pub use slr_fmt_scx as scx;
 pub use slr_fmt_sdat as sdat;
