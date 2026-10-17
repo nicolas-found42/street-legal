@@ -23,6 +23,7 @@ Never writes to reference/ or stock/; the exe is only read.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -62,9 +63,23 @@ def main(argv=None) -> int:
     ap.add_argument("--draws", type=int, default=62500,
                     help="draws per (seed, thread) pair")
     ap.add_argument("--exe", default=None)
+    ap.add_argument("--jsonl", dest="jsonl", nargs="?", default=None, const="auto",
+                    help="also write JSONL rows {seed, thread, draws} - the format "
+                         "crates/slr-platform/tests/rand_oracle.rs reads. No value: "
+                         "re/out/oracle/rand_msvc.jsonl under the repo root. Stdout "
+                         "text is always printed.")
     args = ap.parse_args(argv)
     seeds = _parse_seeds(args.seeds)
     exe = args.exe or _default_exe()
+    jsonl_path = None
+    if args.jsonl:
+        if args.jsonl == "auto":
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            jsonl_path = os.path.join(repo_root, "re", "out", "oracle", "rand_msvc.jsonl")
+        else:
+            jsonl_path = args.jsonl
+        os.makedirs(os.path.dirname(os.path.abspath(jsonl_path)), exist_ok=True)
+        jsonl_fh = open(jsonl_path, "w", encoding="utf-8")
     t0 = time.perf_counter()
     total = 0
     for seed in seeds:
@@ -84,7 +99,14 @@ def main(argv=None) -> int:
                 out.append(str(v))
             total += len(out)
             print(f"SEED {seed:#x} THREAD {t} " + " ".join(out), flush=True)
+            if jsonl_path:
+                jsonl_fh.write(json.dumps({"seed": seed, "thread": t,
+                                           "draws": [int(x) for x in out]}) + "\n")
+                jsonl_fh.flush()
     dt = time.perf_counter() - t0
+    if jsonl_path:
+        jsonl_fh.close()
+        print(f"# jsonl -> {jsonl_path}", file=sys.stderr)
     print(f"# draws={total} seeds={len(seeds)} threads={args.threads} "
           f"per_pair={args.draws} seconds={dt:.1f} oracle=unicorn", file=sys.stderr)
     return 0
