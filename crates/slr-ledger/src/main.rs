@@ -116,6 +116,14 @@ fn collect_suites() -> Vec<Suite> {
             ],
         ),
         (
+            "slr-platform",
+            "rand_oracle",
+            vec![(
+                "rand_matches_oracle_vectors",
+                vec!["FUN_005d73fb", "FUN_005d7408", "FUN_005dd8d3"],
+            )],
+        ),
+        (
             "slr-fmt-scx",
             "corpus",
             vec![
@@ -161,12 +169,19 @@ fn collect(root: &std::path::Path) {
                 eprintln!("error: test {name} did not run in {package} --test {target}");
                 std::process::exit(1);
             });
+            // Suites whose target consumes Unicorn oracle vectors (rather
+            // than the stock corpus) record the `unicorn` oracle.
+            let oracle = if target == "rand_oracle" {
+                "unicorn"
+            } else {
+                "corpus"
+            };
             if exe_symbols.is_empty() {
                 results.push(slr_ledger::TestResult {
                     test: name.to_string(),
                     krate: package.to_string(),
                     exe_symbol: None,
-                    oracle: "corpus".to_string(),
+                    oracle: oracle.to_string(),
                     status: status.clone(),
                     ran_on: today.clone(),
                 });
@@ -176,7 +191,7 @@ fn collect(root: &std::path::Path) {
                     test: name.to_string(),
                     krate: package.to_string(),
                     exe_symbol: Some(sym.to_string()),
-                    oracle: "corpus".to_string(),
+                    oracle: oracle.to_string(),
                     status: status.clone(),
                     ran_on: today.clone(),
                 });
