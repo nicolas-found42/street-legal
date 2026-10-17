@@ -3,7 +3,11 @@ fn main() {
     for p in std::env::args().skip(1) {
         let data = std::fs::read(&p).unwrap();
         match scx::parse(&data).unwrap() {
-            scx::Scx::V3 { size } => println!("{p}: v3 {size} bytes"),
+            scx::Scx::V3 { groups, .. } => {
+                let verts: usize = groups.iter().map(|g| g.mesh.positions.len()).sum();
+                let tris: usize = groups.iter().map(|g| g.mesh.indices.len() / 3).sum();
+                println!("{p}: v3 {} groups {verts} verts {tris} tris", groups.len());
+            }
             scx::Scx::V4 { meshes, .. } => {
                 let mut lo = [f32::MAX; 3];
                 let mut hi = [f32::MIN; 3];
