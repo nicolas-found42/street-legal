@@ -27,7 +27,7 @@ import pefile
 from capstone import CS_ARCH_X86, CS_MODE_32, Cs
 from unicorn import (
     UC_ARCH_X86, UC_HOOK_CODE, UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED,
-    UC_HOOK_MEM_WRITE_UNMAPPED, UC_MODE_32, UC_PROT_ALL, Uc, UcError,
+    UC_HOOK_MEM_WRITE, UC_HOOK_MEM_WRITE_UNMAPPED, UC_MODE_32, UC_PROT_ALL, Uc, UcError,
 )
 from unicorn import x86_const as X
 
@@ -86,7 +86,7 @@ class CallResult:
     fpu_top_depth: int            # number of live FPU stack slots at return
     fpcw: int
     fpsw: int
-    mem_writes: List[Tuple[int, int, int]] = field(default_factory=list)
+    mem_writes: List[Tuple[int, int, int]] = field(default_factory=list)  # (addr, size, value); hook value, pre-write
 
     @property
     def edx_eax(self) -> int:
@@ -120,12 +120,14 @@ class Oracle:
         self.icount = 0
         self.limit = 0
         self._err: Optional[Exception] = None
+        self._mem_writes: List[Tuple[int, int, int]] = []
         self._cs = Cs(CS_ARCH_X86, CS_MODE_32)
         self._load_pe(stub_imports)
         self._setup_regions()
         self._setup_teb()
         self.uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
                          self._on_unmapped)
+        self.uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         self.uc.hook_add(UC_HOOK_CODE, self._on_code)
 
     # ---------------------------------------------------------------- loading
@@ -290,6 +292,12 @@ class Oracle:
         uc.emu_stop()
         return False
 
+    def _on_write(self, uc, access, addr, size, value, ud):
+        # MEM_WRITE fires BEFORE the write lands; `value` is authoritative,
+        # memory still holds the old bytes (verified on bg_176 probe).
+        mask = (1 << (8 * size)) - 1 if size < 8 else (1 << 64) - 1
+        self._mem_writes.append((addr, size, value & mask))
+
     def _on_code(self, uc, address, size, ud):
         self.icount += 1
         if self.limit and self.icount > self.limit:
@@ -365,6 +373,7 @@ class Oracle:
         self.icount = 0
         self.limit = limit
         self._err = None
+        self._mem_writes = []
         if fpu_cw is not None:
             self.fpu_cw = fpu_cw
         self._fpu_init()
@@ -430,7 +439,8 @@ class Oracle:
         return CallResult(
             eax=uc.reg_read(X.UC_X86_REG_EAX), edx=uc.reg_read(X.UC_X86_REG_EDX), st0=st0, st0_raw=raw,
             icount=self.icount, esp_delta=esp_end - (entry_esp + 4), fpu_top_depth=depth,
-            fpcw=uc.reg_read(X.UC_X86_REG_FPCW), fpsw=uc.reg_read(X.UC_X86_REG_FPSW))
+            fpcw=uc.reg_read(X.UC_X86_REG_FPCW), fpsw=uc.reg_read(X.UC_X86_REG_FPSW),
+            mem_writes=list(self._mem_writes))
 
     def _read_st0_raw(self) -> bytes:
         mant, exp = self.uc.reg_read(X.UC_X86_REG_FP0 + self._fpu_top())   # (mantissa:u64, sign|exp:u16)
@@ -478,6 +488,10 @@ def main(argv=None):
     c.add_argument("--conv", default="cdecl", choices=["cdecl", "stdcall", "thiscall", "fastcall"])
     c.add_argument("--this", type=lambda s: int(s, 0))
     c.add_argument("--args", nargs="*", default=[], help="ints, 1.5f (f32), 1.5d (f64)")
+    c.add_argument("--f32p", nargs="*", default=[], metavar="V",
+                   help="allocate one scratch float32 array and pass its address as one extra stack arg (repeatable)")
+    c.add_argument("--u32p", nargs="*", default=[], metavar="V",
+                   help="allocate one scratch uint32 array (ints, 0x-ok) and pass its address as one extra stack arg")
     c.add_argument("--cw", type=lambda s: int(s, 0), default=CW_DEFAULT)
     c.add_argument("--limit", type=int, default=5_000_000)
     c.add_argument("--exe", default=DEFAULT_EXE)
@@ -495,7 +509,16 @@ def main(argv=None):
     o = Oracle(a.exe, fpu_cw=a.cw)
     if a.alloc_hooks:
         o.hook_alloc()
-    r = o.call(a.va, [_parse_arg(x) for x in a.args], a.conv, this=a.this, limit=a.limit)
+    args = [_parse_arg(x) for x in a.args]
+    for vals in a.f32p:
+        p = o.scratch(4 * len(vals.split(",")))
+        o.write_f32s(p, [float(x) for x in vals.split(",")])
+        args.append(p)
+    for vals in a.u32p:
+        p = o.scratch(4 * len(vals.split(",")))
+        o.write_u32s(p, [int(x, 0) for x in vals.split(",")])
+        args.append(p)
+    r = o.call(a.va, args, a.conv, this=a.this, limit=a.limit)
     print(f"eax={r.eax:#010x} edx={r.edx:#010x} st0={r.st0!r} icount={r.icount} esp_delta={r.esp_delta}")
     return 0
 
