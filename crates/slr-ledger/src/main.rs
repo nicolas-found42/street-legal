@@ -124,6 +124,26 @@ fn collect_suites() -> Vec<Suite> {
             )],
         ),
         (
+            "slr-vm",
+            "value_oracle",
+            vec![(
+                "values_match_oracle_vectors",
+                vec![
+                    "FUN_00423c00",
+                    "FUN_00423e90",
+                    "FUN_00423e30",
+                    "FUN_00423ba0",
+                    "FUN_00423d40",
+                    "FUN_0041f7d0",
+                    "FUN_00417570",
+                    "FUN_00417840",
+                    "FUN_00417da0",
+                    "0x515610",
+                    "0x405030",
+                ],
+            )],
+        ),
+        (
             "slr-fmt-scx",
             "corpus",
             vec![
@@ -171,7 +191,7 @@ fn collect(root: &std::path::Path) {
             });
             // Suites whose target consumes Unicorn oracle vectors (rather
             // than the stock corpus) record the `unicorn` oracle.
-            let oracle = if target == "rand_oracle" {
+            let oracle = if target == "rand_oracle" || target == "value_oracle" {
                 "unicorn"
             } else {
                 "corpus"
