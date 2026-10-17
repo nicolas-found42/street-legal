@@ -1,6 +1,33 @@
 [workspace]
 resolver = "2"
-members = ["crates/slr-formats", "crates/slr-core", "crates/slr-game"]
+members = [
+    "crates/slr-audio",
+    "crates/slr-calllog",
+    "crates/slr-core",
+    "crates/slr-d3d9",
+    "crates/slr-fmt-cfg",
+    "crates/slr-fmt-core",
+    "crates/slr-fmt-rpak",
+    "crates/slr-fmt-scx",
+    "crates/slr-fmt-sdat",
+    "crates/slr-fmt-sound",
+    "crates/slr-fmt-texture",
+    "crates/slr-fmt-tufa",
+    "crates/slr-formats",
+    "crates/slr-game",
+    "crates/slr-input",
+    "crates/slr-io",
+    "crates/slr-lang",
+    "crates/slr-ledger",
+    "crates/slr-physics",
+    "crates/slr-platform",
+    "crates/slr-render-natives",
+    "crates/slr-resource",
+    "crates/slr-sound",
+    "crates/slr-vm",
+    "crates/slr-world",
+    "crates/slr-x87",
+]
 
 [workspace.package]
 edition = "2021"

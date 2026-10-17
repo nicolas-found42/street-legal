@@ -15,8 +15,8 @@
 //! (index into the exe's table at VA 0x5f0914, see [`OPWORDS`]), a `u16` operand and, only when the
 //! opword's class nibble is 1, 2 or 4, a `u32` immediate (exe `FUN_0041a5f0` / `FUN_0041a5c0`).
 
-use crate::reader::Reader;
-use crate::{FormatError, Result};
+use slr_fmt_core::reader::Reader;
+use slr_fmt_core::{FormatError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {

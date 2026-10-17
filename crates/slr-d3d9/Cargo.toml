@@ -1,0 +1,5 @@
+[package]
+name = "slr-d3d9"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

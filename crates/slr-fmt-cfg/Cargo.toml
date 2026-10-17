@@ -1,0 +1,8 @@
+[package]
+name = "slr-fmt-cfg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slr-fmt-core = { path = "../slr-fmt-core" }

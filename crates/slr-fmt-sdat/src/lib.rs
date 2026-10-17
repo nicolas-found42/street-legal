@@ -6,8 +6,8 @@
 //! `0x88664422` vehicle). The body is a type-specific sequence of little-endian records;
 //! only the header is decoded here and the body is kept raw.
 
-use crate::reader::Reader;
-use crate::{FormatError, Result};
+use slr_fmt_core::reader::Reader;
+use slr_fmt_core::{FormatError, Result};
 
 pub const VERSION: u32 = 0x0002_0100;
 
