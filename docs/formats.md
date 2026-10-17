@@ -10,6 +10,10 @@ Each layout below is enforced by code in `crates/slr-formats` and the corpus tes
 u32 rsd_size, u8 alias_len, alias, [12 f32 if typeof==1]}`. `rsd_*` are absolute file ranges of
 descriptor text (`sourcefile ...`). Verified: stock 61/61 and modded 80/80 files, header sizes and counts consistent.
 
+Map packages (`maps/city.rpk`, `city2`, `ROC_track`, `test_track`) carry a binary payload
+tree in the root entry's range (record list + `RSD\0`/`PHYS`/`POLY`/`EXTP` chunks, fully
+tiled; see `docs/rpk-payload.md` and `crates/slr-fmt-rpak/src/payload.rs`).
+
 ## INVO (`.scx`, `.scy`)
 v4: `"INVO", 4, chunk_count, 0`, `{offset, tag}` table, contiguous chunks. Tag 5 vertex buffer
 `{?, len, count, fvf}`; stride = `(len-16)/count` (flags 0x1 pos, 0x40 normal, 0x200 uv; strides

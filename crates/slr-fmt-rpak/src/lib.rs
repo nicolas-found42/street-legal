@@ -15,6 +15,8 @@
 //! `rsd_offset`/`rsd_size` are absolute file offsets of the entry's resource descriptor
 //! text (`sourcefile ...`, `texture ...`), which reference loose files by relative path.
 
+pub mod payload;
+
 use slr_fmt_core::reader::{latin1_cstr, Reader};
 use slr_fmt_core::{FormatError, Result};
 
@@ -143,6 +145,35 @@ impl Package {
 
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::parse(std::fs::read(path)?)
+    }
+
+    /// Raw bytes of the whole package (entry headers, descriptors and payloads).
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The payload walk seeds: records of the single `typeof == 1` root entry.
+    /// Returns `(root records, descriptor-chunks)`; the records' `(x, y)` ranges tile
+    /// the payload gap between the root descriptor and the tail descriptors.
+    pub fn map_payload_seed(&self) -> Result<(Vec<payload::Record>, Vec<payload::Chunk>)> {
+        let root = self.entries.iter().find(|e| e.typeof_ == 1).ok_or(
+            slr_fmt_core::FormatError::Inconsistent {
+                what: "map payload root",
+                detail: "no typeof==1 entry".to_string(),
+            },
+        )?;
+        let off = root.rsd_offset as usize;
+        let (records, header_len) =
+            payload::parse_root_records(&self.data, off, root.rsd_size as usize)?;
+        let mut chunks = Vec::new();
+        let mut pos = off + header_len;
+        let end = off + root.rsd_size as usize;
+        while pos < end {
+            let (chunk, stride) = payload::parse_chunk_at(&self.data, pos, end)?;
+            chunks.push(chunk);
+            pos += stride;
+        }
+        Ok((records, chunks))
     }
 
     /// Resource descriptor text of an entry (empty for pure folder nodes).
