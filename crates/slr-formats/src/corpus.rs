@@ -1,6 +1,6 @@
 //! Whole-install inventory: classify and parse every file under a reference directory.
 
-use crate::{cfg, pedestrian, rpak, scx, sdat, traffic, tufa, Result};
+use crate::{cfg, ground, pedestrian, rpak, scx, sdat, spline, traffic, tufa, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -48,8 +48,13 @@ pub struct Report {
     pub walk_leaf_indices: usize,
     pub rest_files: usize,
     pub rest_lines: usize,
+    pub spl_files: usize,
+    pub spl_points: usize,
+    pub scm_files: usize,
+    pub scm_materials: usize,
+    /// `.scm`/`.SCM` paths left unparsed (binary addon variants).
+    pub scm_binary: usize,
 }
-
 /// Parse every file whose format this crate understands; collect failures.
 pub fn verify(root: &Path) -> Result<Report> {
     let mut rep = Report::default();
@@ -126,6 +131,31 @@ pub fn verify(root: &Path) -> Result<Report> {
                     rep.trc_lanes += trc.lanes.len();
                     rep.trc_lane_items += trc.lanes.iter().map(|l| l.items.len()).sum::<usize>();
                     Ok(Some("trc"))
+                }
+                "spl" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let spl = spline::parse_stock(&data).map_err(|e| e.to_string())?;
+                    rep.spl_files += 1;
+                    rep.spl_points += spl.points.len();
+                    Ok(Some("spl"))
+                }
+                "scm" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    match ground::parse(&data) {
+                        Ok(g) => {
+                            rep.scm_files += 1;
+                            rep.scm_materials += g.materials.len();
+                            Ok(Some("scm"))
+                        }
+                        // Binary addon `.SCM` variants (MP1, Physic_Lab,
+                        // Caynon) are a different format, out of scope for
+                        // this ticket; leave them unparsed, not failures.
+                        Err(_) if data.contains(&0) => {
+                            rep.scm_binary += 1;
+                            Ok(None)
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
                 }
                 _ => {
                     // Extensionless save files start with SDAT.

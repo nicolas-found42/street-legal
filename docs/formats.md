@@ -133,3 +133,46 @@ modded 339 mips `{1:90, 5:3, 6:9, 7:20, 8:5}`). Container ports `FUN_00507110`
 per-mip slices feed the JPEG decode request `FUN_00564b50` from `FUN_00506ad0`
 (`payload+0x14`, `rgb_size`) with the alpha branch in `FUN_00506c70`
 (`alpha_size != 0`). JPEG decode is tier D via `zune-jpeg`: dimensions asserted only.
+
+## SPL (`.spl` AI spline)
+One control point per line: `x y z dx dy dz\twidth\tspeed[\tflag_a[\text_a\text_b\tflag_b]]`
+(token counts 8/9/12, plus 11 for the one ROC line whose empty width column
+`\t\t` contributes no token; the scanner skips all whitespace). `dx dy dz`
+is a unit direction (stock norms `0.988..1.022`). `width` = road half-width,
+`speed` = target speed, `flag_a` (default 1) opens a pit/branch segment where
+contiguous (`race.spl` lines 21..33), `flag_b` (default 1) marks twisty
+braking-profile sections, `ext_a`/`ext_b` (default 10000.0) are per-car tuned
+distances (105..3000 in twisty sections, 10000.0 open elsewhere; the seven
+ROC files differ only in these two columns and `flag_a`). The file's first
+point repeats as the last (`race.spl` re-emits it with the exit speed).
+Verified: stock 9/9 and modded 9/9 files, 453 points each, zero unexplained
+content. Reader `FUN_004337e0`: file from the `AI_spline` script line
+(`"%*s %f %s %d"`, `.rdata 0x0060d974`), lines via `FUN_005511c0`, scan via
+`FUN_00551240` with `"%lf %lf %lf %lf %lf %lf %lf %lf %d %lf %lf %d"`
+(`.rdata 0x0060db98`, custom `%lf`-as-`f32` scanner `FUN_00553890`,
+differential-tested under the Unicorn oracle), kept iff >5 conversions,
+tail defaults `(width = script %f, 1.0, 1, 10000.0, 10000.0, 1)`, chained by
+`FUN_0057de20` into `0x54`-byte nodes via `FUN_0057c590`. Decoder:
+`crates/slr-fmt-spline` (facade `slr_formats::spline`).
+
+## SCM (`.scm` ground material table)
+Text lines (`\r\n`; `;`, `#`, `/` start comments, cut in `FUN_004b6340`):
+`materials <N>` then `material <i> <name>` per entry (`%d %31s`: name is the
+next token, so `1 - Default` stores `1`; `#`-truncation makes
+`Material #7678` store `Material`), plus modded-only tuning lines
+(`friction`/`rollres`/`collcoeff`/`skid_*`/`params`/`eof`) that apply to the
+most recently defined material (each `material` line clears all present
+flags, then sets its own). Indices are dense `0..N`; names index the sibling
+`.scy` surface table 1:1 in the stock maps (108/108 city, 75/75 city2).
+Verified: stock 2/2 (183 materials), modded text 5/5 (213 materials); the 3
+binary addon `.SCM` variants (MP1, Physic_Lab, Caynon) are a different
+format, out of scope. Reader: ground-body init `FUN_00463220` (`groundbody`
+cfg line `"%x,%f,%f,%f,%f,%f,%f,%s,%s"`, `.rdata 0x00610f10`, carries the
+`.scm` path), loaded by `FUN_0054c300`, dispatched per line by
+`FUN_004b6340` through the keyword table at `.data 0x00610db8`
+(`materials`/`material`/`params`/`friction`/`rollres`/`collcoeff`/`skid_PS`/
+`skid_SM`/`skid_SFX`/`eof` handlers `0x4627f0`/`0x4629c0`/… with formats
+`"%d"`/`"%d %31s"`/`"%31s"`/`"%f"`/`"%x"` at `.rdata 0x00610e10…`; the
+`material` store `19 → "1"`, `74 → "Material"` with present flag set was
+differential-tested under the Unicorn oracle). Decoder:
+`crates/slr-fmt-ground` (facade `slr_formats::ground`).

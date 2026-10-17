@@ -7,9 +7,11 @@ license.workspace = true
 [dependencies]
 slr-fmt-cfg = { path = "../slr-fmt-cfg" }
 slr-fmt-core = { path = "../slr-fmt-core" }
+slr-fmt-ground = { path = "../slr-fmt-ground" }
 slr-fmt-rpak = { path = "../slr-fmt-rpak" }
 slr-fmt-sdat = { path = "../slr-fmt-sdat" }
 slr-fmt-pedestrian = { path = "../slr-fmt-pedestrian" }
 slr-fmt-scx = { path = "../slr-fmt-scx" }
+slr-fmt-spline = { path = "../slr-fmt-spline" }
 slr-fmt-traffic = { path = "../slr-fmt-traffic" }
 slr-fmt-tufa = { path = "../slr-fmt-tufa" }

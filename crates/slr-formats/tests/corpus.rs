@@ -9,7 +9,7 @@
 //! `cargo test --workspace` stays green on machines without the data
 //! (CI, fresh worktrees).
 
-use slr_formats::{cfg, corpus, pedestrian, rpak, traffic, tufa};
+use slr_formats::{cfg, corpus, ground, pedestrian, rpak, spline, traffic, tufa};
 use std::path::{Path, PathBuf};
 
 /// Expected corpus counts for one profile, derived by running the parsers.
@@ -53,6 +53,14 @@ struct Counts {
     rest: usize,
     /// `.rest` lines across all `.rest` files.
     rest_lines: usize,
+    /// `.spl` AI-spline files (every line parses, zero unexplained content).
+    spl: usize,
+    /// Spline control points across all `.spl` files.
+    spl_points: usize,
+    /// Text `.scm` ground-table files parsed.
+    scm: usize,
+    /// `material` entries across parsed `.scm` files.
+    scm_materials: usize,
 }
 
 // Derived 2026-10-17 by running the parsers over the clean stock install.
@@ -84,9 +92,14 @@ const STOCK: Counts = Counts {
     walk_leaf_indices: 3718,
     rest: 1,
     rest_lines: 755,
+    spl: 9,
+    spl_points: 453,
+    scm: 2,
+    scm_materials: 183,
 };
 
 // The modded install keeps the previously asserted counts.
+// (plus the text `.scm` set, which gains three tuned addon tables).
 const MODDED: Counts = Counts {
     files: 8411,
     rpk: 80,
@@ -115,6 +128,10 @@ const MODDED: Counts = Counts {
     walk_leaf_indices: 3718,
     rest: 1,
     rest_lines: 755,
+    spl: 9,
+    spl_points: 453,
+    scm: 5,
+    scm_materials: 213,
 };
 
 fn stock_root() -> Option<PathBuf> {
@@ -185,6 +202,20 @@ fn check_verify(name: &str, root: &Path, c: &Counts) {
         rep.trc_lane_items, c.trc_lane_items,
         "{name} trc lane items"
     );
+    assert_eq!(rep.by_ext["spl"], c.spl, "{name} spl files");
+    assert_eq!(rep.parsed["spl"], c.spl, "{name} parsed spl");
+    assert_eq!(rep.spl_files, c.spl, "{name} spl files");
+    assert_eq!(rep.spl_points, c.spl_points, "{name} spl points");
+    // `by_ext` counts every `.scm`/`.SCM` path; only the text dialect parses
+    // (the 3 binary addon `.SCM` variants are out of scope, left unparsed).
+    assert_eq!(
+        rep.by_ext["scm"],
+        rep.parsed.get("scm").copied().unwrap_or(0) + rep.scm_binary,
+        "{name} scm files"
+    );
+    assert_eq!(rep.parsed["scm"], c.scm, "{name} parsed scm");
+    assert_eq!(rep.scm_files, c.scm, "{name} scm files");
+    assert_eq!(rep.scm_materials, c.scm_materials, "{name} scm materials");
 }
 
 fn check_trc(name: &str, root: &Path, c: &Counts) {
@@ -603,4 +634,140 @@ fn modded_trc_parses_with_zero_leftover() {
         return;
     };
     check_trc("modded", &root, &MODDED);
+}
+
+/// Every stock `.spl` parses with zero unexplained content: field counts,
+/// direction norms, and per-file point counts asserted.
+fn check_spl(name: &str, root: &Path, c: &Counts) {
+    let mut files = 0;
+    let mut points = 0;
+    for path in corpus::walk(root).unwrap() {
+        if path.extension().and_then(|e| e.to_str()) != Some("spl") {
+            continue;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let spl =
+            spline::parse_stock(&data).unwrap_or_else(|e| panic!("{name} {}: {e}", path.display()));
+        // No line is dropped or invented: one point per non-blank line.
+        let lines = data
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.iter().all(|&b| b == b'\r' || b == b' ' || b == b'\t'))
+            .count();
+        assert_eq!(spl.points.len(), lines, "{name} {}", path.display());
+        for p in &spl.points {
+            // exe `FUN_0057c590` normalises the direction triple: it must be
+            // a unit vector up to `%lf` round-trip error.
+            let n = (p.dir[0] * p.dir[0] + p.dir[1] * p.dir[1] + p.dir[2] * p.dir[2]).sqrt();
+            assert!((n - 1.0).abs() < 0.03, "{name} {} dir {n}", path.display());
+            assert!(p.width >= 0.0, "{name} {}", path.display());
+            if let (Some(a), Some(b)) = (p.ext_a, p.ext_b) {
+                assert!(a > 0.0 && b > 0.0, "{name} {}", path.display());
+            }
+        }
+        files += 1;
+        points += spl.points.len();
+    }
+    eprintln!("{name} spl files {files} points {points}");
+    assert_eq!(files, c.spl, "{name} spl files");
+    assert_eq!(points, c.spl_points, "{name} spl points");
+}
+
+#[test]
+fn stock_spl_parses_every_line() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_spl("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_spl_parses_every_line() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_spl("modded", &root, &MODDED);
+}
+
+/// Every text `.scm` parses: header count matches, indices are dense, and
+/// names match the `.scy` surface table where one ships beside the file.
+fn check_scm(name: &str, root: &Path, c: &Counts) {
+    let mut files = 0;
+    let mut materials = 0;
+    for path in corpus::walk(root).unwrap() {
+        let is_scm = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("scm"));
+        if !is_scm {
+            continue;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let Ok(g) = ground::parse(&data) else {
+            // Binary addon variants; counted in `verify`, skipped here.
+            assert!(data.contains(&0u8), "{name} {}", path.display());
+            continue;
+        };
+        assert_eq!(
+            g.materials.len() as u32,
+            g.count,
+            "{name} {}",
+            path.display()
+        );
+        for (i, m) in g.materials.iter().enumerate() {
+            assert_eq!(m.index as usize, i, "{name} {}", path.display());
+            assert!(!m.name.is_empty(), "{name} {}", path.display());
+        }
+        // Where the sibling `.scy` names its groups, they line up 1:1 with
+        // the `.scm` entries (stock: same order, same names modulo the
+        // exe's `#`/whitespace truncation; addon `.scy` files use smaller
+        // nameless blocks and are skipped).
+        let scy = path.with_extension("SCY");
+        if scy.is_file() {
+            let scy_data = std::fs::read(&scy).unwrap();
+            let groups = match slr_formats::scx::parse(&scy_data).unwrap() {
+                slr_formats::scx::Scx::V3 { groups, .. } => groups,
+                slr_formats::scx::Scx::V4 { .. } => panic!("{name} {scy:?} is v4"),
+            };
+            if groups.iter().any(|g| !g.name().is_empty()) {
+                assert_eq!(groups.len(), g.materials.len(), "{name} {}", path.display());
+                for (grp, m) in groups.iter().zip(g.materials.iter()) {
+                    // The exe truncates `.scm` names at `#` (comment rule) and
+                    // `%31s` stops at whitespace (`1 - Default` stores `1`);
+                    // the `.scy` table keeps the full name.
+                    let full = grp.name();
+                    let kept = full
+                        .split('#')
+                        .next()
+                        .and_then(|s| s.split_whitespace().next())
+                        .unwrap_or("");
+                    assert_eq!(m.name, kept, "{name} {}", path.display());
+                }
+            }
+        }
+        files += 1;
+        materials += g.materials.len();
+    }
+    eprintln!("{name} scm files {files} materials {materials}");
+    assert_eq!(files, c.scm, "{name} scm files");
+    assert_eq!(materials, c.scm_materials, "{name} scm materials");
+}
+
+#[test]
+fn stock_scm_parses_with_dense_indices() {
+    let Some(root) = stock_root() else {
+        eprintln!("stock/ not present; skipping");
+        return;
+    };
+    check_scm("stock", &root, &STOCK);
+}
+
+#[test]
+fn modded_scm_parses_with_dense_indices() {
+    let Some(root) = modded_root() else {
+        eprintln!("reference/raw not present; skipping");
+        return;
+    };
+    check_scm("modded", &root, &MODDED);
 }
