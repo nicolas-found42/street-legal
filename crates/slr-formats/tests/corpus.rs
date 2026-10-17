@@ -19,6 +19,10 @@ struct Counts {
     rpk: usize,
     scx: usize,
     scx_v3: usize,
+    scy: usize,
+    scx_v3_groups: usize,
+    scx_v3_verts: usize,
+    scx_v3_tris: usize,
     class_files: usize,
     cfg: usize,
     sdat: usize,
@@ -41,6 +45,10 @@ const STOCK: Counts = Counts {
     rpk: 61,
     scx: 2921,
     scx_v3: 390,
+    scy: 13,
+    scx_v3_groups: 961,
+    scx_v3_verts: 178473,
+    scx_v3_tris: 70247,
     class_files: 1452,
     cfg: 1012,
     sdat: 9,
@@ -60,6 +68,10 @@ const MODDED: Counts = Counts {
     rpk: 80,
     scx: 3028,
     scx_v3: 441,
+    scy: 21,
+    scx_v3_groups: 1102,
+    scx_v3_verts: 288510,
+    scx_v3_tris: 107663,
     class_files: 1501,
     cfg: 1053,
     sdat: 11,
@@ -107,8 +119,21 @@ fn check_verify(name: &str, root: &Path, c: &Counts) {
     assert_eq!(rep.by_ext["rpk"], c.rpk, "{name} rpk files");
     assert_eq!(rep.parsed["rpk"], c.rpk, "{name} parsed rpk");
     assert_eq!(rep.by_ext["scx"], c.scx, "{name} scx files");
-    assert_eq!(rep.scx_v3 + rep.scx_v4, c.scx, "{name} scx versions");
-    assert_eq!(rep.scx_v3, c.scx_v3, "{name} scx v3");
+    assert_eq!(
+        rep.scx_v3 + rep.scx_v4,
+        c.scx + c.scy,
+        "{name} scx versions"
+    );
+    assert_eq!(rep.scx_v3, c.scx_v3 + c.scy, "{name} scx v3");
+    assert_eq!(rep.scy, c.scy, "{name} scy files");
+    assert_eq!(
+        rep.parsed.get("scy").copied().unwrap_or(0),
+        c.scy,
+        "{name} parsed scy"
+    );
+    assert_eq!(rep.scx_v3_groups, c.scx_v3_groups, "{name} scx v3 groups");
+    assert_eq!(rep.scx_v3_verts, c.scx_v3_verts, "{name} scx v3 verts");
+    assert_eq!(rep.scx_v3_tris, c.scx_v3_tris, "{name} scx v3 tris");
     assert_eq!(rep.by_ext["class"], c.class_files, "{name} class files");
     assert_eq!(rep.parsed["class"], c.class_files, "{name} parsed class");
     assert_eq!(rep.parsed["cfg"], c.cfg, "{name} parsed cfg");
