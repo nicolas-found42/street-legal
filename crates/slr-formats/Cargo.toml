@@ -10,4 +10,5 @@ slr-fmt-core = { path = "../slr-fmt-core" }
 slr-fmt-rpak = { path = "../slr-fmt-rpak" }
 slr-fmt-sdat = { path = "../slr-fmt-sdat" }
 slr-fmt-scx = { path = "../slr-fmt-scx" }
+slr-fmt-traffic = { path = "../slr-fmt-traffic" }
 slr-fmt-tufa = { path = "../slr-fmt-tufa" }
