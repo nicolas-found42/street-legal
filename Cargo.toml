@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/slr-formats", "crates/slr-core", "crates/slr-game"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+debug = false

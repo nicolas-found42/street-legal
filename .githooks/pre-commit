@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Guardrail: never allow staging files from reference/
+if git diff --cached --name-only | grep -q '^reference/'; then
+  echo "ERROR: Attempted to commit files under reference/ (read-only reference build)." >&2
+  exit 1
+fi
+
+# 2. Verify reference/raw remains read-only
+if [ -d "reference/raw" ] && [ -w "reference/raw/StreetLegal_Redline.exe" ]; then
+  echo "ERROR: reference/raw/StreetLegal_Redline.exe is writable; run 'chmod -R a-w reference/raw'." >&2
+  exit 1
+fi
+
+# 3. Rust formatting, linting, and tests
+if [ -f "Cargo.toml" ]; then
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo test --workspace
+fi

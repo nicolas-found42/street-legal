@@ -1,0 +1,23 @@
+# Glossary
+
+- **Modded install**: the read-only game under `reference/raw` (build 606, v2.2.1, with the Miran Wichur and DestructionTools mods and later edits overwriting stock scripts). Never modified. Not stock data; used only as a compatibility corpus.
+- **Stock media**: the clean v2.2.1 installer (MSI + `Data1.cab`) under `reference/raw-stock`. Read-only.
+- **Clean stock install**: the game files extracted from the stock media into `stock/`; the source of truth for stock parity. Ships compiled scripts only, no script sources.
+- **Stock exe**: the `StreetLegal_Redline.exe` on the stock media (build 606, the one the installer's shortcuts launch). Its `.bak.exe` twin differs only inside the CD check, so either serves as the reverse-engineering reference.
+- **Complete**: every item of the parity checklist passes its acceptance test.
+- **Stock parity**: every feature of the stock single-player game is reachable and driven by the original scripts.
+- **Parity checklist**: the per-feature list of what stock parity requires, each item tied to an acceptance test.
+- **Fidelity ledger**: the per-function record of the port: original address, port location, status, evidence.
+- **RPAK**: `.rpk` resource package: a tree of typed resource entries pointing at loose files.
+- **INVO / SCX**: the `.scx` mesh container (v4 geometry, v3 map pieces).
+- **TUFA class**: a compiled Invictus script (`.class`); the original's game logic lives in these.
+- **SDAT**: the original's binary save/config container; saves are read and written in it exactly.
+- **Exact**: producing the same results as the stock exe for the same inputs, proven by an oracle comparison, not by inspection. The only permitted differences are intentional divergences.
+- **Intentional divergence**: a deliberate difference from the stock exe, namely a fixed original bug, confirmed to exist in build 606 and recorded in the fidelity ledger with the inputs that trigger it.
+- **Oracle**: the original code run under emulation (a single function, or the whole game) to produce ground-truth outputs.
+- **Oracle vector**: one recorded oracle input/output pair (including the float control state). Derived from the original, so never committed.
+- **Differential test**: the same inputs run through the oracle and the port, compared bit for bit.
+- **Deterministic replay**: a run with a fixed random seed, fixed time step and scripted input, so the same run always gives the same results.
+- **Native method**: a method the scripts call that is implemented in the exe rather than in a TUFA class.
+- **Headless boot**: running the original scripts from engine start to the main menu with render, sound and input natives recorded instead of executed.
+- **Call log**: the ordered record of native-method calls (name, arguments, result) a script run makes; the trace format compared against the oracle.
