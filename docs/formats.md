@@ -8,22 +8,24 @@ Each layout below is enforced by code in `crates/slr-formats` and the corpus tes
 `u32 headers_size, total, type1_count, other_count`, then entry headers
 `{u32 super_id, u32 type_id, u8 typeof, u8 flags, f32 is_parent_compatible, u32 rsd_offset,
 u32 rsd_size, u8 alias_len, alias, [12 f32 if typeof==1]}`. `rsd_*` are absolute file ranges of
-descriptor text (`sourcefile ...`). Verified: 80/80 files, header sizes and counts consistent.
+descriptor text (`sourcefile ...`). Verified: stock 61/61 and modded 80/80 files, header sizes and counts consistent.
 
 ## INVO (`.scx`)
 v4: `"INVO", 4, chunk_count, 0`, `{offset, tag}` table, contiguous chunks. Tag 5 vertex buffer
 `{?, len, count, fvf}`; stride = `(len-16)/count` (flags 0x1 pos, 0x40 normal, 0x200 uv; strides
 12/24/32/36/40/44/48/56 seen). Tag 0 index buffer `{?, len, count}` + u16 triangle list (decoded,
-indices range-checked on all 2,587 files). Tags 1-4 (materials/metadata) kept opaque. Units are
-centimetres; car panels are centred on their own origin. v3 (441 map pieces) differs and is not
+indices range-checked on all stock 2,531 v4 files; modded 2,587). Tags 1-4 (materials/metadata) kept opaque. Units are
+centimetres; car panels are centred on their own origin. Stock v3 (390 map pieces, modded 441) differs and is not
 decoded.
 
 ## TUFA (`.class`)
-Flat chunk list `tag[4] u32 size payload`, no gaps (1,501/1,501). First chunk `TUFA` (4-byte
+Flat chunk list `tag[4] u32 size payload`, no gaps (stock 1,452/1,452, modded 1,501/1,501). First chunk `TUFA` (4-byte
 version), then `CONS` (constant pool), optional `FILD`, `MTHD`, `CLSS`, `TREE`; a few files hold
 several modules. First two pool strings are class name and base class
 (`java.game.parts.engines.Baiern_Emer.Emer_StreetGT_block` -> `...Block_Inline_OHC`). `TREE` node
 encoding differs by version (u16 ops in 0x108f5; 1-byte ops with a lookup in 0x11ae1); not executed.
+Stock profile: 1,491 modules / 5,262 bodies / 269,034 nodes / 94,703 pool entries / 3,414 methods /
+2,730 fields; modded profile keeps the previously asserted 1,546 / 5,816 / 320,522 / 102,711 / 3,591 / 3,531.
 
 ## cfg
 Keyword lines. `_main_*.cfg` vehicle files give: `body x y z rx ry rz mass mesh` (sum = shell

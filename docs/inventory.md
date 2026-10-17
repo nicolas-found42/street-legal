@@ -7,7 +7,9 @@ Identity: Street Legal Racing: Redline `SL2` build 606 (Feb 7 2005), distributio
 (Miran Wichur Mod v0.9b banner). Installed mods: `MW_Mod.rpk`, `DestructionTools.rpk`, 12
 addon maps, modified `parts.rpk`/`particles.rpk`.
 
-8,411 files (corpus test asserts this exact number, excluding `.DS_Store`):
+8,411 modded files (modded corpus profile asserts this exact number, excluding `.DS_Store`).
+The clean stock install holds 7,858 files; see the stock profile counts in
+`crates/slr-formats/tests/corpus.rs`:
 
 | ext | count | parsed by this repo |
 |---|---|---|

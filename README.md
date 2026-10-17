@@ -32,7 +32,7 @@ results -> repair or modify -> autosave; Continue on the title screen reloads th
 
 ## Layout
 
-- `crates/slr-formats`: parsers for RPAK, SCX, TUFA, cfg, SDAT, verified on all 8,411 reference files.
+- `crates/slr-formats`: parsers for RPAK, SCX, TUFA, cfg, SDAT, verified on the 7,858-file stock install (`stock/`, `SLR_STOCK`), with the modded `reference/raw` kept as a compatibility profile.
 - `crates/slr-core`: catalog, vehicle simulation, garage/economy, races, AI, saves. Headless.
 - `crates/slr-game`: macroquad frontend (3D world, HUD, garage UI, self-test).
 - `docs/`: inventory, formats, fidelity matrix, architecture, ADRs.
