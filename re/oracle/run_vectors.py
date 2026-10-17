@@ -69,10 +69,6 @@ DOT2_ADDR = 0x436950
 CEILDIV_ADDR = 0x570330
 
 
-def _f32bits(v: float) -> str:
-    return f"0x{struct.unpack('<I', struct.pack('<f', v))[0]:08x}"
-
-
 def _st0hex(raw: bytes) -> str:
     return "0x" + raw.hex()
 
