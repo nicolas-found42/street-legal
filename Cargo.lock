@@ -397,6 +397,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slr-fmt-pedestrian"
+version = "0.1.0"
+dependencies = [
+ "slr-fmt-core",
+]
+
+[[package]]
 name = "slr-fmt-rpak"
 version = "0.1.0"
 dependencies = [
@@ -450,6 +457,7 @@ version = "0.1.0"
 dependencies = [
  "slr-fmt-cfg",
  "slr-fmt-core",
+ "slr-fmt-pedestrian",
  "slr-fmt-rpak",
  "slr-fmt-scx",
  "slr-fmt-sdat",

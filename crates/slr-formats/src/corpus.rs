@@ -1,6 +1,6 @@
 //! Whole-install inventory: classify and parse every file under a reference directory.
 
-use crate::{cfg, rpak, scx, sdat, traffic, tufa, Result};
+use crate::{cfg, pedestrian, rpak, scx, sdat, traffic, tufa, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +43,11 @@ pub struct Report {
     pub trc_files: usize,
     pub trc_lanes: usize,
     pub trc_lane_items: usize,
+    pub walk_files: usize,
+    pub walk_lines: usize,
+    pub walk_leaf_indices: usize,
+    pub rest_files: usize,
+    pub rest_lines: usize,
 }
 
 /// Parse every file whose format this crate understands; collect failures.
@@ -97,6 +102,22 @@ pub fn verify(root: &Path) -> Result<Report> {
                 "cfg" => {
                     cfg::Cfg::open(&p).map_err(|e| e.to_string())?;
                     Ok(Some("cfg"))
+                }
+                "walk" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let lines = pedestrian::parse_walk(&data).map_err(|e| e.to_string())?;
+                    rep.walk_files += 1;
+                    rep.walk_lines += lines.len();
+                    rep.walk_leaf_indices +=
+                        lines.iter().map(|l| l.leaf_indices().len()).sum::<usize>();
+                    Ok(Some("walk"))
+                }
+                "rest" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let lines = pedestrian::parse_rest(&data).map_err(|e| e.to_string())?;
+                    rep.rest_files += 1;
+                    rep.rest_lines += lines.len();
+                    Ok(Some("rest"))
                 }
                 "trc" => {
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;

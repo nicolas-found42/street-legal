@@ -12,6 +12,7 @@ members = [
     "crates/slr-fmt-sdat",
     "crates/slr-fmt-sound",
     "crates/slr-fmt-traffic",
+    "crates/slr-fmt-pedestrian",
     "crates/slr-fmt-texture",
     "crates/slr-fmt-tufa",
     "crates/slr-formats",

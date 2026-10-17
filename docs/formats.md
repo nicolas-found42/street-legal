@@ -95,6 +95,29 @@ from the surrounding container code at `0x00484fa0`/`0x00485190`/`0x00485448`/
 `len >= 89 + 57 * N` with the terminator present). Decoder:
 `crates/slr-fmt-traffic` (facade `slr_formats::traffic`).
 
+## Pedestrian areas (`.walk` / `.rest`)
+Line ASCII under `maps/city/ai/`: six comma floats (bbox `x1,y1,z1,x2,y2,z2`,
+`x1 <= x2`, `z1 <= z2`), space, 1-based line id, `;`, payload. `rest`
+payloads are `1,<index>` (middle word always 1; index dense 0-based per area
+id: stock id 1 x484, 2 x53, 3 x218 over 755 lines). `walk` payloads are
+nibble-encoded binary (`A`-`P` = 0-15, pairs little-endian): `u32 total_len`
+(`== decoded-4`) then `FF FF FF FF`-terminated records plus an unterminated
+tail. First record `[f32x4][f32][u32 X][chain]` (`X` 3 on the 278 two-record
+lines, else 4); mids are `21` (`[21][quad]`, 32x), `22` spans (1,489x) or
+`23` sidewalks (64x); tails are index runs (`[k][k u32]`, k 1..=7, 921x) or
+`22` spans (878x). A `22` span is `[22][quad][id]` then a chained record
+(`21`/`22`/`23`, next word in 21..=23) or a leaf index run (4..=6 1-based
+walk line numbers, max depth 2, 214 nested spans). A `23` sidewalk is
+`[23][n]` (`n` 3..=6), `n+1` `(x,y,z,dx,dy,dz)` waypoints, endpoint quad.
+Verified: stock `city.walk` 1,799/1,799 lines (ids dense; 3,718 leaf indices
+all in 1..=1,799) and `city.rest` 755/755 lines, zero unexplained bytes;
+modded files identical. No isolated exe reader exists (extensions absent
+from exe strings; pedestrian natives `FUN_00484d30`/`FUN_00484d90`/
+`FUN_00484e20`/`LAB_00484c60` tune density only), so field order, separators,
+and the nibble alphabet are ported from the files with structural roles
+documented as inferences. Decoder: `crates/slr-fmt-pedestrian` (facade
+`slr_formats::pedestrian`).
+
 ## PTX (`.ptx`)
 `u32 0, u32 mip_count, u32 width, u32 height`, then per mip (smallest first, base last)
 `{u32 total, u32 rgb_size, u32 alpha_size, u32 0, f32 level=(index+1)/mip_count}` +
