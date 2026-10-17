@@ -15,6 +15,7 @@ pub use slr_fmt_core::{FormatError, Result};
 pub use slr_fmt_rpak as rpak;
 pub use slr_fmt_scx as scx;
 pub use slr_fmt_sdat as sdat;
+pub use slr_fmt_traffic as traffic;
 pub use slr_fmt_tufa as tufa;
 
 pub mod corpus;
