@@ -99,7 +99,7 @@ pub fn verify(root: &Path) -> Result<Report> {
                     // Extensionless save files start with SDAT.
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;
                     if data.starts_with(b"SDAT") {
-                        sdat::parse(&data).map_err(|e| e.to_string())?;
+                        sdat::parse(&data, None).map_err(|e| e.to_string())?;
                         Ok(Some("sdat"))
                     } else {
                         Ok(None)
