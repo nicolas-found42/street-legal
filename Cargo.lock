@@ -342,6 +342,9 @@ version = "0.1.0"
 [[package]]
 name = "slr-calllog"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "slr-core"

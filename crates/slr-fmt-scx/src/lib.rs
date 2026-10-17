@@ -1,4 +1,4 @@
-//! `INVO` mesh container (`*.scx`).
+//! `INVO` mesh container (`*.scx`, `*.scy`).
 //!
 //! Version 4 (2,587 of 3,028 shipped files) is a chunk table followed by contiguous chunks:
 //!
@@ -11,10 +11,39 @@
 //! ```
 //!
 //! Vertex stride is `(chunk_len - 16) / vertex_count`; the FVF flags (0x1 position,
-//! 0x40 normal, 0x200 texcoord) place the attributes. Version 3 (441 files, all map pieces)
-//! uses a different record layout and is only header-validated.
+//! 0x40 normal, 0x200 texcoord) place the attributes.
+//!
+//! Version 3 (390 stock files: map pieces, fonts, the water plane; plus all 13
+//! stock `*.scy` collision-surface files, which share the container) is a flat
+//! sequence of material groups:
+//!
+//! ```text
+//! 0x00 "INVO"  u32 version(=3)
+//! per group: u32 material_size (0x38 | 0x68 | 0x88, size word included)
+//!            u8[material_size - 4] material payload (kept opaque; see `Material`)
+//!            u32 vertex_count, vertex_count * stride bytes of vertices
+//!            u32 face_count, face_count * 3 u32 indices (triangle list)
+//! optional trailing u32 0; the last group may instead end exactly at EOF
+//! ```
+//!
+//! The vertex stride is `0x2c` after a `0x38` material block, otherwise the u32
+//! at material offset 60 (always 64 in the shipped corpus). Each vertex holds
+//! `pos[3f] normal[3f] uv[2f]` followed by `stride - 32` raw bytes (a second UV
+//! pair, a colour-like word which is `0xffffffff` for unpainted vertices, and a
+//! 20-byte tail are visible in garage meshes, but the exe's loader reads only
+//! the positions, so the remainder is preserved opaquely; see `V3Mesh::extra`).
+//!
+//! File units are centimetres: the exe multiplies stored positions by `0.01`
+//! (`_DAT_005f1118` at file offset `0x1f1118` of
+//! `StreetLegal_Redline.bak.exe`); like the v4 decoder, positions are kept here
+//! in raw file units.
+//!
+//! `*.scy` files use the identical container with every group carrying zero
+//! vertices and zero faces; their payload is the named surface-type table
+//! (`Material::name`, e.g. `"aszfalt"`, `"szalagkorlat"`, `"Material #0"`).
+//! The collision geometry itself is not in these files.
 
-use slr_fmt_core::reader::Reader;
+use slr_fmt_core::reader::{latin1_cstr, Reader};
 use slr_fmt_core::{FormatError, Result};
 
 #[derive(Debug, Clone, Default)]
@@ -27,14 +56,71 @@ pub struct Mesh {
     pub indices: Vec<u16>,
 }
 
+/// One version-3 material + geometry group.
+///
+/// `/// exe:` lines name the loader logic each field ports
+/// (`FUN_004b5c30` in the Ghidra export `re/out/all_pseudo.c`).
+#[derive(Debug, Clone)]
+pub struct V3Group {
+    /// Material block size word (`0x38`, `0x68` or `0x88`).
+    /// exe: `FUN_004b5c30` `uVar3` block-size dispatch.
+    pub material_size: u32,
+    /// Raw material payload (block after the size word).
+    /// exe: `FUN_004b5c30` skips the block (`puVar17 += uVar3`, `+0xe` for
+    /// `0x38`), keeping only the stride; nothing else is read from it.
+    pub material: Vec<u8>,
+    /// Vertex stride in bytes: `0x2c` after a `0x38` block, else the u32 at
+    /// material offset 60.
+    /// exe: `FUN_004b5c30` `param_2 = 0x2c` vs `param_2 = puVar17[0xf]`.
+    pub stride: usize,
+    /// Triangle-list vertices: `pos normal uv` + raw remainder per vertex.
+    /// exe: `FUN_004b5c30` reads the first three words of each stride via
+    /// `FUN_0054f6a0` (float identity through `FUN_005596c0`) times `0.01`,
+    /// advancing the cursor one stride per vertex.
+    pub mesh: V3Mesh,
+}
+
+/// Decoded version-3 vertex data of one group.
+#[derive(Debug, Clone, Default)]
+pub struct V3Mesh {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    /// Raw bytes `32..stride` of each vertex, preserved verbatim (second UV
+    /// pair, colour-like word, tail; semantics undecoded).
+    pub extra: Vec<Vec<u8>>,
+    /// Triangle list, `u32` indices plus the group's base vertex offset.
+    /// exe: `FUN_004b5c30` emits `*src + local_38` per index word.
+    pub indices: Vec<u32>,
+}
+
+impl V3Group {
+    /// Best-effort material name: the NUL-padded text field at payload offset
+    /// `0x64` of `0x88` blocks (`"23 - Default"`, `"aszfalt"`, ...); `""`
+    /// when absent (all `0x38`/`0x68` blocks).
+    pub fn name(&self) -> String {
+        if self.material.len() < 0x64 {
+            return String::new();
+        }
+        let raw = &self.material[0x64..];
+        let start = raw.iter().position(|&b| b != 0).unwrap_or(raw.len());
+        latin1_cstr(&raw[start..])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Scx {
     V4 {
         meshes: Vec<Mesh>,
         chunk_tags: Vec<u32>,
     },
-    /// Version 3 map-piece file: header validated only.
-    V3 { size: usize },
+    V3 {
+        groups: Vec<V3Group>,
+        /// Trailing word: `None` when the last group ends exactly at EOF,
+        /// `Some(0)` for the usual zero terminator.
+        /// exe: `FUN_004b5c30` breaks on `end <= cursor` or a zero word.
+        trailing: Option<u32>,
+    },
 }
 
 pub fn parse(data: &[u8]) -> Result<Scx> {
@@ -48,9 +134,136 @@ pub fn parse(data: &[u8]) -> Result<Scx> {
     }
     let version = r.u32()?;
     match version {
-        3 => Ok(Scx::V3 { size: data.len() }),
+        3 => parse_v3(data),
         4 => parse_v4(data),
         v => Err(FormatError::UnsupportedVersion(v)),
+    }
+}
+
+/// exe: `FUN_004b5c30`, `local_28 == 3` loop: per iteration the material block
+/// is skipped by its size word, the vertex count is the next word, and the
+/// face count sits right after the vertex array
+/// (`uVar9 = *(uVar3 * stride + 4 + cursor)`); faces are bare `u32` triples.
+fn parse_v3(data: &[u8]) -> Result<Scx> {
+    let mut groups = Vec::new();
+    let mut cur = 8usize;
+    loop {
+        let size = Reader::at(data, cur).u32()? as usize;
+        if !matches!(size, 0x38 | 0x68 | 0x88) {
+            return Err(FormatError::Inconsistent {
+                what: "scx v3 material size",
+                detail: format!("group {} block {size:#x} at {cur:#x}", groups.len()),
+            });
+        }
+        let stride = if size == 0x38 {
+            0x2c
+        } else {
+            Reader::at(data, cur + 60).u32()? as usize
+        };
+        if stride < 32 || stride % 4 != 0 {
+            return Err(FormatError::Inconsistent {
+                what: "scx v3 vertex stride",
+                detail: format!("group {} stride {stride}", groups.len()),
+            });
+        }
+        let material = data
+            .get(cur + 4..cur + size)
+            .ok_or(FormatError::Truncated {
+                at: cur + 4,
+                need: size - 4,
+                have: data.len().saturating_sub(cur + 4),
+            })?
+            .to_vec();
+        cur += size;
+        let nv = Reader::at(data, cur).u32()? as usize;
+        let vo = cur + 4;
+        let fco = vo
+            .checked_add(nv.checked_mul(stride).ok_or(FormatError::Inconsistent {
+                what: "scx v3 vertex range",
+                detail: format!("group {} {nv} verts x {stride}", groups.len()),
+            })?)
+            .ok_or(FormatError::Inconsistent {
+                what: "scx v3 vertex range",
+                detail: format!("group {} ends past EOF", groups.len()),
+            })?;
+        if fco + 4 > data.len() {
+            return Err(FormatError::Truncated {
+                at: fco,
+                need: 4,
+                have: data.len().saturating_sub(fco),
+            });
+        }
+        let nf = Reader::at(data, fco).u32()? as usize;
+        let fo = fco + 4;
+        let end = fo
+            .checked_add(nf.checked_mul(12).ok_or(FormatError::Inconsistent {
+                what: "scx v3 face range",
+                detail: format!("group {} {nf} faces", groups.len()),
+            })?)
+            .ok_or(FormatError::Inconsistent {
+                what: "scx v3 face range",
+                detail: format!("group {} ends past EOF", groups.len()),
+            })?;
+        if end > data.len() {
+            return Err(FormatError::Truncated {
+                at: fo,
+                need: nf * 12,
+                have: data.len().saturating_sub(fo),
+            });
+        }
+        let mut mesh = V3Mesh::default();
+        for v in 0..nv {
+            let o = vo + v * stride;
+            let mut vr = Reader::at(data, o);
+            let pos = [vr.f32()?, vr.f32()?, vr.f32()?];
+            let nrm = [vr.f32()?, vr.f32()?, vr.f32()?];
+            let uv = [vr.f32()?, vr.f32()?];
+            mesh.positions.push(pos);
+            mesh.normals.push(nrm);
+            mesh.uvs.push(uv);
+            mesh.extra.push(data[o + 32..o + stride].to_vec());
+        }
+        let base: u32 = groups
+            .iter()
+            .map(|g: &V3Group| g.mesh.positions.len() as u32)
+            .sum();
+        let mut ir = Reader::at(data, fo);
+        for _ in 0..nf * 3 {
+            let i = ir.u32()?;
+            if i as usize >= nv {
+                return Err(FormatError::Inconsistent {
+                    what: "scx v3 index range",
+                    detail: format!("group {} index {i} beyond {nv} vertices", groups.len()),
+                });
+            }
+            mesh.indices.push(i + base);
+        }
+        groups.push(V3Group {
+            material_size: size as u32,
+            material,
+            stride,
+            mesh,
+        });
+        if end == data.len() {
+            return Ok(Scx::V3 {
+                groups,
+                trailing: None,
+            });
+        }
+        if end + 4 == data.len() {
+            let t = Reader::at(data, end).u32()?;
+            if t != 0 {
+                return Err(FormatError::Inconsistent {
+                    what: "scx v3 trailer",
+                    detail: format!("expected zero terminator, found {t:#x}"),
+                });
+            }
+            return Ok(Scx::V3 {
+                groups,
+                trailing: Some(0),
+            });
+        }
+        cur = end;
     }
 }
 

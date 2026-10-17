@@ -3,3 +3,10 @@ name = "slr-calllog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[[bin]]
+name = "slr-calllog-diff"
+path = "src/bin/slr-calllog-diff.rs"

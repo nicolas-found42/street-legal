@@ -14,13 +14,22 @@ Map packages (`maps/city.rpk`, `city2`, `ROC_track`, `test_track`) carry a binar
 tree in the root entry's range (record list + `RSD\0`/`PHYS`/`POLY`/`EXTP` chunks, fully
 tiled; see `docs/rpk-payload.md` and `crates/slr-fmt-rpak/src/payload.rs`).
 
-## INVO (`.scx`)
+## INVO (`.scx`, `.scy`)
 v4: `"INVO", 4, chunk_count, 0`, `{offset, tag}` table, contiguous chunks. Tag 5 vertex buffer
 `{?, len, count, fvf}`; stride = `(len-16)/count` (flags 0x1 pos, 0x40 normal, 0x200 uv; strides
 12/24/32/36/40/44/48/56 seen). Tag 0 index buffer `{?, len, count}` + u16 triangle list (decoded,
 indices range-checked on all stock 2,531 v4 files; modded 2,587). Tags 1-4 (materials/metadata) kept opaque. Units are
-centimetres; car panels are centred on their own origin. Stock v3 (390 map pieces, modded 441) differs and is not
-decoded.
+centimetres; car panels are centred on their own origin.
+v3 (stock 390 `.scx` + 13 `.scy`; modded 441 + 21): `"INVO", 3`, then material groups
+`{u32 material_size (0x38|0x68|0x88, word included), material bytes, u32 vert_count,
+vert_count * stride verts, u32 face_count, face_count * 3 u32 indices}` with an optional
+trailing zero word. Stride is `0x2c` after a `0x38` block else the u32 at material offset 60
+(64 everywhere shipped); each vertex is `pos[3f] normal[3f] uv[2f]` + `stride-32` raw bytes.
+Indices range-checked (stock 178,473 verts / 70,247 tris; modded 288,510 / 107,663). Ports
+`FUN_004b5c30` (`local_28 == 3` loop); file units are centimetres (exe scales by `0.01`).
+`.scy` files share the container with all-empty groups; their payload is the named
+surface-type table (`Material::name`: `"aszfalt"`, `"szalagkorlat"`, `"Material #N"`).
+Collision geometry is not in these files.
 
 ## TUFA (`.class`)
 Flat chunk list `tag[4] u32 size payload`, no gaps (stock 1,452/1,452, modded 1,501/1,501). First chunk `TUFA` (4-byte
