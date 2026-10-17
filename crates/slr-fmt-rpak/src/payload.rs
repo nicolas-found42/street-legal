@@ -22,32 +22,27 @@
 //!
 //! - `RSD\0`: text lines (`gametype ...`, `params ...`); the `0x352`/`0x15` gametypes
 //!   carry opaque token bytes instead of text. Named-placement (`b == 0x21`) records
-//!   each own exactly one text `RSD` whose `params x,y,z` is the placement point.
-//!
-//!   exe: FUN_0053dee0 (RSD line parse via FUN_005d7190/FUN_00551240)
+//!   each own exactly one text `RSD` whose `params x,y,z` is the placement point
+//!   (the map loader's RSD line parse).
 //! - `PHYS`: `u32 nplanes`, then `nplanes` x 7-dword planes
 //!   (`u32 w0`, `u32 i0/i1/i2` vertex indices, `f32 nx/ny/nz` unit normal), then
 //!   `u32 nverts`, then `nverts` x `f32 x/y/z` vertices (centimetres). Every plane's
 //!   indices land inside the chunk's own vertex array; the normal is perpendicular
-//!   to the indexed triangle and the winding is uniform (CCW into the normal).
-//!
-//!   exe: FUN_0053dee0 (PHYS branch: n1 x 7 dwords, n2 x 3 dwords)
+//!   to the indexed triangle and the winding is uniform (CCW into the normal)
+//!   (the map loader's PHYS branch: n1 x 7 dwords, n2 x 3 dwords).
 //! - `POLY`: `u32 1`, `u32 ngroups` (always 1 in the corpus; 1,769 chunks), then per
 //!   group `u32 mat`, `u32 nvert`, `u32 ntri`, `nvert` x 56-byte vertices, `ntri` x
 //!   12-byte triangle index triples. Vertex bytes decode as position (3f, cm) +
 //!   normal (3f, unit) + color (u32 diffuse `A8R8G8B8`, u32 specular-gloss remainder)
-//!   + uv (2f) + reserved (2 u32, zero in the corpus) + second coords (2f).
-//!
-//!   exe: FUN_0053dee0 (POLY branch: groups of 14-dword verts, 3-dword indices)
-//! - `EXTP`: `size/4` x `u32` exterior-package type ids.
-//!
-//!   exe: FUN_0053dee0 (EXTP branch via FUN_00544370)
+//!   + uv (2f) + reserved (2 u32, zero in the corpus) + second coords (2f)
+//!   (the map loader's POLY branch: groups of 14-dword verts, 3-dword indices).
+//! - `EXTP`: `size/4` x `u32` exterior-package type ids
+//!   (the map loader's EXTP branch).
 //!
 //! Record field offsets (`a`/`b` at +8/+9, `x`/`y` at +14/+18, name length at +22,
 //! name/bbox at +23, stride `71+n`) mirror the exe's record parser; `k1` chains match
 //! (`k1` of a child range's records equals the parent record's `k2`; `k2` values are
 //! globally unique per map).
-//! exe: FUN_00544010 (record walk, stride puVar2+0xc)
 
 use slr_fmt_core::reader::Reader;
 use slr_fmt_core::{FormatError, Result};
@@ -245,9 +240,9 @@ impl Chunk {
     /// Placement point of a text `RSD` chunk: the `x,y,z` head of its `params`
     /// line. Returns `None` for binary (`0x352`/`0x15`) chunks.
     ///
-    /// exe: `FUN_0053dee0` keeps the `params` line bytes (`FUN_00551240` with
-    /// `s___s__2048s`) alongside the gametype id; the first three floats are the
-    /// placement position the `b == 0x21` record's bounds are built around.
+    /// The loader keeps the `params` line bytes alongside the gametype id;
+    /// the first three floats are the placement position the `b == 0x21`
+    /// record's bounds are built around.
     #[must_use]
     pub fn rsd_point(&self) -> Option<[f32; 3]> {
         match self {
@@ -289,11 +284,13 @@ fn rsd_params_point(lines: &[String]) -> Option<[f32; 3]> {
 }
 
 /// One `PHYS` plane: material-ish `w0` word, three vertex indices, unit normal.
-///
 /// `refs` indexes the parent chunk's own vertex array (always in range in the
-/// corpus); `normal` is the unit face normal of that triangle (dot with either
-/// edge ~0, winding uniform CCW into the normal). `w0`'s meaning is open: it is
-/// a small id (0-8 dominate) but varies independently of plane/vertex counts.
+/// corpus); `normal` is the unit face normal of that triangle.
+///
+/// `w0`'s meaning is open: a small id (0-8 dominate) varying independently
+/// of plane/vertex counts.
+///
+/// exe: FUN_0053dee0
 #[derive(Debug, Clone)]
 pub struct PhysPlane {
     pub w0: u32,
@@ -337,8 +334,10 @@ impl PhysPlane {
 ///
 /// Attribute roles for `pos`/`nrm` mirror the SCX v3 vertex head (pos 3f + normal
 /// 3f + uv 2f; `slr-fmt-scx`). The color/uv/aux/second-coords split is
-/// geometric validation, not exe-proven: the exe's POLY branch (`FUN_0053dee0`)
-/// copies 14-dword verts opaquely, and no FVF/stride consumer has been traced.
+/// geometric validation, not exe-proven: the loader copies 14-dword verts
+/// opaquely, and no FVF/stride consumer has been traced.
+///
+/// exe: FUN_0053dee0
 #[derive(Debug, Clone, Copy)]
 pub struct PolyVertex {
     pub pos: [f32; 3],
@@ -399,12 +398,11 @@ impl PolyVertex {
 }
 
 /// One `POLY` group: raw vertices (56 bytes each) and triangle index triples
-/// (12 bytes each) into `verts`.
+/// (12 bytes each) into `verts`. `mat` (file word `f0`) is a zero-based
+/// material id spanning `0..ngroups-in-file` per map; the loader copies it
+/// opaquely per group head.
 ///
-/// `mat` (file word `f0`, formerly misread as a group-local count) is a
-/// zero-based material id: it spans `0..ngroups-in-file` per map (city 0..107
-/// over 624 groups, city2 0..74 over 748, ROC 0..41 over 155, test 0..85 over
-/// 242). The exe copies it opaquely (`*puVar8 = uVar6` per group head).
+/// exe: FUN_0053dee0
 #[derive(Debug, Clone)]
 pub struct PolyGroup {
     pub mat: u32,
@@ -641,6 +639,8 @@ pub fn parse_range_at(data: &[u8], offset: usize, size: usize) -> Result<Range> 
 /// Walk the whole map payload: the root descriptor's records seed a traversal where
 /// every record's `(x, y)` range is parsed once (keyed by offset).
 ///
+/// exe: FUN_0053dee0
+///
 /// Returns all visited ranges (root descriptor excluded) in visit order.
 /// Every range's chunks are fully parsed, so a clean walk accounts for every payload
 /// byte exactly once (records via [`Range::header_len`], the rest via chunks).
@@ -651,6 +651,8 @@ pub fn walk_payload(data: &[u8], root_offset: usize, root_size: usize) -> Result
 
 /// Walk ranges seeded by explicit records (the root descriptor's, or any subset).
 /// Returns all visited ranges in visit order; each offset is visited at most once.
+///
+/// exe: FUN_0053dee0
 pub fn walk_ranges(data: &[u8], seed: &[Record]) -> Result<Vec<Range>> {
     let mut out = Vec::new();
     let mut stack: Vec<Record> = seed.to_vec();
@@ -668,6 +670,8 @@ pub fn walk_ranges(data: &[u8], seed: &[Record]) -> Result<Vec<Range>> {
 
 /// Parse the root descriptor's record list (the payload walk seeds).
 /// Returns the records and the byte length they occupy (`8 + sum(strides)`).
+///
+/// exe: FUN_00544010
 pub fn parse_root_records(
     data: &[u8],
     root_offset: usize,

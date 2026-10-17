@@ -87,14 +87,18 @@ pub fn current_thread_rng() -> u16 {
 mod tests {
     use super::*;
 
-    /// First draws after `srand(1)`, read off the Unicorn oracle
-    /// (`re/oracle/rand_vectors.py --seeds 0x1 --threads 1 --draws 8`).
+    /// First draws after `srand(1)`, computed from the LCG formula itself
+    /// (`state = state * 0x343FD + 0x269EC3` wrapping, output
+    /// `(state >> 16) & 0x7FFF`): a pure unit test of [`MsvcRand`] with no
+    /// oracle provenance (the Unicorn differential lives in
+    /// `tests/rand_oracle.rs`).
     #[test]
-    fn first_draws_match_oracle_seed_1() {
+    fn first_draws_match_lcg_formula() {
+        let mut state: u32 = 1;
         let mut rng = MsvcRand::seeded(1);
-        let want = [41, 18467, 6334, 26500, 19169, 15724, 11478, 29358];
-        for w in want {
-            assert_eq!(rng.next_u15(), w);
+        for _ in 0..8 {
+            state = state.wrapping_mul(0x343FD).wrapping_add(0x269EC3);
+            assert_eq!(rng.next_u15(), ((state >> 16) & 0x7FFF) as u16);
         }
     }
 

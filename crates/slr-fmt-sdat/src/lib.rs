@@ -30,21 +30,27 @@ use slr_fmt_core::{FormatError, Result};
 
 pub const VERSION: u32 = 0x0002_0100;
 
-/// exe: options magic, written by `Config.saveConfig`
+/// Options magic, written by `Config.saveConfig`
 /// (`system/Scripts/util/Config.class` body 111); transport `File.write(int)`
 /// native `FUN_00485b20` / `File.write(float)` `FUN_00485bc0`.
-pub const TYPE_OPTIONS: u32 = 0xFEDC_BA98;
-/// exe: vehicle magic, written by `Vehicle.save`
+///
+/// exe: FUN_00484fa0
+pub const TYPE_OPTIONS: u32 = 0xFEDC_BA98; // options magic
+/// Vehicle magic, written by `Vehicle.save`
 /// (`sl/Scripts/game/Vehicle.class` body 44); scalars via the same `File`
 /// natives, parts via `Part.save` recursion.
-pub const TYPE_VEHICLE: u32 = 0x8866_4422;
-/// `"CTRL"` as a little-endian `u32`; exe: `ControlSet.save` / `load`
+///
+/// exe: FUN_00484fa0
+pub const TYPE_VEHICLE: u32 = 0x8866_4422; // vehicle magic
+/// `"CTRL"` as a little-endian `u32`; `ControlSet.save` / `load`
 /// (`system/Scripts/io/ControlSet.class`); strings via `File.write(String)`
-/// `LAB_00485fd0` (`u32 len` + bytes incl. NUL) / `File.readString` `0x486060`.
+/// (`u32 len` + bytes incl. NUL) / `File.readString`.
 pub const TYPE_CONTROLS: u32 = 0x4C52_5443; // "CTRL"
-
-/// One body word: `false` = int (`File.readInt` `FUN_00485b70`), `true` =
-/// float (`File.readFloat` `FUN_00485c10`).
+/// One body word: `false` = int, `true` = float (the `File.readInt` /
+/// `File.readFloat` pair).
+///
+/// exe: FUN_00485b70
+/// exe: FUN_00485c10
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Word {
     I(u32),
@@ -52,6 +58,9 @@ pub enum Word {
 }
 
 impl Word {
+    /// Read one body word: `u32` int or `f32` float, matching what the
+    /// script-ordered writers (`File.write(int)` `FUN_00485b20` /
+    /// `File.write(float)` `FUN_00485bc0`) emit.
     fn read(r: &mut Reader<'_>, is_float: bool) -> Result<Word> {
         if is_float {
             Ok(Word::F(r.f32()?))
@@ -490,11 +499,13 @@ pub struct Sdat {
     pub body: Body,
 }
 
-///exe: store `FUN_00484fa0` dispatches on the type word; load `0x485870`
-///reads the header the same way (`SDAT`, version `0x00020100`, then the
-///per-type body). `layout_floats` selects the options variant
-///(`STOCK_OPTIONS_FLOATS` / `REF_OPTIONS_FLOATS`); pass `None` for
-///non-options files.
+/// Store dispatches on the type word; load reads the header the same way
+/// (`SDAT`, version `0x00020100`, then the per-type body). `layout_floats`
+/// selects the options variant (`STOCK_OPTIONS_FLOATS` /
+/// `REF_OPTIONS_FLOATS`); pass `None` for non-options files.
+///
+/// exe: FUN_00484fa0
+/// exe: 0x00485870
 pub fn parse(data: &[u8], layout_floats: Option<&[bool]>) -> Result<Sdat> {
     let mut r = Reader::new(data);
     let magic = r.bytes(4)?;
