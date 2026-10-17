@@ -120,6 +120,7 @@ pub struct VehicleCfg {
     pub reverse_ratio: f32,
     pub rearend_ratio: f32,
     /// The six floats parsed by the native `enginepower` handler (handler 0x00443f90).
+    /// exe: 0x00443f90
     pub enginepower: [f32; 6],
     pub brakepower: [f32; 2],
     pub maxsteer: [f32; 2],
