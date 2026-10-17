@@ -123,8 +123,9 @@ pub struct Header {
     pub w7: u32,
 }
 
-/// exe: loader family 0x00483xxx-0x00485xxx (route/traffic/map container;
-/// exact .trc reader not isolated — see module docs)
+/// The exact `.trc` reader was not isolated from the surrounding loader family
+/// (route/traffic/map container code in `0x00483xxx`-`0x00485xxx`); see module
+/// docs. The lane framing this function asserts is structural.
 pub fn parse(data: &[u8]) -> Result<Trc> {
     let mut r = Reader::new(data);
     let version = r.u32()?;

@@ -56,27 +56,24 @@ pub struct Mesh {
     pub indices: Vec<u16>,
 }
 
-/// One version-3 material + geometry group.
+/// One version-3 material + geometry group. Ports the v3 loop: per iteration
+/// the material block is skipped by its size word, the vertex count is the
+/// next word, and the face count sits after the vertex array.
 ///
-/// `/// exe:` lines name the loader logic each field ports
-/// (`FUN_004b5c30` in the Ghidra export `re/out/all_pseudo.c`).
+/// exe: FUN_004b5c30
 #[derive(Debug, Clone)]
 pub struct V3Group {
-    /// Material block size word (`0x38`, `0x68` or `0x88`).
-    /// exe: `FUN_004b5c30` `uVar3` block-size dispatch.
+    /// Material block size word (`0x38`, `0x68` or `0x88`): the loader
+    /// dispatches on it (`FUN_004b5c30` `uVar3` block).
     pub material_size: u32,
-    /// Raw material payload (block after the size word).
-    /// exe: `FUN_004b5c30` skips the block (`puVar17 += uVar3`, `+0xe` for
-    /// `0x38`), keeping only the stride; nothing else is read from it.
+    /// Raw material payload (block after the size word): skipped by size,
+    /// keeping only the stride; nothing else is read from it.
     pub material: Vec<u8>,
     /// Vertex stride in bytes: `0x2c` after a `0x38` block, else the u32 at
     /// material offset 60.
-    /// exe: `FUN_004b5c30` `param_2 = 0x2c` vs `param_2 = puVar17[0xf]`.
     pub stride: usize,
     /// Triangle-list vertices: `pos normal uv` + raw remainder per vertex.
-    /// exe: `FUN_004b5c30` reads the first three words of each stride via
-    /// `FUN_0054f6a0` (float identity through `FUN_005596c0`) times `0.01`,
-    /// advancing the cursor one stride per vertex.
+    /// (First three words per stride, scaled by `0.01`.)
     pub mesh: V3Mesh,
 }
 
@@ -90,7 +87,6 @@ pub struct V3Mesh {
     /// pair, colour-like word, tail; semantics undecoded).
     pub extra: Vec<Vec<u8>>,
     /// Triangle list, `u32` indices plus the group's base vertex offset.
-    /// exe: `FUN_004b5c30` emits `*src + local_38` per index word.
     pub indices: Vec<u32>,
 }
 
@@ -117,8 +113,8 @@ pub enum Scx {
     V3 {
         groups: Vec<V3Group>,
         /// Trailing word: `None` when the last group ends exactly at EOF,
-        /// `Some(0)` for the usual zero terminator.
-        /// exe: `FUN_004b5c30` breaks on `end <= cursor` or a zero word.
+        /// `Some(0)` for the usual zero terminator (the loader breaks when
+        /// the cursor reaches the end or reads a zero word).
         trailing: Option<u32>,
     },
 }
@@ -140,10 +136,11 @@ pub fn parse(data: &[u8]) -> Result<Scx> {
     }
 }
 
-/// exe: `FUN_004b5c30`, `local_28 == 3` loop: per iteration the material block
-/// is skipped by its size word, the vertex count is the next word, and the
-/// face count sits right after the vertex array
-/// (`uVar9 = *(uVar3 * stride + 4 + cursor)`); faces are bare `u32` triples.
+/// v3 loop: per iteration the material block is skipped by its size word,
+/// the vertex count is the next word, and the face count sits right after
+/// the vertex array; faces are bare `u32` triples.
+///
+/// exe: FUN_004b5c30
 fn parse_v3(data: &[u8]) -> Result<Scx> {
     let mut groups = Vec::new();
     let mut cur = 8usize;

@@ -30,25 +30,26 @@ use slr_fmt_core::{FormatError, Result};
 
 /// One mip level: the 20-byte table entry plus the sliced payloads.
 ///
-/// `/// exe:` lines name the loader logic each field ports
-/// (`FUN_00507110` in the Ghidra export `re/out/all_pseudo.c`).
+/// The per-mip table ports the header/per-mip reader; `rgb_size` feeds the
+/// JPEG decode request, and `alpha_size` gates the second-JPEG branch.
+///
+/// exe: FUN_00507110
+/// exe: FUN_00506ad0
+/// exe: FUN_00506c70
 #[derive(Debug, Clone)]
 pub struct Mip {
-    /// Total payload bytes after this 20-byte entry.
-    /// exe: `FUN_00507110` `piVar2 = *(param+0x70); *(param+0x80) = piVar2;`
-    /// `*(param+0x70) = piVar2 + *piVar2 + 0x14` (advance by total + 0x14).
+    /// Total payload bytes after this 20-byte entry
+    /// (the loader advances by total + `0x14`).
     pub total: u32,
-    /// Bytes of the RGB (colour) JPEG starting at the payload.
-    /// exe: `FUN_00506ad0` passes `iVar4 + 0x14` (payload start) and
-    /// `*(mip + 4)` (`rgb_size`) to the JPEG decode request `FUN_00564b50`.
+    /// Bytes of the RGB (colour) JPEG starting at the payload (fed to the
+    /// JPEG decode request).
     pub rgb_size: u32,
-    /// Bytes of the optional alpha JPEG following the RGB JPEG (`0` = none).
-    /// exe: `FUN_00506c70` checks `*(mip + 8) != 0` (`alpha_size`) to decide
-    /// whether the second JPEG is decoded (`param+0x78` set path).
+    /// Bytes of the optional alpha JPEG following the RGB JPEG (`0` = none;
+    /// nonzero selects the second-JPEG branch).
     pub alpha_size: u32,
-    /// Normalised mip level: `(index + 1) / mip_count` as f32.
-    /// exe: read from the table (`mip + 0x10`) but never consumed by the loader;
-    /// every shipped file stores `(i+1)/mip_count` exactly (f32-bit-exact).
+    /// Normalised mip level: `(index + 1) / mip_count` as f32 (read from the
+    /// table but never consumed by the loader; every shipped file stores it
+    /// exactly, f32-bit-exact).
     pub level: f32,
     /// `rgb_size` bytes of baseline JPEG (RGB), starting with `FFD8`, ending `FFD9`.
     pub rgb: Vec<u8>,
@@ -65,44 +66,37 @@ impl Mip {
 }
 
 /// A decoded PTX container: header plus per-mip table and payloads.
+/// The header words port the type-1 loader; per-mip JPEG branches are
+/// decoded via [`Mip`].
+///
+/// exe: FUN_00507110
 #[derive(Debug, Clone)]
 pub struct Ptx {
-    /// Mip-level count from header word 1.
-    /// exe: `FUN_00507110` `iVar1 = *(res + 4); *(param+0x68) = iVar1`
-    /// (mip count), clamped by `texture_size` (`DAT_006188b4`): fewer levels keep
-    /// the low (small) mips.
+    /// Mip-level count from header word 1 (clamped by `texture_size`: fewer
+    /// levels keep the low small mips).
     pub mip_count: u32,
-    /// Base (largest-mip) width in pixels, header word 2.
-    /// exe: `FUN_00507110` `iVar6 = *(res + 8)` -> D3D texture width; right-
-    /// shifted together with height when levels are clamped.
+    /// Base (largest-mip) width in pixels, header word 2 (right-shifted with
+    /// height when levels are clamped).
     pub width: u32,
-    /// Base (largest-mip) height in pixels, header word 3.
-    /// exe: `FUN_00507110` `iVar7 = *(res + 0xc)` -> D3D texture height.
+    /// Base (largest-mip) height in pixels, header word 3 (right-shifted with
+    /// width when levels are clamped).
     pub height: u32,
     /// One entry per mip level, smallest first, largest (base) last.
     pub mips: Vec<Mip>,
 }
 
 /// Parse the PTX container: header, per-mip table, JPEG payload slicing.
-///
 /// Byte-exact accounting: the cursor must end exactly at EOF, and every
 /// entry must satisfy `total == rgb_size + alpha_size` with `rgb_size > 0`.
 /// The RGB payload must start with the JPEG SOI marker (`FFD8`); the alpha
 /// payload, when present, likewise. Pixel decoding is NOT done here (tier D;
-/// see [`decode_rgb`]).
+/// see [`decode_rgb`]). Header words and the per-mip advance port the
+/// type-1 loader; the `"ptx"` extension dispatch and the type-1 factory
+/// select it.
 ///
-/// ```text
-/// exe: FUN_00507110 (all_pseudo.c:118566): header words
-///   iVar7 = *(param+0x28)            (resource bytes)
-///   iVar1 = *(iVar7 + 4)             (mip count)
-///   *(param+0x68) = iVar1; *(param+0x6c) = 0
-///   *(param+0x70) = iVar7 + 0x10     (first mip entry)
-///   iVar6 = *(iVar7 + 8); iVar7 = *(iVar7 + 0xc)   (w, h)
-///   iVar3 = iVar1 - DAT_006188b4     (texture_size clamp)
-///   per-mip advance (all_pseudo.c:118590):
-///   piVar2 = *(param+0x70); *(param+0x80) = piVar2;
-///   *(param+0x70) = piVar2 + *piVar2 + 0x14; *(param+0x6c) += 1
-/// ```
+/// exe: FUN_0053cc70
+/// exe: FUN_00505960
+/// exe: FUN_00507110
 pub fn parse(data: &[u8]) -> Result<Ptx> {
     let mut r = Reader::new(data);
     let zero = r.u32()?;

@@ -6,12 +6,4 @@
 /stock/
 
 __pycache__/
-/target
-.DS_Store
-/saves
-/reference
-/re/out
-/stock/
-
-__pycache__/
 re/x87probe/rosetta/vectors.inc
