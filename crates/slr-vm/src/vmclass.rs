@@ -1662,6 +1662,56 @@ mod tests {
         assert!(loader.find_by_id(id).is_some());
     }
 
+    /// Per-plan step A: with two loaded records, pool/body/owner reads
+    /// must pin the addressed record, not record 0 or the current name
+    /// selection. Each module keeps its own pool; the assertion bites when
+    /// an implementation confuses owners (verified by mutation: forcing
+    /// `pool_text_of`/`body_owner` to record 0 fails this test).
+    #[test]
+    fn owner_reads_pin_the_addressed_record_not_record_zero() {
+        fn named_pool(class: &str, field: &str) -> Vec<PoolEntry> {
+            vec![
+                PoolEntry::Str(class.into()),
+                PoolEntry::Str("java.lang.Object".into()),
+                PoolEntry::Str("I".into()),
+                PoolEntry::Str(field.into()),
+                PoolEntry::Str("tick".into()),
+                PoolEntry::Str("()V".into()),
+            ]
+        }
+        let (module_a, data_a) = tiny_module(
+            named_pool("game.Alpha", "alpha_count"),
+            vec![[1u32, 4, 5, 0, 2]],
+            vec![],
+        );
+        let (module_b, data_b) = tiny_module(
+            named_pool("game.Beta", "beta_count"),
+            vec![[1u32, 4, 5, 0, 2]],
+            vec![],
+        );
+        let mut loader = Loader::new();
+        let (id_a, _) = loader.load_module(&module_a, &data_a).unwrap();
+        let (id_b, _) = loader.load_module(&module_b, &data_b).unwrap();
+        assert_ne!(id_a, id_b);
+        // Pools stay per-record: index 3 is each class's own field name.
+        assert_eq!(loader.pool_text_of(id_a, 3).unwrap(), "alpha_count");
+        assert_eq!(loader.pool_text_of(id_b, 3).unwrap(), "beta_count");
+        // Bodies stay per-record: each local index 0 maps to a distinct
+        // global body owned by its own record.
+        let body_a = loader.body_id_of(id_a, 0).unwrap();
+        let body_b = loader.body_id_of(id_b, 0).unwrap();
+        assert_ne!(body_a, body_b);
+        assert_eq!(loader.body_owner(body_a), Some(id_a));
+        assert_eq!(loader.body_owner(body_b), Some(id_b));
+        // Context words round-trip per record.
+        assert_eq!(loader.context_id(id_a.get()), Some(id_a));
+        assert_eq!(loader.context_id(id_b.get()), Some(id_b));
+        // Identical reloads keep identities (no duplicate records).
+        let (again_a, _) = loader.load_module(&module_a, &data_a).unwrap();
+        assert_eq!(again_a, id_a);
+        assert_eq!(loader.len(), 2);
+    }
+
     #[test]
     fn invalid_field_initializer_is_rejected_before_installation() {
         let (module, data) = tiny_module(sample_pool(), vec![], vec![[0, 3, 2, 99]]);

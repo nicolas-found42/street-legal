@@ -2418,6 +2418,60 @@ mod tests {
         assert_eq!(right.tag, TypeTag::Ref(TypeTag::STRING));
     }
 
+    /// Per-plan step A: execution state carries retained [`ClassId`]s,
+    /// never name re-lookups. The allocated object pins the loaded record,
+    /// the frame context word decodes to the same identity, and field
+    /// reads/writes resolve through the retained record. A later slice
+    /// enables overlapping duplicate records; these assertions must keep
+    /// biting then (each record keeps its own ID while names collide).
+    #[test]
+    fn allocated_objects_and_frames_carry_retained_ids() {
+        use crate::interp::{Frame, Pc};
+        let mut h = host_with_class();
+        let child = h.loader.insert_test_class(crate::vmclass::Class {
+            kind: 0,
+            name: "game.Widget".into(),
+            base: Some("java.lang.Object".into()),
+            base_id: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![crate::vmclass::Field {
+                class: "game.Widget".into(),
+                name: "count".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+            bodies: vec![],
+        });
+        let object = h.loader.lookup("game.Widget").unwrap();
+        assert_eq!(object, child);
+        let word = h.alloc_object("game.Widget").expect("allocates");
+        assert_eq!(
+            h.objects[(word - 0x1000) as usize].class,
+            crate::vmclass::ClassRef::Loaded(child)
+        );
+        // The frame context word is the ID encoding; decoding must recover
+        // the same record without consulting the name map.
+        let context = h.class_context("game.Widget").unwrap();
+        assert_eq!(context, child.get());
+        assert_eq!(h.loader.context_id(context), Some(child));
+        let frame = Frame::new(None, word);
+        assert_eq!(h.loader.context_id(frame.class_ctx), None);
+        let mut frame = Frame::new(
+            Some(Pc {
+                body: BodyId(0),
+                idx: 0,
+            }),
+            word,
+        );
+        frame.class_ctx = context;
+        assert_eq!(h.loader.context_id(frame.class_ctx), Some(child));
+        // Field access resolves through the retained record.
+        h.write_field(word, "count", Value::int(7)).unwrap();
+        assert_eq!(h.read_field(word, "count").unwrap(), Value::int(7));
+        assert_eq!(h.instance_field_slot_id(child, "count").unwrap(), 0);
+    }
+
     #[test]
     fn pool_entry_shapes_are_visible() {
         // The host reads pool entries for declare/literals; pin the shapes.
