@@ -55,7 +55,7 @@ fn loaded_stock_string_identity_matches_real_intern_lookup_and_ptr_storage() {
         assert_eq!(json!(vm.objects.len()), row["allocated_objects"]);
         if word != 0 {
             assert_eq!(
-                vm.objects[(word - 0x1000) as usize].class,
+                vm.objects[(word - 0x1000) as usize].class_name(&vm.loader),
                 "java.lang.String"
             );
             let bytes = string_bytes(&vm, word).unwrap();
@@ -105,6 +105,7 @@ fn script_string_literals_and_native_producers_share_the_actual_heap_object() {
         kind: 0,
         name: "Code".into(),
         base: None,
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         fields: vec![],
@@ -158,7 +159,8 @@ fn inherited_string_ptr_script_store_is_observed_by_the_installed_stock_native()
     }
     let first = intern_string(&mut vm, b"alpha");
     let second = intern_string(&mut vm, b"12345678");
-    let ptr = vm.instance_field_slot("java.lang.String", "ptr").unwrap();
+    let string_id = vm.loader.lookup("java.lang.String").unwrap();
+    let ptr = vm.instance_field_slot_id(string_id, "ptr").unwrap();
     assert_eq!(
         vm.objects[(first - 0x1000) as usize].fields[ptr].tag,
         TypeTag::Int
@@ -168,6 +170,7 @@ fn inherited_string_ptr_script_store_is_observed_by_the_installed_stock_native()
         kind: 0,
         name: "Code".into(),
         base: None,
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         fields: vec![],
@@ -238,6 +241,7 @@ fn string_creation_rejects_absent_or_incompatible_ptr_metadata() {
         kind: 0,
         name: "java.lang.String".into(),
         base: None,
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         bodies: vec![],
@@ -276,6 +280,7 @@ fn inherited_string_native_reads_a_loaded_subclass_ptr_cell() {
         kind: 0,
         name: "StringSubclass".into(),
         base: Some("java.lang.String".into()),
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         fields: vec![slr_vm::vmclass::Field {
@@ -288,7 +293,8 @@ fn inherited_string_native_reads_a_loaded_subclass_ptr_cell() {
     });
     let original = intern_string(&mut vm, b"subclass chars");
     let subclass = vm.alloc_object("StringSubclass").unwrap();
-    let index = vm.instance_field_slot("java.lang.String", "ptr").unwrap();
+    let string_id = vm.loader.lookup("java.lang.String").unwrap();
+    let index = vm.instance_field_slot_id(string_id, "ptr").unwrap();
     let ptr = vm
         .read_cell(HeapSlot::Object {
             word: original,

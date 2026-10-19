@@ -245,7 +245,7 @@ mod tests {
             .objects
             .get((word - 0x1000) as usize)
             .expect("the returned word is an object word");
-        assert_eq!(obj.class, "java.lang.String");
+        assert_eq!(obj.class_name(&vm.loader), "java.lang.String");
         assert_eq!(vm.string_bytes(word), Some(expected));
         assert!(
             vm.strings.lookup(expected).is_some(),
@@ -352,7 +352,7 @@ mod tests {
             .objects
             .get((ret - 0x1000) as usize)
             .expect("the returned word is an object word");
-        assert_eq!(obj.class, "java.lang.String");
+        assert_eq!(obj.class_name(&vm.loader), "java.lang.String");
         let bytes = string_bytes(&vm, ret).expect("the result word has its bytes");
         assert_eq!(vm.string_bytes(ret), Some(bytes.as_slice()));
         seam::reset();

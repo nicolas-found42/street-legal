@@ -84,13 +84,27 @@ impl From<HostError> for VmError {
     }
 }
 
-/// A heap object: class plus field words.
+/// A heap object: runtime record identity plus base-first field words.
 #[derive(Clone, Debug)]
 pub struct Object {
-    /// Index into [`VmHost::loader`] classes by name.
-    pub class: String,
+    /// Loaded record for ordinary objects; explicit array spelling for
+    /// typed arrays (arrays own no arena record).
+    pub class: crate::vmclass::ClassRef,
     /// Base-first instance values; class statics have their own owner.
     pub fields: Vec<Value>,
+}
+
+impl Object {
+    /// Boundary projection of the runtime class spelling (diagnostics,
+    /// native registries, cross-crate seams). Never an identity substitute:
+    /// execution carries the [`crate::vmclass::ClassRef`] itself.
+    #[must_use]
+    pub fn class_name<'a>(&'a self, loader: &'a crate::vmclass::Loader) -> &'a str {
+        match &self.class {
+            crate::vmclass::ClassRef::Loaded(id) => loader.class_name(*id).unwrap_or("<stale>"),
+            crate::vmclass::ClassRef::Array(array) => array.descriptor(),
+        }
+    }
 }
 
 // ---- the shared native-call ABI --------------------------------------
@@ -506,17 +520,18 @@ impl VmHost {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(bytes.len())];
-        self.loader
-            .find("java.lang.String")
+        let string_id = self
+            .loader
+            .lookup("java.lang.String")
             .ok_or(HostError::BadCast)?;
         if let Some(word) = self.strings.lookup(bytes).and_then(|record| record.object) {
             return Ok(word);
         }
-        let slot = self.instance_field_slot("java.lang.String", "ptr")?;
-        if self.instance_fields("java.lang.String")?[slot].ty != "I" {
+        let slot = self.instance_field_slot_id(string_id, "ptr")?;
+        if self.instance_fields_id(string_id)?[slot].ty != "I" {
             return Err(HostError::MissingMember);
         }
-        let word = self.alloc_object("java.lang.String")?;
+        let word = self.alloc_object_id(string_id)?;
         let buffer = self.strings.intern(bytes).word;
         self.objects[(word - 0x1000) as usize].fields[slot] = Value::int(buffer as i32);
         self.strings.bind_object(bytes, word);
@@ -526,17 +541,23 @@ impl VmHost {
     /// Resolve bytes through the actual heap object's inherited ptr cell.
     #[must_use]
     pub fn string_bytes(&self, word: u32) -> Option<&[u8]> {
+        use crate::vmclass::ClassRef;
         let object = self.objects.get(word.checked_sub(0x1000)? as usize)?;
+        let string_id = self.loader.lookup("java.lang.String")?;
+        let object_id = match &object.class {
+            ClassRef::Loaded(id) => *id,
+            ClassRef::Array(_) => return None,
+        };
         if !self
             .loader
-            .is_inherited_from(&object.class, "java.lang.String")
+            .is_inherited_from_id(object_id, string_id)
             .ok()?
         {
             return None;
         }
         // The native uses its cached String/Native.ptr field index. Base-first
         // layout keeps that same cell in a subclass, even with later fields.
-        let slot = self.instance_field_slot("java.lang.String", "ptr").ok()?;
+        let slot = self.instance_field_slot_id(string_id, "ptr").ok()?;
         self.strings.bytes_at(object.fields.get(slot)?.payload)
     }
     /// An empty host (boot with [`VmHost::boot`]).
@@ -610,9 +631,11 @@ impl VmHost {
         ) {
             return Err(HostError::BadCast);
         }
+        let array = crate::vmclass::ArrayDescriptor::new(&format!("[{element}"))
+            .ok_or(HostError::BadCast)?;
         let word = 0x1000 + self.objects.len() as u32;
         self.objects.push(Object {
-            class: format!("[{element}"),
+            class: crate::vmclass::ClassRef::Array(array),
             fields: vec![Value::int(length as i32)],
         });
         self.array_cells.insert(
@@ -630,21 +653,37 @@ impl VmHost {
 
     /// Base-first instance-field layout. Static variables belong to their
     /// declaring class, never to an object's instance variable container.
+    /// The name form resolves once at the boundary; layout below carries IDs.
     /// exe: FUN_00407da0
     pub fn instance_fields(&self, class: &str) -> Result<Vec<&crate::vmclass::Field>, HostError> {
+        let id = self.loader.lookup(class).ok_or(HostError::BadCast)?;
+        self.instance_fields_id(id)
+    }
+
+    /// ID-carrying instance layout: hierarchy steps dereference records by
+    /// ID; declared base spellings resolve through current selection.
+    pub fn instance_fields_id(
+        &self,
+        class: crate::vmclass::ClassId,
+    ) -> Result<Vec<&crate::vmclass::Field>, HostError> {
         let mut hierarchy = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = std::collections::HashSet::new();
         let mut current = Some(class);
-        while let Some(name) = current {
-            if name == "V" {
-                break;
-            }
-            if !seen.insert(name) {
+        while let Some(id) = current {
+            if !seen.insert(id) {
                 return Err(HostError::BadCast);
             }
-            let class = self.loader.find(name).ok_or(HostError::BadCast)?;
-            hierarchy.push(class);
-            current = class.base.as_deref();
+            let record = self.loader.find_by_id(id).ok_or(HostError::BadCast)?;
+            if record.name == "V" {
+                break;
+            }
+            hierarchy.push(record);
+            // `V` is the loader's root sentinel (java.lang.Object's
+            // declared base), not a loadable record: stop there.
+            current = match record.base.as_deref() {
+                Some("V") | None => None,
+                Some(parent) => Some(self.loader.lookup(parent).ok_or(HostError::BadCast)?),
+            };
         }
         Ok(hierarchy
             .into_iter()
@@ -654,9 +693,21 @@ impl VmHost {
     }
 
     /// Named instance slot, shared by script lvalues and installed natives.
+    /// The name form resolves once at the boundary; layout below carries IDs.
     /// exe: FUN_00403840
     pub fn instance_field_slot(&self, class: &str, name: &str) -> Result<usize, HostError> {
-        self.instance_fields(class)?
+        let id = self.loader.lookup(class).ok_or(HostError::BadCast)?;
+        self.instance_field_slot_id(id, name)
+    }
+
+    /// ID-carrying instance slot lookup.
+    /// exe: FUN_00403840
+    pub fn instance_field_slot_id(
+        &self,
+        class: crate::vmclass::ClassId,
+        name: &str,
+    ) -> Result<usize, HostError> {
+        self.instance_fields_id(class)?
             .iter()
             .rposition(|field| field.name == name)
             .ok_or(HostError::MissingMember)
@@ -664,19 +715,26 @@ impl VmHost {
 
     /// The metadata resolver checks each class's static then instance list,
     /// walking ancestors; inherited instance indices include base fields.
+    /// Entry spellings resolve once; the walk below carries IDs.
     /// exe: FUN_00405690
-    fn field_index(&self, class: &str, name: &str) -> Result<(usize, bool), HostError> {
-        let layout = self.instance_fields(class)?;
+    /// ID-carrying field resolution: owner steps dereference records by ID.
+    /// exe: FUN_00405690
+    fn field_index_id(
+        &self,
+        class: crate::vmclass::ClassId,
+        name: &str,
+    ) -> Result<(usize, bool), HostError> {
+        let layout = self.instance_fields_id(class)?;
         let mut current = Some(class);
-        while let Some(name_class) = current {
-            if name_class == "V" {
+        while let Some(owner) = current {
+            let record = self
+                .loader
+                .find_by_id(owner)
+                .ok_or(HostError::MissingMember)?;
+            if record.name == "V" {
                 break;
             }
-            let class = self
-                .loader
-                .find(name_class)
-                .ok_or(HostError::MissingMember)?;
-            if let Some(index) = class
+            if let Some(index) = record
                 .fields
                 .iter()
                 .filter(|field| field.is_static)
@@ -687,43 +745,47 @@ impl VmHost {
             {
                 return Ok((index, true));
             }
-            if class
+            let owner_name = record.name.clone();
+            if record
                 .fields
                 .iter()
                 .any(|field| !field.is_static && field.name == name)
             {
                 let index = layout
                     .iter()
-                    .rposition(|field| field.class == name_class && field.name == name)
+                    .rposition(|field| field.class == owner_name && field.name == name)
                     .ok_or(HostError::MissingMember)?;
                 return Ok((index, false));
             }
-            current = class.base.as_deref();
+            current = match record.base.as_deref() {
+                Some(parent) => Some(self.loader.lookup(parent).ok_or(HostError::MissingMember)?),
+                None => None,
+            };
         }
         Err(HostError::MissingMember)
     }
 
     fn indexed_field(
         &mut self,
-        owner: &str,
+        owner: crate::vmclass::ClassId,
         pool_index: u32,
         receiver: u32,
     ) -> Result<HeapSlot, HostError> {
         let (class, name, ty) = self
             .loader
-            .field_reference(owner, pool_index)
+            .field_reference_of(owner, pool_index)
             .map_err(|_| HostError::MissingMember)?;
         if ty.starts_with('(') {
             return Err(HostError::MissingMember);
         }
-        let (class, name) = (class.to_owned(), name.to_owned());
-        let (slot, is_static) = self.field_index(&class, &name)?;
+        let encoded = self.loader.lookup(class).ok_or(HostError::MissingMember)?;
+        let (slot, is_static) = self.field_index_id(encoded, name)?;
         if is_static {
             // The original cache resolver records the defining module in
             // DAT0062f11c, but 101b still loads the pool-encoded class via
             // 406c20/4117a0. Preserve that observed behavior even for a
             // controlled inherited-static reference encoded with a leaf class.
-            self.static_slot(&class, slot)
+            self.static_slot_id(encoded, slot)
         } else if receiver == 0 {
             Err(HostError::MissingMember)
         } else {
@@ -735,6 +797,8 @@ impl VmHost {
     }
 
     /// Resolve the original static-first instance name lookup.
+    /// The runtime class comes from the object's retained [`ClassRef`];
+    /// statics pin the same record through the context word.
     /// exe: FUN_00408800
     pub fn member_slot(&mut self, word: u32, name: &str) -> Result<HeapSlot, HostError> {
         if self.array_cells.contains_key(&word) {
@@ -751,9 +815,12 @@ impl VmHost {
             .ok_or(HostError::MissingMember)?
             .class
             .clone();
+        let crate::vmclass::ClassRef::Loaded(id) = class else {
+            return Err(HostError::MissingMember);
+        };
         if let Some(slot) = self
             .loader
-            .find(&class)
+            .find_by_id(id)
             .ok_or(HostError::MissingMember)?
             .fields
             .iter()
@@ -763,11 +830,11 @@ impl VmHost {
             .last()
             .map(|(index, _)| index)
         {
-            return self.static_slot(&class, slot);
+            return self.static_slot_id(id, slot);
         }
         Ok(HeapSlot::Object {
             word,
-            slot: self.instance_field_slot(&class, name)?,
+            slot: self.instance_field_slot_id(id, name)?,
         })
     }
 
@@ -775,9 +842,22 @@ impl VmHost {
     /// immediately before its initializer. The installed owner is the reentry
     /// sentinel; a malformed dependency cycle before installation fails closed.
     /// This does not model machine fatal-handler unwind or class poisoning.
+    /// Entry spellings resolve once; dependencies and statics below carry IDs.
     /// exe: FUN_00403e80
     fn initialize_class(&mut self, class: &str) -> Result<(), HostError> {
-        let context = self.class_context(class).ok_or(HostError::MissingMember)?;
+        let id = self.loader.lookup(class).ok_or(HostError::MissingMember)?;
+        self.initialize_class_id(id)
+    }
+
+    /// ID-carrying initialization: the sentinel key and static container are
+    /// the frame-context word (the [`ClassId`] encoding), retained across
+    /// later registrations so old statics stay pinned to their record.
+    /// Declared base/interface spellings resolve through current selection
+    /// at each step (the pre-installation dynamic point); the installed
+    /// owner keeps its own dependency IDs afterwards.
+    /// exe: FUN_00403e80
+    fn initialize_class_id(&mut self, class: crate::vmclass::ClassId) -> Result<(), HostError> {
+        let context = class.get();
         if self.static_cells.contains_key(&context) {
             return Ok(());
         }
@@ -789,7 +869,7 @@ impl VmHost {
         let result = (|| {
             let metadata = self
                 .loader
-                .find(class)
+                .find_by_id(class)
                 .ok_or(HostError::MissingMember)?
                 .clone();
             // Resolve the entire declared dependency list before recursion.
@@ -797,7 +877,7 @@ impl VmHost {
             // does not impose a corresponding hard-rejection check.
             let base = metadata.base.as_deref().filter(|base| *base != "V");
             if let Some(base) = base {
-                self.loader.find(base).ok_or(HostError::MissingMember)?;
+                self.loader.lookup(base).ok_or(HostError::MissingMember)?;
             }
             for interface in &metadata.interfaces {
                 let dependency = self
@@ -805,9 +885,10 @@ impl VmHost {
                     .find(interface)
                     .ok_or(HostError::MissingMember)?;
                 if dependency.kind != 1 {
+                    let owner = metadata.name.clone();
                     self.initialization_diagnostics.push(
                         InitializationDiagnostic::InterfaceExtendsClass {
-                            class: class.to_owned(),
+                            class: owner,
                             interface: interface.clone(),
                             kind: dependency.kind,
                         },
@@ -817,11 +898,11 @@ impl VmHost {
             if let Some(base) = base {
                 self.initialize_class(base)?;
             }
-            for interface in &metadata.interfaces {
-                self.initialize_class(interface)?;
+            for interface in metadata.interfaces.clone() {
+                self.initialize_class(&interface)?;
             }
             self.static_cells.insert(context, Vec::new());
-            for (index, field) in metadata
+            for (static_index, field) in metadata
                 .fields
                 .iter()
                 .filter(|field| field.is_static)
@@ -834,19 +915,35 @@ impl VmHost {
                 // Original compares canonical descriptor pointers. The loader's
                 // current single-version class boundary and TypeTag interning
                 // provide that identity here; versioned class identity is open.
-                if TypeTag::intern(&field.ty) == TypeTag::intern(&format!("L{class};")) {
+                if TypeTag::intern(&field.ty) == TypeTag::intern(&format!("L{};", metadata.name)) {
                     continue;
                 }
-                if let Some(body) = self.loader.field_initializer(field) {
+                // Initializer lookup pins (owner ID, declared index): never
+                // Field-equality matching across records.
+                let declared = metadata
+                    .fields
+                    .iter()
+                    .position(|candidate| {
+                        candidate.name == field.name
+                            && candidate.ty == field.ty
+                            && candidate.is_static
+                    })
+                    .and_then(|index| self.loader.field_initializer_of(class, index));
+                if let Some(body) = declared {
                     let value = self
-                        .initialize_field(body, context, 0, self.static_cells[&context][index])
+                        .initialize_field(
+                            body,
+                            context,
+                            0,
+                            self.static_cells[&context][static_index],
+                        )
                         .map_err(|error| {
                             HostError::UnsupportedInitializer(format!(
                                 "{}.{}: {error:?}",
-                                class, field.name
+                                metadata.name, field.name
                             ))
                         })?;
-                    self.static_cells.get_mut(&context).unwrap()[index] = value;
+                    self.static_cells.get_mut(&context).unwrap()[static_index] = value;
                 }
             }
             Ok(())
@@ -856,10 +953,18 @@ impl VmHost {
     }
 
     /// A class's own static variable container, separate from instances.
+    /// The name form resolves once at the boundary; the container key is
+    /// the retained context word.
     /// exe: FUN_00404800
-    fn static_slot(&mut self, class: &str, slot: usize) -> Result<HeapSlot, HostError> {
-        self.initialize_class(class)?;
-        let context = self.class_context(class).ok_or(HostError::MissingMember)?;
+    /// ID-carrying static slot: the container key is the retained context.
+    /// exe: FUN_00404800
+    fn static_slot_id(
+        &mut self,
+        class: crate::vmclass::ClassId,
+        slot: usize,
+    ) -> Result<HeapSlot, HostError> {
+        self.initialize_class_id(class)?;
+        let context = class.get();
         if slot >= self.static_cells[&context].len() {
             return Err(HostError::MissingMember);
         }
@@ -947,6 +1052,7 @@ impl VmHost {
     }
 
     /// Read a named field using the same authoritative cells as bytecode.
+    /// Declared types dereference the retained record ID, never a re-lookup.
     pub fn read_field(&mut self, word: u32, name: &str) -> Result<Value, HostError> {
         let slot = self.member_slot(word, name)?;
         let value = <Self as Host>::read_cell(self, slot).map_err(|_| HostError::MissingMember)?;
@@ -954,29 +1060,38 @@ impl VmHost {
             HeapSlot::Object { word, slot: 0 } if self.array_cells.contains_key(&word) => {
                 TypeTag::Int
             }
-            HeapSlot::Object { word, slot } => TypeTag::intern(
-                &self
-                    .instance_fields(&self.objects[(word - 0x1000) as usize].class)?
-                    .get(slot)
-                    .ok_or(HostError::MissingMember)?
-                    .ty,
-            ),
-            HeapSlot::Static { context, slot } => TypeTag::intern(
-                &self
+            HeapSlot::Object { word, slot } => {
+                use crate::vmclass::ClassRef;
+                let ClassRef::Loaded(id) = self.objects[(word - 0x1000) as usize].class.clone()
+                else {
+                    return Err(HostError::MissingMember);
+                };
+                TypeTag::intern(
+                    &self
+                        .instance_fields_id(id)?
+                        .get(slot)
+                        .ok_or(HostError::MissingMember)?
+                        .ty,
+                )
+            }
+            HeapSlot::Static { context, slot } => {
+                let id = self
                     .loader
-                    .find(
-                        self.loader
-                            .context_name(context)
-                            .ok_or(HostError::MissingMember)?,
-                    )
-                    .ok_or(HostError::MissingMember)?
-                    .fields
-                    .iter()
-                    .filter(|field| field.is_static)
-                    .nth(slot)
-                    .ok_or(HostError::MissingMember)?
-                    .ty,
-            ),
+                    .context_id(context)
+                    .ok_or(HostError::MissingMember)?;
+                TypeTag::intern(
+                    &self
+                        .loader
+                        .find_by_id(id)
+                        .ok_or(HostError::MissingMember)?
+                        .fields
+                        .iter()
+                        .filter(|field| field.is_static)
+                        .nth(slot)
+                        .ok_or(HostError::MissingMember)?
+                        .ty,
+                )
+            }
             _ => return Err(HostError::MissingMember),
         };
         if value.tag != declared {
@@ -999,14 +1114,34 @@ impl VmHost {
     /// Initialize class dependencies, then append base-first typed instance
     /// cells immediately before each field initializer. Errors retain the
     /// observed prefix; machine fatal-handler unwind is outside this host.
+    /// The entry spelling resolves once; the object, layout and initializer
+    /// lookups below carry the retained record ID.
     /// exe: FUN_00407da0
     pub fn alloc_object(&mut self, class: &str) -> Result<u32, HostError> {
-        self.initialize_class(class)?;
-        let metadata: Vec<_> = self.instance_fields(class)?.into_iter().cloned().collect();
+        let id = self.loader.lookup(class).ok_or(HostError::BadCast)?;
+        self.alloc_object_id(id)
+    }
+
+    /// ID-carrying allocation: the object's runtime class is the retained
+    /// record; initializer lookups pin (owner ID, declared index).
+    /// exe: FUN_00407da0
+    pub fn alloc_object_id(&mut self, class: crate::vmclass::ClassId) -> Result<u32, HostError> {
+        self.initialize_class_id(class)?;
+        let metadata: Vec<_> = self
+            .instance_fields_id(class)?
+            .into_iter()
+            .cloned()
+            .collect();
+        // Field-initializer (owner, declared index) pairs for this object's
+        // own layout: resolve each declaring record once, retain the ID.
+        let declaring: Vec<Option<crate::vmclass::ClassId>> = metadata
+            .iter()
+            .map(|field| self.loader.lookup(&field.class))
+            .collect();
         let fields = Vec::new();
         let word = 0x1000 + self.objects.len() as u32;
         self.objects.push(Object {
-            class: class.to_owned(),
+            class: crate::vmclass::ClassRef::Loaded(class),
             fields,
         });
         for (index, field) in metadata.iter().enumerate() {
@@ -1014,8 +1149,19 @@ impl VmHost {
                 tag: TypeTag::intern(&field.ty),
                 payload: 0,
             });
-            if let Some(body) = self.loader.field_initializer(field) {
-                let context = self.class_context(&field.class).ok_or(HostError::BadCast)?;
+            let body = declaring[index].and_then(|owner| {
+                let record = self.loader.find_by_id(owner)?;
+                let declared = record.fields.iter().position(|candidate| {
+                    candidate.name == field.name
+                        && candidate.ty == field.ty
+                        && candidate.is_static == field.is_static
+                })?;
+                self.loader.field_initializer_of(owner, declared)
+            });
+            if let Some(body) = body {
+                let context = declaring[index]
+                    .map(|owner| owner.get())
+                    .ok_or(HostError::BadCast)?;
                 let value = self.initialize_field(
                     body,
                     context,
@@ -1036,30 +1182,29 @@ impl Default for VmHost {
 }
 
 impl LoaderConvert for VmHost {
-    fn string_target(&mut self, target_class: &str, string_class: &str) -> bool {
-        self.loader
-            .is_inherited_from(target_class, string_class)
-            .unwrap_or(false)
-    }
-    fn load_class(&mut self, descriptor: &str) -> Option<String> {
-        let bare = descriptor
-            .strip_prefix('L')
-            .and_then(|s| s.strip_suffix(';'))
-            .unwrap_or(descriptor);
-        self.loader.find(bare).map(|c| c.name.clone())
-    }
-
-    fn is_assignable(&mut self, from: &str, to: &str) -> bool {
-        // `from` may be a bare class or a descriptor; normalize both.
-        fn bare(s: &str) -> &str {
-            s.strip_prefix('L')
-                .and_then(|s| s.strip_suffix(';'))
-                .unwrap_or(s)
+    fn string_target(
+        &mut self,
+        target: &crate::vmclass::ClassRef,
+        string: &crate::vmclass::ClassRef,
+    ) -> bool {
+        use crate::vmclass::ClassRef;
+        match (target, string) {
+            (ClassRef::Loaded(target), ClassRef::Loaded(string)) => self
+                .loader
+                .is_inherited_from_id(*target, *string)
+                .unwrap_or(false),
+            _ => false,
         }
-        self.loader.is_assignable(bare(from), bare(to))
+    }
+    fn load_class(&mut self, descriptor: &str) -> Option<crate::vmclass::ClassRef> {
+        self.loader.resolve_descriptor(descriptor)
     }
 
-    fn reference_class(&mut self, value: Value) -> Option<String> {
+    fn is_assignable(&mut self, from: &crate::vmclass::ClassRef, to: &str) -> bool {
+        self.loader.is_assignable_ref(from, to)
+    }
+
+    fn reference_class(&mut self, value: Value) -> Option<crate::vmclass::ClassRef> {
         // Retain the legacy embedding word namespace accepted before #110.
         // All current production allocations use the ordinary0x1000 heap base.
         let base = if value.payload >= 0x2000_0000 {
@@ -1089,15 +1234,37 @@ impl LoaderConvert for VmHost {
     }
 }
 
+impl VmHost {
+    /// ID-carrying receiver lookup: loaded records dereference to their
+    /// retained arena identity; arrays stay descriptor-keyed without
+    /// fabricating a loaded record.
+    /// exe: FUN_00405690
+    fn reference_class_id(&mut self, value: Value) -> Option<crate::vmclass::ClassId> {
+        match <Self as LoaderConvert>::reference_class(self, value)? {
+            crate::vmclass::ClassRef::Loaded(id) => Some(id),
+            crate::vmclass::ClassRef::Array(_) => None,
+        }
+    }
+
+    /// ID-compatible class load: spelling resolves once at the boundary,
+    /// then the loaded record identity carries execution.
+    /// exe: FUN_00410890
+    fn load_class_ref(&mut self, descriptor: &str) -> Option<crate::vmclass::ClassRef> {
+        <Self as LoaderConvert>::load_class(self, descriptor)
+    }
+}
+
 impl Host for VmHost {
     fn receiver_value(&mut self, word: u32) -> Result<Value, VmError> {
         let class = self
             .reference_class(Value::reference(word))
             .ok_or(HostError::BadCast)?;
-        let descriptor = if class.starts_with('[') {
-            class
-        } else {
-            format!("L{class};")
+        let descriptor = match &class {
+            crate::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+            crate::vmclass::ClassRef::Loaded(id) => {
+                let name = self.loader.class_name(*id).ok_or(HostError::BadCast)?;
+                format!("L{name};")
+            }
         };
         Ok(Value {
             tag: TypeTag::intern(&descriptor),
@@ -1241,9 +1408,8 @@ impl VmHost {
     fn declare(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let owner = self
             .loader
-            .body_class(op.pc.body)
-            .ok_or(HostError::UnresolvedName)?
-            .to_owned();
+            .body_owner(op.pc.body)
+            .ok_or(HostError::UnresolvedName)?;
         let nodes = self
             .loader
             .body(op.pc.body)
@@ -1253,7 +1419,7 @@ impl VmHost {
             index += 1;
             Some(
                 self.loader
-                    .pool_text(&owner, node.imm)
+                    .pool_text_of(owner, node.imm)
                     .map_err(|_| HostError::UnresolvedName)?
                     .to_owned(),
             )
@@ -1263,7 +1429,7 @@ impl VmHost {
         let node = nodes.get(index).ok_or(HostError::UnresolvedName)?;
         let ty = self
             .loader
-            .pool_text(&owner, node.imm)
+            .pool_text_of(owner, node.imm)
             .map_err(|_| HostError::UnresolvedName)?
             .to_owned();
         let push_lvalue = nodes
@@ -1308,9 +1474,8 @@ impl VmHost {
     fn resolve_name(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let owner = self
             .loader
-            .body_class(op.pc.body)
-            .ok_or(HostError::UnresolvedName)?
-            .to_owned();
+            .body_owner(op.pc.body)
+            .ok_or(HostError::UnresolvedName)?;
         let start = op.pc.idx + 1;
         let end = start
             .checked_add(op.node.imm as usize)
@@ -1326,13 +1491,12 @@ impl VmHost {
         for component in nodes {
             match component.opword {
                 0x1019 if current.is_none() && qualified.is_none() => {
-                    let class = self
+                    let name = self
                         .loader
-                        .pool_text(&owner, component.imm)
-                        .map_err(|_| HostError::UnresolvedName)?
-                        .to_owned();
-                    self.loader.find(&class).ok_or(HostError::UnresolvedName)?;
-                    qualified = Some(class);
+                        .pool_text_of(owner, component.imm)
+                        .map_err(|_| HostError::UnresolvedName)?;
+                    let id = self.loader.lookup(name).ok_or(HostError::UnresolvedName)?;
+                    qualified = Some(id);
                 }
                 0x1001 => {
                     let variable = thread
@@ -1357,33 +1521,37 @@ impl VmHost {
                         return Err(HostError::MissingMember.into());
                     }
                     let dynamic = if receiver != 0 {
-                        Some(
-                            self.objects
-                                .get(
-                                    receiver
-                                        .checked_sub(0x1000)
-                                        .ok_or(HostError::MissingMember)?
-                                        as usize,
-                                )
-                                .ok_or(HostError::MissingMember)?
-                                .class
-                                .clone(),
-                        )
+                        let object = self
+                            .objects
+                            .get(
+                                receiver
+                                    .checked_sub(0x1000)
+                                    .ok_or(HostError::MissingMember)?
+                                    as usize,
+                            )
+                            .ok_or(HostError::MissingMember)?;
+                        let crate::vmclass::ClassRef::Loaded(id) = object.class.clone() else {
+                            return Err(HostError::MissingMember.into());
+                        };
+                        Some(id)
                     } else {
-                        qualified.clone()
+                        qualified
                     };
                     let (encoded, name, ty) = self
                         .loader
-                        .field_reference(&owner, component.imm)
+                        .field_reference_of(owner, component.imm)
                         .map_err(|_| HostError::MissingMember)?;
                     if ty.starts_with('(') {
                         return Err(HostError::MissingMember.into());
                     }
-                    let (encoded, name) = (encoded.to_owned(), name.to_owned());
+                    let encoded = self
+                        .loader
+                        .lookup(encoded)
+                        .ok_or(HostError::MissingMember)?;
                     let (slot, is_static) =
-                        self.field_index(dynamic.as_deref().unwrap_or(&encoded), &name)?;
+                        self.field_index_id(dynamic.unwrap_or(encoded), name)?;
                     current = Some(Slot::Heap(if is_static {
-                        self.static_slot(&encoded, slot)?
+                        self.static_slot_id(encoded, slot)?
                     } else if receiver != 0 {
                         HeapSlot::Object {
                             word: receiver,
@@ -1398,7 +1566,7 @@ impl VmHost {
                     let receiver = self.borrow_slot(thread, current.unwrap())?.payload;
                     let name = self
                         .loader
-                        .pool_text(&owner, component.imm)
+                        .pool_text_of(owner, component.imm)
                         .map_err(|_| HostError::MissingMember)?
                         .to_owned();
                     current = Some(Slot::Heap(self.member_slot(receiver, &name)?));
@@ -1477,24 +1645,23 @@ impl VmHost {
         if op.kind == ExternKind::FieldRef {
             let owner = self
                 .loader
-                .body_class(op.pc.body)
-                .ok_or(HostError::MissingMember)?
-                .to_owned();
+                .body_owner(op.pc.body)
+                .ok_or(HostError::MissingMember)?;
             let receiver = thread.frames.last().ok_or(VmError::NoFrame)?.receiver;
-            let slot = self.indexed_field(&owner, op.node.imm, receiver)?;
+            let slot = self.indexed_field(owner, op.node.imm, receiver)?;
             thread.push(Slot::Heap(slot))?;
             return Ok(Flow::Advance);
         }
         if !matches!(op.kind, ExternKind::FieldByName | ExternKind::MemberAccess) {
             return Err(HostError::MissingMember.into());
         }
-        let class = self
+        let owner = self
             .loader
-            .body_class(op.pc.body)
+            .body_owner(op.pc.body)
             .ok_or(HostError::MissingMember)?;
         let name = match self
             .loader
-            .pool(class)
+            .pool_of(owner)
             .and_then(|pool| pool.get(op.node.imm as usize))
         {
             Some(slr_fmt_tufa::PoolEntry::Str(name)) => name.clone(),
@@ -1507,15 +1674,16 @@ impl VmHost {
             thread.frames.last().ok_or(VmError::NoFrame)?.receiver
         };
         let slot = if word == 0 && !explicit {
+            // Defining frame context is the retained record ID; decoding it
+            // back to a name and re-looking that name up is forbidden.
             let context = thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx;
-            let class = self
+            let id = self
                 .loader
-                .context_name(context)
-                .ok_or(HostError::MissingMember)?
-                .to_owned();
+                .context_id(context)
+                .ok_or(HostError::MissingMember)?;
             let index = self
                 .loader
-                .find(&class)
+                .find_by_id(id)
                 .ok_or(HostError::MissingMember)?
                 .fields
                 .iter()
@@ -1525,7 +1693,7 @@ impl VmHost {
                 .last()
                 .map(|(index, _)| index)
                 .ok_or(HostError::MissingMember)?;
-            self.static_slot(&class, index)?
+            self.static_slot_id(id, index)?
         } else {
             self.member_slot(word, &name)?
         };
@@ -1591,32 +1759,31 @@ impl VmHost {
         let frame = thread.frames.last().ok_or(VmError::NoFrame)?;
         let owner = self
             .loader
-            .context_name(frame.class_ctx)
-            .ok_or(HostError::MissingMethod)?
-            .to_owned();
+            .context_id(frame.class_ctx)
+            .ok_or(HostError::MissingMethod)?;
         let name = self
             .loader
-            .pool_text(&owner, op.node.imm)
+            .pool_text_of(owner, op.node.imm)
             .map_err(|_| HostError::MissingMethod)?
             .to_owned();
         let (class, receiver) = if op.kind == ExternKind::CallInstance {
             let receiver = thread.pop_deref_with(self)?.payload;
             thread.release();
             (
-                self.reference_class(Value::reference(receiver))
+                self.reference_class_id(Value::reference(receiver))
                     .ok_or(HostError::BadCast)?,
                 receiver,
             )
         } else {
             (
                 self.loader
-                    .find(&owner)
-                    .and_then(|class| class.base.clone())
+                    .find_by_id(owner)
+                    .and_then(|class| class.base_id)
                     .ok_or(HostError::MissingMethod)?,
                 frame.receiver,
             )
         };
-        self.call_dynamic(thread, &class, receiver, &name)
+        self.call_dynamic_id(thread, class, receiver, &name)
     }
 
     fn call_constructor(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
@@ -1631,41 +1798,39 @@ impl VmHost {
                 .ok_or(VmError::NullSlot)?;
             let receiver = self.borrow_slot(thread, stack[index])?.payload;
             (
-                self.reference_class(Value::reference(receiver))
+                self.reference_class_id(Value::reference(receiver))
                     .ok_or(HostError::BadCast)?,
                 receiver,
             )
         } else {
             let receiver = frame.receiver;
-            let class = self
+            let id = self
                 .loader
-                .context_name(frame.class_ctx)
+                .context_id(frame.class_ctx)
                 .ok_or(HostError::MissingMethod)?;
             let class = if op.kind == ExternKind::CallSuperInit {
                 let Some(parent) = self
                     .loader
-                    .find(class)
+                    .find_by_id(id)
                     .ok_or(HostError::MissingMethod)?
-                    .base
-                    .as_deref()
+                    .base_id
                 else {
                     return Ok(Flow::Advance);
                 };
                 parent
             } else {
-                class
+                id
             };
-            (class.to_owned(), receiver)
+            (class, receiver)
         };
-        self.call_dynamic(thread, &class, receiver, "<init>")
+        self.call_dynamic_id(thread, class, receiver, "<init>")
     }
 
     fn call_resolved(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let owner = self
             .loader
-            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
-            .ok_or(HostError::UnresolvedName)?
-            .to_owned();
+            .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::UnresolvedName)?;
         let nodes = self.body(op.pc.body).to_vec();
         let mut cursor = op.pc.idx + 1;
         let first = *nodes.get(cursor).ok_or(VmError::PcOutOfRange)?;
@@ -1681,19 +1846,19 @@ impl VmHost {
         let components = nodes.get(cursor..end).ok_or(VmError::PcOutOfRange)?;
         let mut receiver = thread.frames.last().ok_or(VmError::NoFrame)?.receiver;
         let mut class = if receiver == 0 {
-            owner.clone()
+            owner
         } else {
-            self.reference_class(Value::reference(receiver))
+            self.reference_class_id(Value::reference(receiver))
                 .ok_or(HostError::BadCast)?
         };
         for (offset, component) in components.iter().enumerate() {
             match component.opword {
                 0x1019 if offset == 0 => {
-                    class = self
+                    let name = self
                         .loader
-                        .pool_text(&owner, component.imm)
-                        .map_err(|_| HostError::UnresolvedName)?
-                        .to_owned();
+                        .pool_text_of(owner, component.imm)
+                        .map_err(|_| HostError::UnresolvedName)?;
+                    class = self.loader.lookup(name).ok_or(HostError::UnresolvedName)?;
                     receiver = 0;
                 }
                 0x1001 => {
@@ -1706,7 +1871,7 @@ impl VmHost {
                         .ok_or(HostError::MissingMember)?;
                     receiver = thread.vars.get(id).value.payload;
                     class = self
-                        .reference_class(Value::reference(receiver))
+                        .reference_class_id(Value::reference(receiver))
                         .ok_or(HostError::BadCast)?;
                 }
                 0x101a if offset + 1 == components.len() => {
@@ -1714,33 +1879,40 @@ impl VmHost {
                     // decoding the cached method reference (4208e0).
                     thread.pop_deref_with(self)?;
                     thread.release();
-                    let (_, name, sig) = self
+                    let (class_name, name, sig) = self
                         .loader
-                        .field_reference(&owner, component.imm)
+                        .field_reference_of(owner, component.imm)
                         .map_err(|_| HostError::MissingMethod)?;
-                    let (name, sig) = (name.to_owned(), sig.to_owned());
+                    let (encoded, name, sig) = (
+                        self.loader
+                            .lookup(class_name)
+                            .ok_or(HostError::MissingMethod)?,
+                        name.to_owned(),
+                        sig.to_owned(),
+                    );
+                    let _ = encoded;
                     let (method, defining) = self
                         .loader
-                        .resolve_method(&class, &name, &sig)
+                        .resolve_method_id(class, &name, &sig)
                         .ok_or(HostError::MissingMethod)?;
                     let method = method.clone();
                     thread.pc = Some(crate::interp::Pc {
                         body: op.pc.body,
                         idx: cursor + offset,
                     });
-                    return self.dispatch_method(thread, &method, &defining, receiver);
+                    return self.dispatch_method_id(thread, &method, defining, receiver);
                 }
                 0x4012 if offset + 1 == components.len() => {
                     let name = self
                         .loader
-                        .pool_text(&owner, component.imm)
+                        .pool_text_of(owner, component.imm)
                         .map_err(|_| HostError::UnresolvedName)?
                         .to_owned();
                     thread.pc = Some(crate::interp::Pc {
                         body: op.pc.body,
                         idx: cursor + offset,
                     });
-                    return self.call_dynamic(thread, &class, receiver, &name);
+                    return self.call_dynamic_id(thread, class, receiver, &name);
                 }
                 _ => return Err(HostError::UnresolvedName.into()),
             }
@@ -1748,11 +1920,14 @@ impl VmHost {
         Err(HostError::MissingMethod.into())
     }
 
-    fn dispatch_method(
+    /// ID-carrying method dispatch: body and frame context resolve through
+    /// the retained defining record, never through a name lookup.
+    /// exe: FUN_0041fbc0
+    fn dispatch_method_id(
         &mut self,
         thread: &mut Thread,
         method: &crate::vmclass::Method,
-        defining: &str,
+        defining: crate::vmclass::ClassId,
         receiver: u32,
     ) -> Result<Flow, VmError> {
         let receiver = if method.flags & 8 != 0 { 0 } else { receiver };
@@ -1760,20 +1935,18 @@ impl VmHost {
             return Err(VmError::InstanceMethodWithoutReceiver);
         }
         if method.is_native {
-            return self.invoke_method_native(thread, method, defining, receiver);
+            return self.invoke_method_native_id(thread, method, defining, receiver);
         }
         if method.is_abstract {
             return Err(HostError::NoBody.into());
         }
         let body = self
             .loader
-            .body_id(defining, method.body as usize)
+            .body_id_of(defining, method.body as usize)
             .ok_or(HostError::NoBody)?;
         let target = crate::interp::ScriptMethod {
             body,
-            class_ctx: self
-                .class_context(defining)
-                .ok_or(HostError::MissingMethod)?,
+            class_ctx: defining.get(),
             signature: 0,
             is_static: method.flags & 8 != 0,
             params: parameter_types(&method.sig)?,
@@ -1782,14 +1955,19 @@ impl VmHost {
         Ok(Flow::Stay)
     }
 
-    fn call_dynamic(
+    /// ID-carrying virtual dispatch: the receiver hierarchy, overload
+    /// resolution and defining record all stay on retained IDs.
+    /// exe: FUN_004051a0
+    fn call_dynamic_id(
         &mut self,
         thread: &mut Thread,
-        class: &str,
+        class: crate::vmclass::ClassId,
         receiver: u32,
         name: &str,
     ) -> Result<Flow, VmError> {
-        self.loader.find(class).ok_or(HostError::MissingMethod)?;
+        self.loader
+            .find_by_id(class)
+            .ok_or(HostError::MissingMethod)?;
         let count = thread.pop_deref_with(self)?.payload as usize;
         thread.release();
         let stack = &thread.frames.last().ok_or(VmError::NoFrame)?.stack;
@@ -1809,24 +1987,25 @@ impl VmHost {
         }
         let selected = self
             .loader
-            .resolve_overload(class, name, &types)
+            .resolve_overload_id(class, name, &types)
             .map_err(|_| HostError::MissingMethod)?
             .ok_or(HostError::MissingMethod)?;
-        let (method, defining) = (selected.method.clone(), selected.defining.to_owned());
+        let (method, defining) = (selected.method.clone(), selected.defining);
         if selected.ambiguous {
             self.method_diagnostics
                 .push("Class::getMethod: more matching methods found");
         }
-        self.dispatch_method(thread, &method, &defining, receiver)
+        self.dispatch_method_id(thread, &method, defining, receiver)
     }
 
-    /// The native branch of41fbc0 receives a resolved method and receiver;
-    /// the receiver is appended after the reversed, typed parameter cells.
-    fn invoke_method_native(
+    /// ID-carrying native invocation: the receiver tag is resolved from the
+    /// retained defining record, never re-looked-up by spelling.
+    /// exe: FUN_0041fbc0
+    fn invoke_method_native_id(
         &mut self,
         thread: &mut Thread,
         method: &crate::vmclass::Method,
-        defining: &str,
+        defining: crate::vmclass::ClassId,
         receiver: u32,
     ) -> Result<Flow, VmError> {
         if method.flags & 8 == 0 && receiver == 0 {
@@ -1854,8 +2033,17 @@ impl VmHost {
             args.push(value);
             thread.release();
         }
+        let receiver_tag = {
+            let name = self
+                .loader
+                .find_by_id(defining)
+                .ok_or(HostError::MissingMethod)?
+                .name
+                .clone();
+            TypeTag::intern(&format!("L{name};"))
+        };
         args.push(Value {
-            tag: TypeTag::intern(&format!("L{defining};")),
+            tag: receiver_tag,
             payload: receiver,
         });
         let info = CallInfo {
@@ -1883,16 +2071,22 @@ impl VmHost {
             .ok_or(VmError::PcOutOfRange)?;
         let owner = self
             .loader
-            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
             .ok_or(HostError::BadCast)?;
-        let class = self
+        let name = self
             .loader
-            .pool_text(owner, token.imm)
-            .map_err(|_| HostError::BadCast)?
-            .to_owned();
-        let word = self.alloc_object(&class)?;
+            .pool_text_of(owner, token.imm)
+            .map_err(|_| HostError::BadCast)?;
+        let class = self.loader.lookup(name).ok_or(HostError::BadCast)?;
+        let word = self.alloc_object_id(class)?;
+        let tag_name = self
+            .loader
+            .find_by_id(class)
+            .ok_or(HostError::BadCast)?
+            .name
+            .clone();
         thread.push_new(Value {
-            tag: TypeTag::intern(&format!("L{class};")),
+            tag: TypeTag::intern(&format!("L{tag_name};")),
             payload: word,
         })?;
         thread.pc = Some(crate::interp::Pc {
@@ -1909,11 +2103,11 @@ impl VmHost {
             .ok_or(VmError::PcOutOfRange)?;
         let owner = self
             .loader
-            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
             .ok_or(HostError::BadCast)?;
         let descriptor = self
             .loader
-            .pool_text(owner, token.imm)
+            .pool_text_of(owner, token.imm)
             .map_err(|_| HostError::BadCast)?
             .to_owned();
         let dimensions = descriptor.bytes().take_while(|byte| *byte == b'[').count();
@@ -1960,17 +2154,17 @@ impl VmHost {
         } else {
             let owner = self
                 .loader
-                .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+                .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
                 .ok_or(HostError::BadCast)?;
             let target = self
                 .loader
-                .pool_text(owner, token.imm)
+                .pool_text_of(owner, token.imm)
                 .map_err(|_| HostError::BadCast)?
                 .to_owned();
             let actual = self.reference_class(value).ok_or(HostError::BadCast)?;
-            let target = self.load_class(&target).ok_or(HostError::BadCast)?;
+            let target = self.load_class_ref(&target).ok_or(HostError::BadCast)?;
             self.loader
-                .is_inherited_from(&actual, &target)
+                .is_inherited_from_ref(&actual, &target)
                 .map_err(|_| HostError::BadCast)?
         };
         thread.push_new(Value::int(i32::from(matched)))?;
@@ -1989,21 +2183,32 @@ impl VmHost {
         });
         let owner = self
             .loader
-            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
             .ok_or(HostError::BadCast)?;
         let text = self
             .loader
-            .pool_text(owner, token.imm)
+            .pool_text_of(owner, token.imm)
             .map_err(|_| HostError::BadCast)?
             .to_owned();
         let target = match token.opword {
             0x1006 => text,
             0x1019 => {
-                let class = self.load_class(&text).ok_or(HostError::BadCast)?;
-                if class.starts_with('[') {
-                    class
-                } else {
-                    format!("L{class};")
+                let loaded = self.load_class_ref(&text).ok_or(HostError::BadCast)?;
+                match loaded {
+                    crate::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+                    crate::vmclass::ClassRef::Loaded(id) => {
+                        let name = self
+                            .loader
+                            .find_by_id(id)
+                            .ok_or(HostError::BadCast)?
+                            .name
+                            .clone();
+                        if name.starts_with('[') {
+                            name
+                        } else {
+                            format!("L{name};")
+                        }
+                    }
                 }
             }
             _ => return Err(HostError::BadCast.into()),
@@ -2021,7 +2226,7 @@ impl VmHost {
         }
         let tag = TypeTag::intern(&target);
         if crate::values::assign_convert(&mut value, tag).is_err() {
-            crate::values::loader_convert(self, &mut value, &target)
+            crate::values::loader_convert_ref(self, &mut value, &target)
                 .map_err(|_| HostError::BadCast)?;
         }
         thread.push(Slot::Value(value))?;
@@ -2037,9 +2242,12 @@ impl VmHost {
         let context = thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx;
         let owner = self
             .loader
-            .context_name(context)
+            .context_id(context)
             .ok_or(HostError::UnresolvedName)?;
-        let pool = self.loader.pool(owner).ok_or(HostError::UnresolvedName)?;
+        let pool = self
+            .loader
+            .pool_of(owner)
+            .ok_or(HostError::UnresolvedName)?;
         let value = if let Some(slr_fmt_tufa::PoolEntry::Member { name, extra }) =
             pool.get(op.node.imm as usize)
         {
@@ -2068,11 +2276,11 @@ impl VmHost {
     fn string_literal(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let owner = self
             .loader
-            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .context_id(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
             .ok_or(HostError::UnresolvedName)?;
         let bytes = self
             .loader
-            .pool_bytes(owner, op.node.imm)
+            .pool_bytes_of(owner, op.node.imm)
             .map_err(|_| HostError::UnresolvedName)?
             .map(<[u8]>::to_vec);
         let word = self.intern_string(bytes.as_deref())?;
@@ -2094,6 +2302,7 @@ mod tests {
             kind: 0,
             name: "java.lang.Object".into(),
             base: None,
+            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![],
@@ -2101,7 +2310,6 @@ mod tests {
         });
         h
     }
-
     fn thread_with_frame(nodes: Vec<Node>) -> (Thread, TestBodies) {
         let mut th = Thread::new();
         th.frames.push(Frame::new(
@@ -2191,6 +2399,7 @@ mod tests {
             kind: 0,
             name: "java.lang.String".into(),
             base: Some("java.lang.Object".into()),
+            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![crate::vmclass::Field {
@@ -2207,6 +2416,60 @@ mod tests {
         assert!(r.is_some(), "one-sided String converts");
         r.unwrap().expect("converts");
         assert_eq!(right.tag, TypeTag::Ref(TypeTag::STRING));
+    }
+
+    /// Per-plan step A: execution state carries retained [`ClassId`]s,
+    /// never name re-lookups. The allocated object pins the loaded record,
+    /// the frame context word decodes to the same identity, and field
+    /// reads/writes resolve through the retained record. A later slice
+    /// enables overlapping duplicate records; these assertions must keep
+    /// biting then (each record keeps its own ID while names collide).
+    #[test]
+    fn allocated_objects_and_frames_carry_retained_ids() {
+        use crate::interp::{Frame, Pc};
+        let mut h = host_with_class();
+        let child = h.loader.insert_test_class(crate::vmclass::Class {
+            kind: 0,
+            name: "game.Widget".into(),
+            base: Some("java.lang.Object".into()),
+            base_id: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![crate::vmclass::Field {
+                class: "game.Widget".into(),
+                name: "count".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+            bodies: vec![],
+        });
+        let object = h.loader.lookup("game.Widget").unwrap();
+        assert_eq!(object, child);
+        let word = h.alloc_object("game.Widget").expect("allocates");
+        assert_eq!(
+            h.objects[(word - 0x1000) as usize].class,
+            crate::vmclass::ClassRef::Loaded(child)
+        );
+        // The frame context word is the ID encoding; decoding must recover
+        // the same record without consulting the name map.
+        let context = h.class_context("game.Widget").unwrap();
+        assert_eq!(context, child.get());
+        assert_eq!(h.loader.context_id(context), Some(child));
+        let frame = Frame::new(None, word);
+        assert_eq!(h.loader.context_id(frame.class_ctx), None);
+        let mut frame = Frame::new(
+            Some(Pc {
+                body: BodyId(0),
+                idx: 0,
+            }),
+            word,
+        );
+        frame.class_ctx = context;
+        assert_eq!(h.loader.context_id(frame.class_ctx), Some(child));
+        // Field access resolves through the retained record.
+        h.write_field(word, "count", Value::int(7)).unwrap();
+        assert_eq!(h.read_field(word, "count").unwrap(), Value::int(7));
+        assert_eq!(h.instance_field_slot_id(child, "count").unwrap(), 0);
     }
 
     #[test]

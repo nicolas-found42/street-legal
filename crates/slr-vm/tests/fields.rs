@@ -18,6 +18,7 @@ fn class(name: &str, base: Option<&str>, fields: &[(&str, &str, bool)]) -> Class
         kind: 0,
         name: name.into(),
         base: base.map(str::to_owned),
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         bodies: vec![],
@@ -40,8 +41,9 @@ fn implicit_named_field_is_a_persistent_typed_lvalue() {
         None,
         &[("first", "I", false), ("second", "F", false)],
     ));
+    let fields_id = vm.loader.lookup("Fields").unwrap();
     vm.objects.push(Object {
-        class: "Fields".into(),
+        class: slr_vm::vmclass::ClassRef::Loaded(fields_id),
         fields: vec![Value::int(0x111), Value::float(0.0)],
     });
     // Original420ff0/001d returns the requested variable and pops no receiver.
@@ -565,20 +567,25 @@ fn runtime_reference_class_uses_the_authoritative_object_in_both_word_namespaces
     let mut vm = VmHost::new();
     vm.loader.insert_test_class(class("Child", None, &[]));
     let object = vm.alloc_object("Child").unwrap();
+    let child_id = vm.loader.lookup("Child").unwrap();
     assert_eq!(
         vm.reference_class(Value::reference_named(object, "LBase;")),
-        Some("Child".into())
+        Some(slr_vm::vmclass::ClassRef::Loaded(child_id))
     );
     // Existing String native allocation has a separate word base into the same
     // objects vector. Identity lookup does not certify its #110 allocation path.
     let string = 0x2000_0000 + vm.objects.len() as u32;
+    let string_id = vm.loader.lookup("java.lang.String").unwrap_or_else(|| {
+        vm.loader
+            .insert_test_class(class("java.lang.String", None, &[]))
+    });
     vm.objects.push(Object {
-        class: "java.lang.String".into(),
+        class: slr_vm::vmclass::ClassRef::Loaded(string_id),
         fields: vec![],
     });
     assert_eq!(
         vm.reference_class(Value::reference_named(string, "Ljava.lang.Object;")),
-        Some("java.lang.String".into())
+        Some(slr_vm::vmclass::ClassRef::Loaded(string_id))
     );
     assert_eq!(vm.reference_class(Value::reference(0x5555_5555)), None);
 }
