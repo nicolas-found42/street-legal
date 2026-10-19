@@ -11,4 +11,5 @@ path = "src/main.rs"
 [dependencies]
 slr-formats = { path = "../slr-formats" }
 slr-core = { path = "../slr-core" }
+slr-io = { path = "../slr-io" }
 macroquad = "0.4"

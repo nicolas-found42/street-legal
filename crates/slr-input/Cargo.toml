@@ -3,3 +3,12 @@ name = "slr-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+slr-calllog = { path = "../slr-calllog" }
+slr-io = { path = "../slr-io" }
+slr-vm = { path = "../slr-vm" }
+
+[dev-dependencies]
+slr-render-natives = { path = "../slr-render-natives" }
+slr-sound = { path = "../slr-sound" }

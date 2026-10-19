@@ -5,6 +5,13 @@
 //! line carries the importer's resource id). The keyword vocabulary is the one registered
 //! in the native keyword table at `.rdata` 0x0060e2xx (`mass`, `enginepower`, ...).
 
+pub mod particle;
+pub mod scan;
+pub mod skid;
+
+/// x87 precision control, re-exported for `ParticleCfg::parse_with` / `SkidCfg::parse_with`.
+pub use slr_x87::Precision;
+
 use slr_fmt_core::Result;
 
 #[derive(Debug, Clone)]

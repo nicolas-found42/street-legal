@@ -140,6 +140,7 @@ fn check_profile(name: &str, root: &Path) {
 #[test]
 fn stock_scx_v3_and_scy_decode_exactly() {
     let Some(root) = stock_root() else {
+        eprintln!("SLR_ORACLE_SKIPPED: stock_scx_v3_and_scy_decode_exactly");
         eprintln!("SKIP: no stock dir (set SLR_STOCK)");
         return;
     };
@@ -149,6 +150,7 @@ fn stock_scx_v3_and_scy_decode_exactly() {
 #[test]
 fn modded_scx_v3_and_scy_decode_exactly() {
     let Some(root) = modded_root() else {
+        eprintln!("SLR_ORACLE_SKIPPED: modded_scx_v3_and_scy_decode_exactly");
         eprintln!("SKIP: no reference dir (set SLR_REFERENCE)");
         return;
     };

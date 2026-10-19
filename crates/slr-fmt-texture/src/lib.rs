@@ -1,3 +1,6 @@
+//! Texture formats: the PTX container (`*.ptx`, exe-ported) and the standard
+//! media wrappers [`dds`], [`pngdec`] and [`tga`] (crate-backed, tier D).
+//!
 //! PTX texture container (`*.ptx`).
 //!
 //! The exe's texture pipeline (`FUN_00505960` factory, `FUN_0053cc70` extension
@@ -25,6 +28,12 @@
 //! `alpha_size > 0` (97 of 127 stock files have alpha on every mip; 30 are
 //! RGB-only).
 
+pub mod dds;
+pub mod image;
+pub mod pngdec;
+pub mod tga;
+
+pub use image::Rgba8Image;
 use slr_fmt_core::reader::Reader;
 use slr_fmt_core::{FormatError, Result};
 
@@ -192,6 +201,51 @@ pub fn parse(data: &[u8]) -> Result<Ptx> {
     })
 }
 
+/// Clamped mip-level count and base dimensions from the type-1 loader's init
+/// path: how many of the (smallest-first) mip entries the loader keeps, and
+/// the base dimensions left after the clamp shift.
+///
+/// exe: FUN_00507110
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MipPlan {
+    /// Levels the loader walks (`[res+0x68]`).
+    pub kept: u32,
+    /// Base width after the clamp shift (device-allocation arg 0).
+    pub width: u32,
+    /// Base height after the clamp shift (device-allocation arg 1).
+    pub height: u32,
+}
+
+/// Port of the mip clamp in the type-1 loader's init path, exe
+/// `FUN_00507110` `0x50713b..0x50715a`.
+///
+/// `dropped = max(1, mip_count - texture_size)` with a **signed** compare
+/// (the exe subtracts the two words as 32-bit ints). When `dropped >=
+/// mip_count` the loader keeps every level and leaves the base dimensions
+/// untouched; otherwise it stores `dropped` as the kept count and
+/// right-shifts width and height by the dropped count (`mip_count -
+/// dropped`). Entries are stored smallest-first, so this keeps that many of
+/// the SMALLEST mips and drops the largest ones.
+pub fn mip_plan(mip_count: u32, width: u32, height: u32, texture_size: u32) -> MipPlan {
+    // exe: 32-bit wrapping subtraction, then a signed compare against 1.
+    let diff = mip_count.wrapping_sub(texture_size) as i32;
+    let dropped = diff.max(1) as u32;
+    if dropped >= mip_count {
+        return MipPlan {
+            kept: mip_count,
+            width,
+            height,
+        };
+    }
+    // exe: `shr` masks the shift count to 5 bits.
+    let shift = (mip_count - dropped) & 31;
+    MipPlan {
+        kept: dropped,
+        width: width >> shift,
+        height: height >> shift,
+    }
+}
+
 /// Dimensions of a decoded mip: `(width, height, components)`.
 ///
 /// Tier D helper: decodes through the `zune-jpeg` crate (pure Rust,
@@ -212,4 +266,70 @@ pub fn decode_rgb(mip: &Mip) -> std::result::Result<(u16, u16, u16), String> {
         .info()
         .ok_or_else(|| "jpeg headers not decoded".to_string())?;
     Ok((info.width, info.height, u16::from(info.components)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mip_plan, MipPlan};
+
+    /// Hand-computed from the exe clamp at `FUN_00507110` `0x50713b..0x50715a`.
+    #[test]
+    fn mip_plan_clamps_like_the_type_1_loader() {
+        // 8 levels, texture_size 4: kept = max(1, 8 - 4) = 4, shift = 4.
+        assert_eq!(
+            mip_plan(8, 512, 512, 4),
+            MipPlan {
+                kept: 4,
+                width: 32,
+                height: 32
+            }
+        );
+        // texture_size exceeds the count: kept = 1, shift = 2.
+        assert_eq!(
+            mip_plan(3, 64, 64, 7),
+            MipPlan {
+                kept: 1,
+                width: 16,
+                height: 16
+            }
+        );
+        // texture_size 0: kept = count, so the keep-all branch leaves the
+        // base dimensions untouched (the exe jumps over the shift/store).
+        assert_eq!(
+            mip_plan(3, 64, 64, 0),
+            MipPlan {
+                kept: 3,
+                width: 64,
+                height: 64
+            }
+        );
+        // Single level: kept == count, keep-all branch.
+        assert_eq!(
+            mip_plan(1, 8, 8, 4),
+            MipPlan {
+                kept: 1,
+                width: 8,
+                height: 8
+            }
+        );
+        // Non-square base: both dimensions shift together.
+        assert_eq!(
+            mip_plan(5, 512, 256, 1),
+            MipPlan {
+                kept: 4,
+                width: 256,
+                height: 128
+            }
+        );
+        // Degenerate count 0 is unreachable through `parse` (mip_count 0 is
+        // rejected); the exe's arithmetic still keeps 0 and skips the shift.
+        assert_eq!(
+            mip_plan(0, 16, 8, 4),
+            MipPlan {
+                kept: 0,
+                width: 16,
+                height: 8
+            }
+        );
+    }
 }

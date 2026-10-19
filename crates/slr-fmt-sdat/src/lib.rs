@@ -23,7 +23,11 @@
 //! The numbered companions (`<basename>.<i>`, exe store `FUN_00484fa0` formats
 //! them with `sprintf "%s.%d"`, refs `0x485141` / `0x4850f6`) are plain JFIF
 //! JPEG screenshots, one per JPEG slot; [`is_jpeg`] / [`companion_index`]
-//! cover them.
+//! cover them. The exe's store path (`File` natives, slot run, footer) is
+//! modelled write-by-write in [`store`] and differentially tested against
+//! the Unicorn oracle.
+
+pub mod store;
 
 use slr_fmt_core::reader::Reader;
 use slr_fmt_core::{FormatError, Result};
@@ -33,24 +37,17 @@ pub const VERSION: u32 = 0x0002_0100;
 /// Options magic, written by `Config.saveConfig`
 /// (`system/Scripts/util/Config.class` body 111); transport `File.write(int)`
 /// native `FUN_00485b20` / `File.write(float)` `FUN_00485bc0`.
-///
-/// exe: FUN_00484fa0
 pub const TYPE_OPTIONS: u32 = 0xFEDC_BA98; // options magic
 /// Vehicle magic, written by `Vehicle.save`
 /// (`sl/Scripts/game/Vehicle.class` body 44); scalars via the same `File`
 /// natives, parts via `Part.save` recursion.
-///
-/// exe: FUN_00484fa0
 pub const TYPE_VEHICLE: u32 = 0x8866_4422; // vehicle magic
 /// `"CTRL"` as a little-endian `u32`; `ControlSet.save` / `load`
 /// (`system/Scripts/io/ControlSet.class`); strings via `File.write(String)`
 /// (`u32 len` + bytes incl. NUL) / `File.readString`.
 pub const TYPE_CONTROLS: u32 = 0x4C52_5443; // "CTRL"
-/// One body word: `false` = int, `true` = float (the `File.readInt` /
-/// `File.readFloat` pair).
-///
-/// exe: FUN_00485b70
-/// exe: FUN_00485c10
+/// One body word: int or float (the `File.readInt` / `File.readFloat`
+/// pair, modelled in [`store::file_read_int`] / [`store::file_read_float`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Word {
     I(u32),
@@ -453,6 +450,53 @@ impl VehicleBody {
         })
     }
 
+    /// The footer the exe's `File.close()` writes after the part run
+    /// ([`store::close_file`], version 2): the slot-count word (the last
+    /// word of `part_bytes`), the slot run, the resource table and the
+    /// byte total (= `trailer`). `None` if the part run is shorter than a
+    /// word. The corpus test checks every shipped vehicle file ends with
+    /// exactly these bytes.
+    pub fn exe_footer(&self) -> Option<Vec<u8>> {
+        let n = self.part_bytes.len();
+        let word = self.part_bytes.get(n.checked_sub(4)?..)?;
+        let state = store::FileState {
+            slot: 1,
+            mode: 1,
+            version: 2,
+            name: String::new(),
+            slot_count_word: u32::from_le_bytes(word.try_into().ok()?),
+            resource_count_word: self.resources.len() as u32,
+            slots: self
+                .jpeg_slots
+                .iter()
+                .map(|s| store::SlotNode {
+                    id: s.index,
+                    kind: 7,
+                    object: None,
+                })
+                .collect(),
+            resources: self
+                .resources
+                .iter()
+                .map(|e| store::ResourceNode {
+                    id: e.index,
+                    path: e.path.clone(),
+                })
+                .collect(),
+        };
+        let events = store::close_file(&state).ok()?;
+        Some(
+            events
+                .into_iter()
+                .filter_map(|e| match e {
+                    store::Event::Write { data, .. } => Some(data),
+                    _ => None,
+                })
+                .flatten()
+                .collect(),
+        )
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.save_id.to_le_bytes());
@@ -499,13 +543,11 @@ pub struct Sdat {
     pub body: Body,
 }
 
-/// Store dispatches on the type word; load reads the header the same way
-/// (`SDAT`, version `0x00020100`, then the per-type body). `layout_floats`
-/// selects the options variant (`STOCK_OPTIONS_FLOATS` /
-/// `REF_OPTIONS_FLOATS`); pass `None` for non-options files.
-///
-/// exe: FUN_00484fa0
-/// exe: 0x00485870
+/// Parse the header (`SDAT`, version `0x00020100`, type word) and the
+/// per-type body. `layout_floats` selects the options variant
+/// (`STOCK_OPTIONS_FLOATS` / `REF_OPTIONS_FLOATS`); pass `None` for
+/// non-options files. The exe's writer side (slot run, footer, `File`
+/// natives) is modelled in [`store`].
 pub fn parse(data: &[u8], layout_floats: Option<&[bool]>) -> Result<Sdat> {
     let mut r = Reader::new(data);
     let magic = r.bytes(4)?;

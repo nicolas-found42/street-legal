@@ -3,3 +3,12 @@ name = "slr-resource"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+slr-calllog = { path = "../slr-calllog" }
+slr-vm = { path = "../slr-vm" }
+
+[dev-dependencies]
+slr-fmt-tufa = { path = "../slr-fmt-tufa" }
+slr-x87 = { path = "../slr-x87" }
+serde_json = "1"

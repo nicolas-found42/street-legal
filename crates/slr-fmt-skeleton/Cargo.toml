@@ -1,0 +1,12 @@
+[package]
+name = "slr-fmt-skeleton"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slr-fmt-core = { path = "../slr-fmt-core" }
+slr-x87 = { path = "../slr-x87" }
+
+[dev-dependencies]
+serde_json = "1"

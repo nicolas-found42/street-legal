@@ -1,1 +1,3 @@
-//! Physics: rigid-body world, wheels, chassis, collision (M3). Empty until then.
+//! Physics: rigid-body world, wheels, chassis, collision (M3).
+pub mod cfg;
+pub mod space;

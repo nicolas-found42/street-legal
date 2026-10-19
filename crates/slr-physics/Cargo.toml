@@ -3,3 +3,10 @@ name = "slr-physics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+serde_json = "1"
+slr-fmt-cfg = { path = "../slr-fmt-cfg" }
+
+[dev-dependencies]
+serde_json = "1"

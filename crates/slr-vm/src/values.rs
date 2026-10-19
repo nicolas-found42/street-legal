@@ -24,36 +24,87 @@
 
 use core::fmt;
 
-/// First byte of the type name: the exe's whole type identity for values.
+/// A type name: the exe's full type identity for values.
+///
+/// The exe stores a value cell's type as a *pointer* to an interned type
+/// name (`cell+4`): `I`, `F`, `V`, `L;`, `Ljava.lang.String;`, `[I`, ... All
+/// helper dispatch reads only the first byte (`cVar1 == 'F'`, `== 'I'`,
+/// `== 'L' || == '['`), but the string check (`FUN_00417a70`, exact
+/// `Ljava.lang.String;` compare) and the conversion/assignability walkers
+/// (`FUN_00417da0`, `FUN_00405400`) read the whole name. So a tag carries
+/// the full name; [`TypeTag::of`] keeps the exe's first-byte dispatch.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TypeTag {
     /// `I`: 32-bit integer (payload is the word itself).
     Int,
     /// `F`: 32-bit float (payload is `f32` bits).
     Float,
-    /// `L...;` / `V`: reference or void marker carried as a word.
-    /// The exe treats `L` and `[` identically in promotion/conversion reads
-    /// (`cVar1 == 'L' || cVar1 == '['`); void `V` never reaches a helper on a
-    /// live path, so it shares the word representation here.
-    Ref,
-    /// `[`: array reference. Same word representation as [`TypeTag::Ref`];
+    /// Any `L...;` class or `V` void marker. Carries the full name so the
+    /// string check and the class-loader conversion can read it; the exe
+    /// treats `L` and `[` identically in promotion/conversion reads
+    /// (`cVar1 == 'L' || cVar1 == '['`). Native explicit-V returns retain a
+    /// V:0 cell; casts validate its descriptor separately from references.
+    Ref(&'static str),
+    /// Any `[...` array spelling. Same word representation as [`TypeTag::Ref`];
     /// kept distinct so callers can preserve the spelling they observed.
-    Array,
+    Array(&'static str),
     /// Any other leading byte. Helpers only ever read the first byte, so an
     /// unexpected tag fails closed at the same points the exe logs.
     Other(u8),
 }
 
 impl TypeTag {
-    /// Read the tag the way the exe does: first byte of the type name.
+    /// Read the tag the way the exe dispatches: first byte of the type
+    /// name. `L`/`[` keep the full `name` for the string check and class
+    /// resolution; `I`/`F`/others discard it (the exe never reads past
+    /// byte 0 for them).
     #[must_use]
     pub fn of(first_byte: u8) -> Self {
+        Self::named(first_byte, "")
+    }
+
+    /// Bind a loaded descriptor to a process-stable interned spelling, like
+    /// the executable's JVM type-name interner. Equal names share storage;
+    /// Copy value cells can safely retain a tag beyond a loader borrow.
+    pub fn intern(name: &str) -> Self {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+        let mut names = NAMES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap();
+        let name = if let Some(existing) = names.get(name) {
+            *existing
+        } else {
+            let name: &'static str = Box::leak(name.to_owned().into_boxed_str());
+            names.insert(name);
+            name
+        };
+        Self::named(name.as_bytes().first().copied().unwrap_or(0), name)
+    }
+
+    /// Read the tag with its full interned type name.
+    #[must_use]
+    pub fn named(first_byte: u8, name: &'static str) -> Self {
         match first_byte {
             b'I' => Self::Int,
             b'F' => Self::Float,
-            b'L' | b'V' => Self::Ref,
-            b'[' => Self::Array,
+            b'L' | b'V' => Self::Ref(name),
+            b'[' => Self::Array(name),
             b => Self::Other(b),
+        }
+    }
+
+    /// The full type name when the tag carries one (`L`/`[`), else the
+    /// single-byte spelling.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ref(n) | Self::Array(n) => n,
+            Self::Int => "I",
+            Self::Float => "F",
+            Self::Other(_) => "?",
         }
     }
 
@@ -63,8 +114,8 @@ impl TypeTag {
         match self {
             Self::Int => b'I',
             Self::Float => b'F',
-            Self::Ref => b'L',
-            Self::Array => b'[',
+            Self::Ref(_) => b'L',
+            Self::Array(_) => b'[',
             Self::Other(b) => b,
         }
     }
@@ -72,8 +123,11 @@ impl TypeTag {
     /// `true` for the `L`/`[` reference family (exe: both arms together).
     #[must_use]
     pub fn is_ref(self) -> bool {
-        matches!(self, Self::Ref | Self::Array)
+        matches!(self, Self::Ref(_) | Self::Array(_))
     }
+
+    /// The exe's string-descriptor spelling for the `+` check.
+    pub const STRING: &'static str = "Ljava.lang.String;";
 }
 
 /// A decoded value cell: `(type tag, payload word)`.
@@ -107,11 +161,27 @@ impl Value {
         }
     }
 
-    /// Reference cell (object/array word, 0 = null).
+    /// Reference cell (object/array word, 0 = null). The name defaults to
+    /// the bare `L;` descriptor; use [`Value::reference_named`] for a full name.
     #[must_use]
     pub fn reference(word: u32) -> Self {
         Self {
-            tag: TypeTag::Ref,
+            tag: TypeTag::Ref("L;"),
+            payload: word,
+        }
+    }
+
+    /// Reference cell with a full interned type name.
+    ///
+    /// The word plus descriptor binding `FUN_00423e10` performs — it interns
+    /// the `String` at `arg0+0x68` (`FUN_0041e800`) and stores the resulting
+    /// word into the cell whose descriptor the caller supplies.
+    ///
+    /// exe: FUN_00423e10
+    #[must_use]
+    pub fn reference_named(word: u32, name: &'static str) -> Self {
+        Self {
+            tag: TypeTag::named(name.as_bytes()[0], name),
             payload: word,
         }
     }
@@ -134,7 +204,13 @@ impl fmt::Display for Value {
         match self.tag {
             TypeTag::Int => write!(f, "I({})", self.as_i32()),
             TypeTag::Float => write!(f, "F({})", self.as_f32()),
-            TypeTag::Ref | TypeTag::Array => write!(f, "R({:#x})", self.payload),
+            TypeTag::Ref(n) | TypeTag::Array(n) => {
+                if n.is_empty() || n == "L;" || n == "[" {
+                    write!(f, "R({:#x})", self.payload)
+                } else {
+                    write!(f, "R({} {:#x})", n, self.payload)
+                }
+            }
             TypeTag::Other(b) => write!(f, "?{b:#x}({:#x})", self.payload),
         }
     }
@@ -416,10 +492,10 @@ fn promote_pair(
     match (*dst_tag, *src_tag) {
         (TypeTag::Float, TypeTag::Float)
         | (TypeTag::Int, TypeTag::Int)
-        | (TypeTag::Ref, TypeTag::Ref)
-        | (TypeTag::Ref, TypeTag::Array)
-        | (TypeTag::Array, TypeTag::Ref)
-        | (TypeTag::Array, TypeTag::Array) => Ok(()),
+        | (TypeTag::Ref(_), TypeTag::Ref(_))
+        | (TypeTag::Ref(_), TypeTag::Array(_))
+        | (TypeTag::Array(_), TypeTag::Ref(_))
+        | (TypeTag::Array(_), TypeTag::Array(_)) => Ok(()),
         (TypeTag::Float, TypeTag::Int) => {
             *src_pay = (*src_pay as i32 as f32).to_bits();
             *src_tag = TypeTag::Float;
@@ -441,6 +517,9 @@ fn promote_pair(
 /// truncating-`fistp` to a qword; NaN/out-of-range yields `#IA` indefinite
 /// whose low word is `0x0`).
 /// `L`/`[`→`L`/`[` of a null reference passes; anything else fails closed.
+/// The class-loader paths (an `I`/`F` value into an `L` target, or a
+/// non-null `L`→`L` across classes) need the loader and live string objects;
+/// they are [`LoaderConvert`] (static port, same function).
 ///
 /// exe: FUN_00417da0
 pub fn assign_convert(value: &mut Value, target: TypeTag) -> Result<(), ConvertError> {
@@ -460,11 +539,112 @@ pub fn assign_convert(value: &mut Value, target: TypeTag) -> Result<(), ConvertE
             value.tag = TypeTag::Int;
             Ok(())
         }
-        (TypeTag::Ref | TypeTag::Array, TypeTag::Ref | TypeTag::Array) if value.payload == 0 => {
+        (TypeTag::Ref(_) | TypeTag::Array(_), TypeTag::Ref(_) | TypeTag::Array(_))
+            if value.payload == 0 =>
+        {
             value.tag = target;
             Ok(())
         }
         _ => Err(err),
+    }
+}
+
+/// What the class-loader half of `FUN_00417da0` needs: load the target
+/// class, test assignability, and format/lookup strings. The interpreter's
+/// [`crate::interp::Host`] provides it; tests use a fake.
+pub trait LoaderConvert {
+    /// Load-or-get the class named by a bare (`java.lang.String`) or
+    /// descriptor (`Ljava.lang.String;`) spelling (`FUN_00410890`).
+    /// Returns the canonical class name for assignability checks.
+    fn load_class(&mut self, descriptor: &str) -> Option<String>;
+    /// Assignability of a loaded class into the target (`FUN_00405400`).
+    fn is_assignable(&mut self, from_class: &str, to: &str) -> bool;
+    /// Numeric conversion uses Class::isInheritedFrom with target -> String,
+    /// independently of405400's reference-conversion predicate.
+    fn string_target(&mut self, target_class: &str, string_class: &str) -> bool {
+        self.is_assignable(target_class, string_class)
+    }
+    /// Runtime class of a non-null reference's payload (`instance+0xc`),
+    /// which can differ from the cell's declared descriptor. Standalone
+    /// loader backends may use the descriptor when they have no object heap.
+    fn reference_class(&mut self, value: Value) -> Option<String> {
+        self.load_class(value.tag.name())
+    }
+    /// Format an `I`/`F` payload the way the exe's `sprintf` does
+    /// (`%d` / `%.3f`) and intern it as a `String` object, returning the
+    /// object word (`FUN_004044e0` + `FUN_004174a0`).
+    fn make_string(&mut self, value: Value) -> u32;
+    /// The full type name of the target descriptor (for the converted
+    /// cell's tag).
+    fn target_name(&self, descriptor: &str) -> &'static str;
+}
+
+/// Class-loader conversion: the `L`/`[`-target half of `FUN_00417da0`.
+///
+/// - Same descriptor: pass (pointer identity in the exe).
+/// - `I`/`F` source: load the target and `java.lang.String`, require the target
+///   to inherit String
+///   (`FUN_00411610` + `FUN_004044e0`), format (`%d`/`%.3f`) and intern
+///   (`FUN_004174a0`); the cell becomes a `String` reference.
+/// - Non-null `L`/`[` source: load both classes, check assignability
+///   (`FUN_00412670` + `FUN_00405400`); on success the tag becomes the
+///   target descriptor.
+/// - Null source: passes with the target tag (covered by
+///   [`assign_convert`]; repeated here so callers have one entry point).
+///
+/// Anything else fails closed (the exe logs and the caller takes its
+/// fatal path). Static port: the `sprintf` spellings (`%d`, `%.3f`) are
+/// decoded from exe bytes; no differential test (needs a booted JVM).
+///
+/// exe: FUN_00417da0
+pub fn loader_convert(
+    loader: &mut dyn LoaderConvert,
+    value: &mut Value,
+    target: &str,
+) -> Result<(), ConvertError> {
+    let err = || ConvertError {
+        from: value.tag.byte(),
+        to: target.as_bytes()[0],
+    };
+    let tfirst = target.as_bytes()[0];
+    if tfirst != b'L' && tfirst != b'[' {
+        return Err(err());
+    }
+    if value.tag.name() == target {
+        return Ok(());
+    }
+    match value.tag {
+        TypeTag::Int | TypeTag::Float => {
+            let target_class = loader.load_class(target).ok_or_else(err)?;
+            let string_class = loader.load_class("java.lang.String").ok_or_else(err)?;
+            if !loader.string_target(&target_class, &string_class) {
+                // The target must inherit String; the original permits a
+                // subclass tag even though4174a0 allocates an actual String.
+                return Err(err());
+            }
+            let word = loader.make_string(*value);
+            let name = loader.target_name(target);
+            value.tag = TypeTag::named(tfirst, name);
+            value.payload = word;
+            Ok(())
+        }
+        TypeTag::Ref(_) | TypeTag::Array(_) => {
+            if value.payload == 0 {
+                let name = loader.target_name(target);
+                value.tag = TypeTag::named(tfirst, name);
+                return Ok(());
+            }
+            let from = loader.reference_class(*value).ok_or_else(err)?;
+            let _to = loader.load_class(target).ok_or_else(err)?;
+            if loader.is_assignable(&from, target) {
+                let name = loader.target_name(target);
+                value.tag = TypeTag::named(tfirst, name);
+                Ok(())
+            } else {
+                Err(err())
+            }
+        }
+        _ => Err(err()),
     }
 }
 
@@ -493,21 +673,24 @@ fn trunc_f32_to_i32_bits(bits: u32) -> u32 {
     (v.trunc() as i64 & 0xffff_ffff) as u32
 }
 
-/// Boolean conversion in place: `F` compares against `+0.0` (any nonzero,
-/// including `-0.0`... note `-0.0 == +0.0`, so `-0.0` converts to 0, exactly
-/// like the exe's `fcomp`+C3 test); `L`/`[` tests the payload against null;
-/// `I` is already a truth value and passes through. The result type becomes
-/// `I` with payload 0/1, except `I` inputs keep their payload.
+/// Boolean conversion in place: `F` compares against `+0.0` through the
+/// exe's `fcomp` + C3 test, so `-0.0` and **NaN** (unordered sets C3, like
+/// "equal") both convert to 0; `L`/`[` tests the payload against null; `I`
+/// is already a truth value and passes through. The result type becomes
+/// `I` with payload 0/1, except `I` inputs keep their payload. (The NaN
+/// case was found by the `Thread::run` differential vectors, M1-03: the
+/// `vmval` vectors of M1-02 did not cover it.)
 ///
 /// exe: FUN_00417840
 pub fn boolean_convert(value: &mut Value) {
     match value.tag {
         TypeTag::Float => {
-            let is_true = value.as_f32() != 0.0;
+            let f = value.as_f32();
+            let is_true = !(f == 0.0 || f.is_nan());
             value.tag = TypeTag::Int;
             value.payload = u32::from(is_true);
         }
-        TypeTag::Ref | TypeTag::Array => {
+        TypeTag::Ref(_) | TypeTag::Array(_) => {
             value.tag = TypeTag::Int;
             value.payload = u32::from(value.payload != 0);
         }
@@ -523,9 +706,15 @@ mod tests {
     fn tag_round_trips_first_byte() {
         assert_eq!(TypeTag::of(b'I'), TypeTag::Int);
         assert_eq!(TypeTag::of(b'F'), TypeTag::Float);
-        assert_eq!(TypeTag::of(b'L'), TypeTag::Ref);
-        assert_eq!(TypeTag::of(b'['), TypeTag::Array);
-        assert_eq!(TypeTag::of(b'V'), TypeTag::Ref);
+        assert_eq!(TypeTag::of(b'L'), TypeTag::Ref(""));
+        assert_eq!(TypeTag::of(b'['), TypeTag::Array(""));
+        assert_eq!(TypeTag::of(b'V'), TypeTag::Ref(""));
+        assert_eq!(
+            TypeTag::named(b'L', "Ljava.lang.String;"),
+            TypeTag::Ref("Ljava.lang.String;")
+        );
+        assert_eq!(TypeTag::Ref("L;").byte(), b'L');
+        assert_eq!(TypeTag::Ref(TypeTag::STRING).name(), TypeTag::STRING);
         assert_eq!(TypeTag::Int.byte(), b'I');
     }
 
@@ -561,6 +750,25 @@ mod tests {
     }
 
     #[test]
+    fn boolean_convert_treats_nan_and_negative_zero_as_false() {
+        // Oracle-verified through `Thread::run` (`NaN && 1` is 0).
+        for (bits, want) in [
+            (f32::NAN.to_bits(), 0),
+            ((-0.0f32).to_bits(), 0),
+            (0.0f32.to_bits(), 0),
+            (0.5f32.to_bits(), 1),
+            (f32::INFINITY.to_bits(), 1),
+        ] {
+            let mut v = Value {
+                tag: TypeTag::Float,
+                payload: bits,
+            };
+            boolean_convert(&mut v);
+            assert_eq!(v, Value::int(want), "bits {bits:#x}");
+        }
+    }
+
+    #[test]
     fn assign_convert_matches_static_semantics() {
         // Same-type passes through (pointer identity in the exe).
         let mut v = Value::int(-5);
@@ -591,11 +799,98 @@ mod tests {
         assert_eq!(v.payload, 0x0);
         // Null references pass across L/[ spellings.
         let mut v = Value::reference(0);
-        assert!(assign_convert(&mut v, TypeTag::Array).is_ok());
+        assert!(assign_convert(&mut v, TypeTag::Array("")).is_ok());
         // Non-null across refs and I<->L both fail closed (log path).
         let mut v = Value::reference(0x2000);
-        assert!(assign_convert(&mut v, TypeTag::Array).is_err());
+        assert!(assign_convert(&mut v, TypeTag::Array("")).is_err());
         let mut v = Value::int(1);
-        assert!(assign_convert(&mut v, TypeTag::Ref).is_err());
+        assert!(assign_convert(&mut v, TypeTag::Ref("")).is_err());
+    }
+
+    struct FakeLoader {
+        classes: Vec<String>,
+        next_word: u32,
+        made: Vec<Value>,
+    }
+
+    impl FakeLoader {
+        fn with(classes: &[&str]) -> Self {
+            Self {
+                classes: classes.iter().map(|s| s.to_string()).collect(),
+                next_word: 0x2000,
+                made: Vec::new(),
+            }
+        }
+    }
+
+    impl LoaderConvert for FakeLoader {
+        fn load_class(&mut self, descriptor: &str) -> Option<String> {
+            let bare = descriptor
+                .strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or(descriptor);
+            self.classes.iter().find(|c| c.as_str() == bare).cloned()
+        }
+
+        fn is_assignable(&mut self, from: &str, to: &str) -> bool {
+            from == to || (from == "java.lang.String" && to == "Ljava.lang.String;")
+        }
+
+        fn make_string(&mut self, value: Value) -> u32 {
+            // The exe formats %d / %.3f; the fake records the input and
+            // hands out object words.
+            self.made.push(value);
+            let w = self.next_word;
+            self.next_word += 1;
+            w
+        }
+
+        fn target_name(&self, descriptor: &str) -> &'static str {
+            if descriptor == "Ljava.lang.String;" {
+                TypeTag::STRING
+            } else if descriptor == "L;" {
+                "L;"
+            } else {
+                ""
+            }
+        }
+    }
+
+    #[test]
+    fn loader_convert_int_to_string_formats_like_sprintf() {
+        // FUN_00417da0 L-target I/F path (static port): load String,
+        // check assignability, format, intern. 42 -> "42" (%d).
+        let mut l = FakeLoader::with(&["java.lang.String"]);
+        let mut v = Value::int(42);
+        assert!(loader_convert(&mut l, &mut v, "Ljava.lang.String;").is_ok());
+        assert_eq!(v.tag, TypeTag::Ref(TypeTag::STRING));
+        assert_eq!(v.payload, 0x2000);
+        assert_eq!(l.made, vec![Value::int(42)]);
+        // Float goes through the same path (%.3f in the exe).
+        let mut v = Value::float(1.5);
+        assert!(loader_convert(&mut l, &mut v, "Ljava.lang.String;").is_ok());
+        assert_eq!(v.payload, 0x2001);
+    }
+
+    #[test]
+    fn loader_convert_ref_paths() {
+        let mut l = FakeLoader::with(&["java.lang.String", "game.Widget"]);
+        // Null passes with the target tag.
+        let mut v = Value::reference(0);
+        assert!(loader_convert(&mut l, &mut v, "Ljava.lang.String;").is_ok());
+        assert_eq!(v.tag, TypeTag::Ref(TypeTag::STRING));
+        // Same descriptor passes untouched.
+        let mut v = Value::reference_named(7, "Lgame.Widget;");
+        assert!(loader_convert(&mut l, &mut v, "Lgame.Widget;").is_ok());
+        assert_eq!(v.payload, 7);
+        // Unrelated classes fail closed (cannot cast).
+        let mut v = Value::reference_named(7, "Lgame.Widget;");
+        assert!(loader_convert(&mut l, &mut v, "Ljava.lang.String;").is_err());
+        // Missing class fails closed (cannot parse class).
+        let mut v = Value::reference_named(7, "Lgame.Missing;");
+        assert!(loader_convert(&mut l, &mut v, "Ljava.lang.String;").is_err());
+        // Non-L target fails closed.
+        let mut v = Value::int(1);
+        assert!(loader_convert(&mut l, &mut v, "I").is_err());
     }
 }

@@ -3,3 +3,12 @@ name = "slr-lang"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+slr-platform = { path = "../slr-platform" }
+slr-vm = { path = "../slr-vm" }
+slr-x87 = { path = "../slr-x87" }
+
+[dev-dependencies]
+serde_json = "1"
+slr-fmt-tufa = { path = "../slr-fmt-tufa" }

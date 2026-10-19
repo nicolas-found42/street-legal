@@ -8,6 +8,7 @@
 
 pub mod diff;
 pub mod error;
+pub mod headless;
 pub mod model;
 pub mod reader;
 pub mod recorder;

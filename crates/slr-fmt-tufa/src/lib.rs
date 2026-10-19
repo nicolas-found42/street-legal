@@ -220,6 +220,9 @@ impl Module {
 pub enum PoolEntry {
     /// type 0: `u32 len`, `len` bytes, NUL.
     Str(String),
+    /// type0 bytes that are not valid UTF-8; literal bytes are lossless,
+    /// while metadata consumers must reject an unsupported text encoding.
+    RawStr(Vec<u8>),
     /// type 1: `i32`.
     Int(i32),
     /// type 2: `f32`.
@@ -262,7 +265,10 @@ impl Module {
                             detail: "string not NUL terminated".into(),
                         });
                     }
-                    PoolEntry::Str(String::from_utf8_lossy(b).into_owned())
+                    match std::str::from_utf8(b) {
+                        Ok(text) => PoolEntry::Str(text.to_owned()),
+                        Err(_) => PoolEntry::RawStr(b.to_vec()),
+                    }
                 }
                 1 => PoolEntry::Int(r.u32()? as i32),
                 2 => PoolEntry::Float(f32::from_bits(r.u32()?)),

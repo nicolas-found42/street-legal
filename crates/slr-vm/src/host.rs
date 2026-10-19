@@ -1,0 +1,2461 @@
+//! The object-model host: `VmHost` implements [`Host`] over the loader.
+//!
+//! Implements interpreter delegation over loaded class metadata and persistent
+//! typed instance, static, and array cells. Field vectors cover the recovered
+//! field slice; execution vectors additionally cover bounded call dispatch,
+//! literals, construction, casts, and per-VM String identity.
+//!
+//! Bounded class/field initialization uses sequential cells, dependency order,
+//! and the same RID/String/call/new/cast paths. Untraced initializer families,
+//! missing backends, malformed graphs and nesting-budget exhaustion fail
+//! explicitly. Diagnostic-only conversion errors preserve original raw copies.
+//! Versioned duplicate-class identity, complete name/cache resolution, machine
+//! CallInfo context, active String GC, and whole-world boot remain open (#110).
+//!
+//! The target executable operations are:
+//!
+//! - `Declare` (`0x1002`): allocate a local with the following pool type and
+//!   optional name; push the indexed lvalue on a `0x002c` follower.
+//! - `ResolveName` (`0x1011`), `CallResolved` (`0x0024`): resolve the inline
+//!   name nodes (`FUN_00420d20`/`FUN_004208e0` shape: `0x1011` count +
+//!   `0x1019`/`0x101a` leaves, `0x4012` method name) against loaded classes.
+//! - `FieldRef` (`0x101b`), `FieldByName` (`0x001d`), `MemberAccess`
+//!   (`0x401c`): field lookup (static vs instance by the pool bit-30 rule).
+//! - `ArgArray` (`0x101e`): pack `imm` values (`FUN_00404e60`).
+//! - `CallStatic` (`0x4026`), `CallInstance` (`0x4025`), `CallInit`
+//!   (`0x0021`), `CallThisInit` (`0x0022`), `CallSuperInit` (`0x0023`):
+//!   resolve through [`Loader::resolve_method`] (`FUN_00404910`); native
+//!   targets go through the registry instead of a script frame
+//!   (`FUN_0041fbc0` flag `0x40` path); script targets enter via
+//!   [`Thread::call_script_method_with`].
+//! - `New` (`0x1e`), `NewArray` (`0x1f`): allocate the object/array
+//!   (`FUN_00410890` class init + sizing; one-dimensional only).
+//! - `InstanceOf` (`0x20`), `Cast` (`0x21`): hierarchy checks
+//!   (`FUN_00405400` / `FUN_00417da0`).
+//! - `ResourceLiteral` (`0x100e`) reads a resource Member; `StringLiteral`
+//!   (`0x4009`) uses per-VM String object interning with an actual ptr cell.
+//!
+//! Executable addresses identify the recovery targets; they do not certify the
+//! complete functions. Data-free tests use synthetic modules and the
+//! stock corpus exercises load/link. Headless boot acceptance remains open.
+
+use std::collections::{HashMap, HashSet};
+
+use slr_fmt_tufa::Node;
+
+use crate::interp::{
+    BodyId, ExternKind, ExternOp, Flow, HeapSlot, Host, RefOperator, Slot, Thread, VmError,
+};
+use crate::natives::Natives;
+use crate::strings::Strings;
+use crate::values::{LoaderConvert, TypeTag, Value};
+use crate::vmclass::Loader;
+
+/// Errors the host can raise beyond [`VmError`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostError {
+    /// Name resolution failed (`name cannot be parsed`, fatal in the exe).
+    UnresolvedName,
+    /// Field or member missing (fatal in the exe).
+    MissingMember,
+    /// Call target missing (`... not found`, fatal in the exe).
+    MissingMethod,
+    /// `new` of an unloaded class, bad cast (`cannot cast`, fatal).
+    BadCast,
+    /// Multi-dimensional `new[]` (fatal in the exe).
+    MultiArray,
+    /// A field initializer requires an opcode outside the recovered field slice.
+    UnsupportedInitializer(String),
+    /// Abstract or native method has no script body to enter.
+    NoBody,
+}
+
+impl From<HostError> for VmError {
+    fn from(e: HostError) -> Self {
+        match e {
+            HostError::UnresolvedName => Self::Unsupported(0x1011),
+            HostError::MissingMember => Self::Unsupported(0x401c),
+            HostError::MissingMethod => Self::Unsupported(0x4026),
+            HostError::BadCast => Self::Unsupported(0x0021),
+            HostError::MultiArray => Self::Unsupported(0x001f),
+            HostError::NoBody => Self::Unsupported(0x0024),
+            HostError::UnsupportedInitializer(_) => Self::Unsupported(0x402e),
+        }
+    }
+}
+
+/// A heap object: class plus field words.
+#[derive(Clone, Debug)]
+pub struct Object {
+    /// Index into [`VmHost::loader`] classes by name.
+    pub class: String,
+    /// Base-first instance values; class statics have their own owner.
+    pub fields: Vec<Value>,
+}
+
+// ---- the shared native-call ABI --------------------------------------
+
+/// The argument bundle every native receives: the exe's 4-word `CallInfo`
+/// plus the record words it points at.
+///
+/// Machine layout (all `[static]`, `0x41fc20-0x4200b7` builds it; every
+/// `0x47xxxx`/`0x48xxxx` native reads it from its one stack argument):
+///
+/// ```text
+/// info+0x00  jvm              info+0x04  thread
+/// info+0x08  arg container    info+0x0c  native record
+/// container  { +0 cap, +4 data ptr, +8 count, +0xc self }    (0x41e2d0/e2e0/e2f0)
+/// record     { +0 vtable 0x5f08fc, +4 jvm, +8 impl addr,
+///              +0xc class cstr, +0x10 name cstr, +0x14 sig record }
+/// sig rec    { +0 owner, +4 cached descriptor text, +8 type container }  (0x41def0)
+/// ```
+///
+/// The container's `count` includes the receiver/return slot: `[count-1]`
+/// is that slot and the parameters run downward, first parameter at
+/// `[count-2]` (pinned by [`marshal_args`], see `docs/tufa-executor.md`).
+///
+/// The port projects the container onto `args` (its `len()` is the exe's
+/// `count`) and the two records onto `class`/`name`/`sig`. The `jvm` and
+/// `thread` words are 0 until the port has host context words to pass.
+#[derive(Clone, Copy, Debug)]
+pub struct CallInfo<'a> {
+    /// `info+0x00`: the JVM context word.
+    pub jvm: u32,
+    /// `info+0x04`: the calling thread word.
+    pub thread: u32,
+    /// `info+0x08`: the argument container contents (`count = len`).
+    pub args: &'a [Value],
+    /// `info+0x0c -> +0xc`: the native record's class name.
+    pub class: &'a str,
+    /// `info+0x0c -> +0x10`: the method name.
+    pub name: &'a str,
+    /// `info+0x0c -> +0x14 -> +0x4`: the signature record's cached
+    /// descriptor text (`(II)V`), which is what [`marshal_args`] parses.
+    /// `FUN_0041def0` only *builds* that text when the cache is empty, from
+    /// the record's type container; the port always carries the text.
+    pub sig: &'a str,
+}
+
+/// Why [`marshal_args`] stopped before writing every slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarshalError {
+    /// The descriptor declares more parameters than the container holds
+    /// (`0x45dabf`).
+    NotEnoughParameters,
+    /// A type byte outside `I`/`F`/`L`/`[` (`0x45d9e5`, `0x45da60`).
+    UnknownType,
+    /// An array whose element type is not `I`/`F`/`L` (`0x45d9e5`): the
+    /// payload of the array slot was already copied.
+    UnknownArrayElement,
+    /// Port bound only: `out` has fewer words than the descriptor needs.
+    /// The exe's out slots are variadic caller-provided stack words with no
+    /// runtime bound.
+    OutOfSlots,
+}
+
+impl MarshalError {
+    /// The exe's log text (`0x61099c`, `0x6109e8`, `0x610a1c`); the
+    /// `UnknownArrayElement` text keeps its trailing space.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotEnoughParameters => {
+                "CallInfo.parseParameters: not enough parameters passed to native function"
+            }
+            Self::UnknownType => "CallInfo.parseParameters: unknown type in signature",
+            Self::UnknownArrayElement => "CallInfo.parseParameters: unknown type in signature ",
+            Self::OutOfSlots => "",
+        }
+    }
+
+    /// The full diagnostic the exe concatenates at `0x62e018` before
+    /// flushing it: `"!"` (`0x607b3c`), the message, the record's class and
+    /// method names, then the descriptor text (`0x45db1c` calls
+    /// `FUN_0041def0` again, which returns the cached text).
+    #[must_use]
+    pub fn log_line(self, info: &CallInfo<'_>) -> String {
+        format!("!{}{}{}{}", self.message(), info.class, info.name, info.sig)
+    }
+}
+
+/// The exe's argument marshaller: write the receiver/return slot and each
+/// declared parameter into `out`.
+///
+/// `out[0]` receives `args[count-1]` (the receiver/return slot), then one
+/// word per descriptor parameter, in declaration order. `I` and `F` copy
+/// the cell payload word verbatim (no float conversion here — the caller
+/// side does that on return); `L...;` copies one word and skips to the
+/// `;`; `[` copies one word after skipping every `[` and then also skips
+/// an `L...;` element name. Returns the number of words written.
+///
+/// The container is read downward: the first declared parameter is
+/// `args[count-2]`, the last is `args[0]`. A descriptor parameter with no
+/// container slot left is `NotEnoughParameters` (the exe logs and returns,
+/// leaving the remaining out words untouched — so do we).
+///
+/// exe: FUN_0045d910
+pub fn marshal_args(info: &CallInfo<'_>, out: &mut [u32]) -> Result<usize, MarshalError> {
+    /// One `*out = payload; out++`.
+    fn put(out: &mut [u32], written: &mut usize, word: u32) -> Result<(), MarshalError> {
+        let Some(slot) = out.get_mut(*written) else {
+            return Err(MarshalError::OutOfSlots);
+        };
+        *slot = word;
+        *written += 1;
+        Ok(())
+    }
+
+    let cells = info.args;
+    let count = cells.len();
+    if out.is_empty() {
+        return Err(MarshalError::OutOfSlots);
+    }
+    // `container[count-1]`, or a null cell when the container is empty
+    // (the exe indexes `data[-1]` there; the port reads null).
+    out[0] = if count == 0 {
+        0
+    } else {
+        cells[count - 1].payload
+    };
+    let mut written = 1;
+    let sig = info.sig.as_bytes();
+    // `FUN_0041def0` returns `"(" + params + ")" + return`; the walk
+    // begins one byte past the `(` (`mov cl,[edi+1]; inc edi`).
+    if sig.first() != Some(&b'(') {
+        return Err(MarshalError::UnknownType);
+    }
+    let mut cur = 1;
+    let mut remaining = count as isize - 1;
+    loop {
+        let Some(&ty) = sig.get(cur) else {
+            // The exe reads whatever follows the text; the port fails the
+            // descriptor instead of walking into unmapped memory.
+            return Err(MarshalError::UnknownType);
+        };
+        // The tail check `cl == ')'` happens before the next decrement.
+        if ty == b')' {
+            return Ok(written);
+        }
+        let prev = remaining;
+        remaining -= 1;
+        // `test eax,eax; je 0x45dabf` — the check precedes the type switch,
+        // so a bogus type byte after the container runs dry still reports
+        // the missing parameter.
+        if prev == 0 {
+            return Err(MarshalError::NotEnoughParameters);
+        }
+        let cell = if remaining >= 0 && (remaining as usize) < count {
+            cells[remaining as usize].payload
+        } else {
+            0
+        };
+        cur = match ty {
+            b'I' | b'F' => {
+                put(out, &mut written, cell)?;
+                cur + 1
+            }
+            b'L' => {
+                put(out, &mut written, cell)?;
+                // `while [edi+1] != ';' { edi++ }` then step past it.
+                let semi = sig
+                    .get(cur + 1..)
+                    .and_then(|tail| tail.iter().position(|&c| c == b';'))
+                    .map(|p| p + cur + 1)
+                    .ok_or(MarshalError::UnknownType)?;
+                semi + 1
+            }
+            b'[' => {
+                // Skip every extra `[` (0x45d9bb loop).
+                let mut p = cur;
+                loop {
+                    p += 1;
+                    match sig.get(p) {
+                        Some(&b'[') => {}
+                        Some(_) => break,
+                        None => return Err(MarshalError::UnknownType),
+                    }
+                }
+                // The payload is copied before the element type is tested.
+                put(out, &mut written, cell)?;
+                match sig.get(p) {
+                    Some(&b'F') | Some(&b'I') => p + 1,
+                    Some(&b'L') => {
+                        let semi = sig
+                            .get(p + 1..)
+                            .and_then(|tail| tail.iter().position(|&c| c == b';'))
+                            .map(|s| s + p + 1)
+                            .ok_or(MarshalError::UnknownType)?;
+                        semi + 1
+                    }
+                    // The trailing-space diagnostic (`0x610a1c`).
+                    _ => return Err(MarshalError::UnknownArrayElement),
+                }
+            }
+            _ => return Err(MarshalError::UnknownType),
+        };
+    }
+}
+
+/// Number of argument slots a descriptor declares (`(II)V` -> 2,
+/// `([[I)V` -> 1, `()V` -> 0), or `None` when the text is not a
+/// descriptor. This is the inverse walk of [`marshal_args`] and the count
+/// the port's caller side needs to pop (the exe's call record already
+/// carries the container).
+///
+/// exe: FUN_0041def0 (type-container walk that produces the same text)
+#[must_use]
+pub fn parameter_slots(sig: &str) -> Option<usize> {
+    fn skip_class(bytes: &[u8], from: usize) -> Option<usize> {
+        let tail = bytes.get(from..)?;
+        let semi = tail.iter().position(|&c| c == b';')?;
+        Some(from + semi + 1)
+    }
+
+    let bytes = sig.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return None;
+    }
+    let mut i = 1;
+    let mut n = 0;
+    loop {
+        match *bytes.get(i)? {
+            b')' => return Some(n),
+            b'I' | b'F' => {
+                i += 1;
+                n += 1;
+            }
+            b'L' => {
+                i = skip_class(bytes, i + 1)?;
+                n += 1;
+            }
+            b'[' => {
+                i += 1;
+                while *bytes.get(i)? == b'[' {
+                    i += 1;
+                }
+                match *bytes.get(i)? {
+                    b'I' | b'F' => i += 1,
+                    b'L' => i = skip_class(bytes, i + 1)?,
+                    _ => return None,
+                }
+                n += 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Native return-cell descriptor, including V:0 and full reference/array
+/// spelling. A parameter-only constructor signature has no return descriptor.
+#[must_use]
+pub fn return_type(sig: &str) -> Option<TypeTag> {
+    let descriptor = sig.split_once(')')?.1;
+    if descriptor == "V" {
+        return Some(TypeTag::intern("V"));
+    }
+    let parameters = parameter_types(&format!("({descriptor})")).ok()?;
+    (parameters.len() == 1).then(|| parameters[0])
+}
+
+/// Build the exe's argument container for a native call: pop the
+/// parameters **last-declared first**, then the receiver/return slot, so
+/// the receiver lands at `len-1` exactly where [`marshal_args`] reads it.
+///
+/// The exe's container *is* the caller's operand stack (`0x420165` reads
+/// `[frame+0x20]+0x28`, the same container `info+8` points at), and its
+/// `count` includes the receiver/return slot — which is why the marshaller
+/// walks downward from `count-1`. The port therefore pops the caller's
+/// stack instead of copying a call record.
+///
+/// exe: FUN_0045d910 (container contract)
+fn collect_args_using(
+    thread: &mut Thread,
+    sig: &str,
+    mut pop: impl FnMut(&mut Thread) -> Result<Value, VmError>,
+) -> Result<Vec<Value>, VmError> {
+    let params = parameter_slots(sig).ok_or(VmError::Unsupported(0x4012))?;
+    let mut args = Vec::with_capacity(params + 1);
+    for _ in 0..params {
+        let value = pop(thread)?;
+        args.push(value);
+        thread.release();
+    }
+    // A static call recorded no receiver; the exe's container still holds
+    // the slot (`count` includes it), so supply a null one.
+    let receiver = match pop(thread) {
+        Ok(value) => {
+            thread.release();
+            value
+        }
+        Err(VmError::NullSlot) => Value::int(0),
+        Err(error) => return Err(error),
+    };
+    args.push(receiver);
+    Ok(args)
+}
+
+pub(crate) fn parameter_types(sig: &str) -> Result<Vec<TypeTag>, VmError> {
+    let bytes = sig.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return Err(HostError::MissingMethod.into());
+    }
+    let mut index = 1;
+    let mut result = vec![];
+    while bytes.get(index) != Some(&b')') {
+        let start = index;
+        while bytes.get(index) == Some(&b'[') {
+            index += 1;
+        }
+        match bytes.get(index) {
+            Some(b'I' | b'F') => index += 1,
+            Some(b'L') => {
+                index += 1;
+                while bytes.get(index).is_some_and(|byte| *byte != b';') {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b';') {
+                    return Err(HostError::MissingMethod.into());
+                }
+                index += 1;
+            }
+            _ => return Err(HostError::MissingMethod.into()),
+        }
+        result.push(TypeTag::intern(&sig[start..index]));
+    }
+    Ok(result)
+}
+
+/// Collect native arguments from local/value operands.
+pub fn collect_args(thread: &mut Thread, sig: &str) -> Result<Vec<Value>, VmError> {
+    collect_args_using(thread, sig, Thread::pop_deref)
+}
+
+/// Collect native arguments while dereferencing authoritative host lvalues.
+pub fn collect_args_with<H: Host>(
+    thread: &mut Thread,
+    sig: &str,
+    host: &mut H,
+) -> Result<Vec<Value>, VmError> {
+    collect_args_using(thread, sig, |thread| thread.pop_deref_with(host))
+}
+
+/// A ported native: the target of the `record+8` code pointer.
+///
+/// It receives the calling host and its [`CallInfo`]; like every exe
+/// native it marshals its own parameters through [`marshal_args`]. The
+/// result is the return payload word (`eax`, or the `st0` bits for an `F`
+/// return) and `None` for `void`.
+pub type NativeFn = fn(&mut VmHost, &CallInfo<'_>) -> Option<u32>;
+
+/// Resource table boundary used by literal100e's4122b0 call. A missing backend
+/// is unsupported; the VM never fabricates a global resource identifier.
+pub type ResourceResolver = fn(&mut VmHost, Option<&str>, u32) -> Result<u32, VmError>;
+
+/// Log-and-continue observations retained from initializer execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitializationDiagnostic {
+    /// A declared interface dependency had a non-interface kind word.
+    InterfaceExtendsClass {
+        class: String,
+        interface: String,
+        kind: u32,
+    },
+    /// Existing ALU diagnostics; assignment may still copy the source payload.
+    Body(crate::ops::Diagnostic),
+}
+
+/// The object model over a loaded world.
+pub struct VmHost {
+    /// Loaded classes and packages.
+    pub loader: Loader,
+    /// Native registry.
+    pub natives: Natives,
+    /// Interned strings (pool + literals).
+    pub strings: Strings,
+    /// Heap objects by word (`0x1000 + index`; 0 = null).
+    pub objects: Vec<Object>,
+    /// Ported native implementations by exe address (`record+8`): the
+    /// registry maps `(class, name, sig)` to the address, this maps the
+    /// address to the port. Empty until the native slices land; an address
+    /// with no function here is [`HostError::NoBody`].
+    pub native_impls: HashMap<u32, NativeFn>,
+    /// Resolve package/local resource IDs through the installed resource world.
+    pub resource_resolver: Option<ResourceResolver>,
+    /// Original log-and-continue method resolution diagnostics.
+    pub method_diagnostics: Vec<&'static str>,
+    /// Original diagnostic-only conditions during field/class initialization.
+    pub initialization_diagnostics: Vec<InitializationDiagnostic>,
+    /// Embedding guard for nested initializer bodies (default32). This is a
+    /// Rust resource limit, not a recovered original stack/unwind policy.
+    pub initializer_depth_limit: usize,
+    initializer_depth: usize,
+    static_cells: HashMap<u32, Vec<Value>>,
+    initializing_classes: HashSet<u32>,
+    array_cells: HashMap<u32, Vec<Value>>,
+    variable_names: Vec<String>,
+}
+
+impl VmHost {
+    /// Intern a nullable C string as a real loaded String object. Content hits
+    /// reuse the object associated with the intern record; String.ptr contains
+    /// that record's stable buffer word. GC-list revival is not implemented.
+    /// exe: FUN_004174a0
+    pub fn intern_string(&mut self, bytes: Option<&[u8]>) -> Result<u32, HostError> {
+        let Some(bytes) = bytes else { return Ok(0) };
+        let bytes = &bytes[..bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len())];
+        self.loader
+            .find("java.lang.String")
+            .ok_or(HostError::BadCast)?;
+        if let Some(word) = self.strings.lookup(bytes).and_then(|record| record.object) {
+            return Ok(word);
+        }
+        let slot = self.instance_field_slot("java.lang.String", "ptr")?;
+        if self.instance_fields("java.lang.String")?[slot].ty != "I" {
+            return Err(HostError::MissingMember);
+        }
+        let word = self.alloc_object("java.lang.String")?;
+        let buffer = self.strings.intern(bytes).word;
+        self.objects[(word - 0x1000) as usize].fields[slot] = Value::int(buffer as i32);
+        self.strings.bind_object(bytes, word);
+        Ok(word)
+    }
+
+    /// Resolve bytes through the actual heap object's inherited ptr cell.
+    #[must_use]
+    pub fn string_bytes(&self, word: u32) -> Option<&[u8]> {
+        let object = self.objects.get(word.checked_sub(0x1000)? as usize)?;
+        if !self
+            .loader
+            .is_inherited_from(&object.class, "java.lang.String")
+            .ok()?
+        {
+            return None;
+        }
+        // The native uses its cached String/Native.ptr field index. Base-first
+        // layout keeps that same cell in a subclass, even with later fields.
+        let slot = self.instance_field_slot("java.lang.String", "ptr").ok()?;
+        self.strings.bytes_at(object.fields.get(slot)?.payload)
+    }
+    /// An empty host (boot with [`VmHost::boot`]).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loader: Loader::new(),
+            natives: Natives::new(),
+            strings: Strings::new(),
+            objects: Vec::new(),
+            native_impls: HashMap::new(),
+            resource_resolver: None,
+            method_diagnostics: vec![],
+            initialization_diagnostics: vec![],
+            initializer_depth_limit: 32,
+            initializer_depth: 0,
+            static_cells: HashMap::new(),
+            initializing_classes: HashSet::new(),
+            array_cells: HashMap::new(),
+            variable_names: Vec::new(),
+        }
+    }
+
+    /// Install an already decoded body with its owning constant pool.
+    pub fn add_body(
+        &mut self,
+        class: &str,
+        nodes: Vec<Node>,
+        pool: Vec<slr_fmt_tufa::PoolEntry>,
+    ) -> Result<BodyId, crate::vmclass::LoadError> {
+        self.loader.add_body(class, nodes, pool)
+    }
+
+    /// Loaded class context for an interpreter frame.
+    pub fn class_context(&self, class: &str) -> Option<u32> {
+        self.loader.context_word(class)
+    }
+
+    /// Boot (`FUN_0040fe70` substring table + primitive binds).
+    pub fn boot(&mut self) {
+        self.loader.boot();
+    }
+
+    /// Resolve the opaque interned-name handle carried by a local variable.
+    pub fn variable_name(&self, word: u32) -> Option<&str> {
+        self.variable_names
+            .get(word.checked_sub(1)? as usize)
+            .map(String::as_str)
+    }
+
+    fn intern_variable_name(&mut self, name: &str) -> u32 {
+        self.strings.intern(name.as_bytes());
+        if let Some(index) = self.variable_names.iter().position(|value| value == name) {
+            return index as u32 + 1;
+        }
+        self.variable_names.push(name.to_owned());
+        self.variable_names.len() as u32
+    }
+
+    /// Allocate initialized storage for one typed array. This does not
+    /// interpret `new[]` bytecode or resolve its encoded element type.
+    /// exe: FUN_00407da0
+    pub fn alloc_array(&mut self, element: &str, length: usize) -> Result<u32, HostError> {
+        if length > i32::MAX as usize {
+            return Err(HostError::BadCast);
+        }
+        let ty = TypeTag::intern(element);
+        if !matches!(
+            ty,
+            TypeTag::Int | TypeTag::Float | TypeTag::Ref(_) | TypeTag::Array(_)
+        ) {
+            return Err(HostError::BadCast);
+        }
+        let word = 0x1000 + self.objects.len() as u32;
+        self.objects.push(Object {
+            class: format!("[{element}"),
+            fields: vec![Value::int(length as i32)],
+        });
+        self.array_cells.insert(
+            word,
+            vec![
+                Value {
+                    tag: ty,
+                    payload: 0
+                };
+                length
+            ],
+        );
+        Ok(word)
+    }
+
+    /// Base-first instance-field layout. Static variables belong to their
+    /// declaring class, never to an object's instance variable container.
+    /// exe: FUN_00407da0
+    pub fn instance_fields(&self, class: &str) -> Result<Vec<&crate::vmclass::Field>, HostError> {
+        let mut hierarchy = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = Some(class);
+        while let Some(name) = current {
+            if name == "V" {
+                break;
+            }
+            if !seen.insert(name) {
+                return Err(HostError::BadCast);
+            }
+            let class = self.loader.find(name).ok_or(HostError::BadCast)?;
+            hierarchy.push(class);
+            current = class.base.as_deref();
+        }
+        Ok(hierarchy
+            .into_iter()
+            .rev()
+            .flat_map(|class| class.fields.iter().filter(|field| !field.is_static))
+            .collect())
+    }
+
+    /// Named instance slot, shared by script lvalues and installed natives.
+    /// exe: FUN_00403840
+    pub fn instance_field_slot(&self, class: &str, name: &str) -> Result<usize, HostError> {
+        self.instance_fields(class)?
+            .iter()
+            .rposition(|field| field.name == name)
+            .ok_or(HostError::MissingMember)
+    }
+
+    /// The metadata resolver checks each class's static then instance list,
+    /// walking ancestors; inherited instance indices include base fields.
+    /// exe: FUN_00405690
+    fn field_index(&self, class: &str, name: &str) -> Result<(usize, bool), HostError> {
+        let layout = self.instance_fields(class)?;
+        let mut current = Some(class);
+        while let Some(name_class) = current {
+            if name_class == "V" {
+                break;
+            }
+            let class = self
+                .loader
+                .find(name_class)
+                .ok_or(HostError::MissingMember)?;
+            if let Some(index) = class
+                .fields
+                .iter()
+                .filter(|field| field.is_static)
+                .enumerate()
+                .filter(|(_, field)| field.name == name)
+                .last()
+                .map(|(index, _)| index)
+            {
+                return Ok((index, true));
+            }
+            if class
+                .fields
+                .iter()
+                .any(|field| !field.is_static && field.name == name)
+            {
+                let index = layout
+                    .iter()
+                    .rposition(|field| field.class == name_class && field.name == name)
+                    .ok_or(HostError::MissingMember)?;
+                return Ok((index, false));
+            }
+            current = class.base.as_deref();
+        }
+        Err(HostError::MissingMember)
+    }
+
+    fn indexed_field(
+        &mut self,
+        owner: &str,
+        pool_index: u32,
+        receiver: u32,
+    ) -> Result<HeapSlot, HostError> {
+        let (class, name, ty) = self
+            .loader
+            .field_reference(owner, pool_index)
+            .map_err(|_| HostError::MissingMember)?;
+        if ty.starts_with('(') {
+            return Err(HostError::MissingMember);
+        }
+        let (class, name) = (class.to_owned(), name.to_owned());
+        let (slot, is_static) = self.field_index(&class, &name)?;
+        if is_static {
+            // The original cache resolver records the defining module in
+            // DAT0062f11c, but 101b still loads the pool-encoded class via
+            // 406c20/4117a0. Preserve that observed behavior even for a
+            // controlled inherited-static reference encoded with a leaf class.
+            self.static_slot(&class, slot)
+        } else if receiver == 0 {
+            Err(HostError::MissingMember)
+        } else {
+            Ok(HeapSlot::Object {
+                word: receiver,
+                slot,
+            })
+        }
+    }
+
+    /// Resolve the original static-first instance name lookup.
+    /// exe: FUN_00408800
+    pub fn member_slot(&mut self, word: u32, name: &str) -> Result<HeapSlot, HostError> {
+        if self.array_cells.contains_key(&word) {
+            return if name == "length" {
+                Ok(HeapSlot::Object { word, slot: 0 })
+            } else {
+                Err(HostError::MissingMember)
+            };
+        }
+
+        let class = self
+            .objects
+            .get(word.checked_sub(0x1000).ok_or(HostError::MissingMember)? as usize)
+            .ok_or(HostError::MissingMember)?
+            .class
+            .clone();
+        if let Some(slot) = self
+            .loader
+            .find(&class)
+            .ok_or(HostError::MissingMember)?
+            .fields
+            .iter()
+            .filter(|field| field.is_static)
+            .enumerate()
+            .filter(|(_, field)| field.name == name)
+            .last()
+            .map(|(index, _)| index)
+        {
+            return self.static_slot(&class, slot);
+        }
+        Ok(HeapSlot::Object {
+            word,
+            slot: self.instance_field_slot(&class, name)?,
+        })
+    }
+
+    /// Initialize already-loaded dependencies and append each own static cell
+    /// immediately before its initializer. The installed owner is the reentry
+    /// sentinel; a malformed dependency cycle before installation fails closed.
+    /// This does not model machine fatal-handler unwind or class poisoning.
+    /// exe: FUN_00403e80
+    fn initialize_class(&mut self, class: &str) -> Result<(), HostError> {
+        let context = self.class_context(class).ok_or(HostError::MissingMember)?;
+        if self.static_cells.contains_key(&context) {
+            return Ok(());
+        }
+        if !self.initializing_classes.insert(context) {
+            return Err(HostError::UnsupportedInitializer(
+                "cyclic initialization dependency".into(),
+            ));
+        }
+        let result = (|| {
+            let metadata = self
+                .loader
+                .find(class)
+                .ok_or(HostError::MissingMember)?
+                .clone();
+            // Resolve the entire declared dependency list before recursion.
+            // Original interface-kind diagnostics continue, and the base kind
+            // does not impose a corresponding hard-rejection check.
+            let base = metadata.base.as_deref().filter(|base| *base != "V");
+            if let Some(base) = base {
+                self.loader.find(base).ok_or(HostError::MissingMember)?;
+            }
+            for interface in &metadata.interfaces {
+                let dependency = self
+                    .loader
+                    .find(interface)
+                    .ok_or(HostError::MissingMember)?;
+                if dependency.kind != 1 {
+                    self.initialization_diagnostics.push(
+                        InitializationDiagnostic::InterfaceExtendsClass {
+                            class: class.to_owned(),
+                            interface: interface.clone(),
+                            kind: dependency.kind,
+                        },
+                    );
+                }
+            }
+            if let Some(base) = base {
+                self.initialize_class(base)?;
+            }
+            for interface in &metadata.interfaces {
+                self.initialize_class(interface)?;
+            }
+            self.static_cells.insert(context, Vec::new());
+            for (index, field) in metadata
+                .fields
+                .iter()
+                .filter(|field| field.is_static)
+                .enumerate()
+            {
+                self.static_cells.get_mut(&context).unwrap().push(Value {
+                    tag: TypeTag::intern(&field.ty),
+                    payload: 0,
+                });
+                // Original compares canonical descriptor pointers. The loader's
+                // current single-version class boundary and TypeTag interning
+                // provide that identity here; versioned class identity is open.
+                if TypeTag::intern(&field.ty) == TypeTag::intern(&format!("L{class};")) {
+                    continue;
+                }
+                if let Some(body) = self.loader.field_initializer(field) {
+                    let value = self
+                        .initialize_field(body, context, 0, self.static_cells[&context][index])
+                        .map_err(|error| {
+                            HostError::UnsupportedInitializer(format!(
+                                "{}.{}: {error:?}",
+                                class, field.name
+                            ))
+                        })?;
+                    self.static_cells.get_mut(&context).unwrap()[index] = value;
+                }
+            }
+            Ok(())
+        })();
+        self.initializing_classes.remove(&context);
+        result
+    }
+
+    /// A class's own static variable container, separate from instances.
+    /// exe: FUN_00404800
+    fn static_slot(&mut self, class: &str, slot: usize) -> Result<HeapSlot, HostError> {
+        self.initialize_class(class)?;
+        let context = self.class_context(class).ok_or(HostError::MissingMember)?;
+        if slot >= self.static_cells[&context].len() {
+            return Err(HostError::MissingMember);
+        }
+        Ok(HeapSlot::Static { context, slot })
+    }
+
+    fn initializer_supported(&self, body: BodyId) -> bool {
+        self.loader.body(body).is_some_and(|nodes| {
+            nodes.iter().all(|node| {
+                !matches!(node.opword, 0x101e | 0x0021..=0x0023 | 0x4025 | 0x4026)
+                    && !(matches!(node.opword, 0x1007 | 0x1008) && matches!(node.imm, 0x1f..=0x20))
+            })
+        })
+    }
+
+    fn initialize_field(
+        &mut self,
+        body: BodyId,
+        context: u32,
+        receiver: u32,
+        destination: Value,
+    ) -> Result<Value, HostError> {
+        if self.initializer_depth >= self.initializer_depth_limit {
+            return Err(HostError::UnsupportedInitializer(
+                "initializer nesting budget exhausted".into(),
+            ));
+        }
+        self.initializer_depth += 1;
+        let result = self.run_initializer_field(body, context, receiver, destination);
+        self.initializer_depth -= 1;
+        result
+    }
+
+    fn run_initializer_field(
+        &mut self,
+        body: BodyId,
+        context: u32,
+        receiver: u32,
+        mut destination: Value,
+    ) -> Result<Value, HostError> {
+        if !self.initializer_supported(body) {
+            return Err(HostError::UnsupportedInitializer(format!(
+                "body {} requires #110 execution",
+                body.0
+            )));
+        }
+        let mut thread = Thread::new();
+        let pc = Some(crate::interp::Pc { body, idx: 0 });
+        let mut frame = crate::interp::Frame::new(pc, receiver);
+        frame.class_ctx = context;
+        thread.frames.push(frame);
+        thread.pc = pc;
+        let outcome = thread.run(self, 0.0, &mut || slr_x87::X87::from_f64(0.0));
+        self.initialization_diagnostics.extend(
+            thread
+                .alu
+                .diagnostics
+                .drain(..)
+                .map(InitializationDiagnostic::Body),
+        );
+        outcome.map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
+        if thread
+            .frames
+            .last()
+            .is_none_or(|frame| frame.stack.len() != 1)
+        {
+            return Err(HostError::UnsupportedInitializer(
+                "invalid initializer result stack".into(),
+            ));
+        }
+        let mut value = thread
+            .pop_deref_with(self)
+            .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
+        thread
+            .alu
+            .store_with(&mut destination, &mut value, Some(self));
+        self.initialization_diagnostics.extend(
+            thread
+                .alu
+                .diagnostics
+                .drain(..)
+                .map(InitializationDiagnostic::Body),
+        );
+        Ok(destination)
+    }
+
+    /// Read a named field using the same authoritative cells as bytecode.
+    pub fn read_field(&mut self, word: u32, name: &str) -> Result<Value, HostError> {
+        let slot = self.member_slot(word, name)?;
+        let value = <Self as Host>::read_cell(self, slot).map_err(|_| HostError::MissingMember)?;
+        let declared = match slot {
+            HeapSlot::Object { word, slot: 0 } if self.array_cells.contains_key(&word) => {
+                TypeTag::Int
+            }
+            HeapSlot::Object { word, slot } => TypeTag::intern(
+                &self
+                    .instance_fields(&self.objects[(word - 0x1000) as usize].class)?
+                    .get(slot)
+                    .ok_or(HostError::MissingMember)?
+                    .ty,
+            ),
+            HeapSlot::Static { context, slot } => TypeTag::intern(
+                &self
+                    .loader
+                    .find(
+                        self.loader
+                            .context_name(context)
+                            .ok_or(HostError::MissingMember)?,
+                    )
+                    .ok_or(HostError::MissingMember)?
+                    .fields
+                    .iter()
+                    .filter(|field| field.is_static)
+                    .nth(slot)
+                    .ok_or(HostError::MissingMember)?
+                    .ty,
+            ),
+            _ => return Err(HostError::MissingMember),
+        };
+        if value.tag != declared {
+            return Err(HostError::MissingMember);
+        }
+        Ok(value)
+    }
+
+    /// Write a named field without changing its declared type.
+    pub fn write_field(&mut self, word: u32, name: &str, value: Value) -> Result<(), HostError> {
+        let slot = self.member_slot(word, name)?;
+        let current =
+            <Self as Host>::read_cell(self, slot).map_err(|_| HostError::MissingMember)?;
+        if current.tag != value.tag {
+            return Err(HostError::MissingMember);
+        }
+        <Self as Host>::write_cell(self, slot, value).map_err(|_| HostError::MissingMember)
+    }
+
+    /// Initialize class dependencies, then append base-first typed instance
+    /// cells immediately before each field initializer. Errors retain the
+    /// observed prefix; machine fatal-handler unwind is outside this host.
+    /// exe: FUN_00407da0
+    pub fn alloc_object(&mut self, class: &str) -> Result<u32, HostError> {
+        self.initialize_class(class)?;
+        let metadata: Vec<_> = self.instance_fields(class)?.into_iter().cloned().collect();
+        let fields = Vec::new();
+        let word = 0x1000 + self.objects.len() as u32;
+        self.objects.push(Object {
+            class: class.to_owned(),
+            fields,
+        });
+        for (index, field) in metadata.iter().enumerate() {
+            self.objects[(word - 0x1000) as usize].fields.push(Value {
+                tag: TypeTag::intern(&field.ty),
+                payload: 0,
+            });
+            if let Some(body) = self.loader.field_initializer(field) {
+                let context = self.class_context(&field.class).ok_or(HostError::BadCast)?;
+                let value = self.initialize_field(
+                    body,
+                    context,
+                    word,
+                    self.objects[(word - 0x1000) as usize].fields[index],
+                )?;
+                self.objects[(word - 0x1000) as usize].fields[index] = value;
+            }
+        }
+        Ok(word)
+    }
+}
+
+impl Default for VmHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoaderConvert for VmHost {
+    fn string_target(&mut self, target_class: &str, string_class: &str) -> bool {
+        self.loader
+            .is_inherited_from(target_class, string_class)
+            .unwrap_or(false)
+    }
+    fn load_class(&mut self, descriptor: &str) -> Option<String> {
+        let bare = descriptor
+            .strip_prefix('L')
+            .and_then(|s| s.strip_suffix(';'))
+            .unwrap_or(descriptor);
+        self.loader.find(bare).map(|c| c.name.clone())
+    }
+
+    fn is_assignable(&mut self, from: &str, to: &str) -> bool {
+        // `from` may be a bare class or a descriptor; normalize both.
+        fn bare(s: &str) -> &str {
+            s.strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or(s)
+        }
+        self.loader.is_assignable(bare(from), bare(to))
+    }
+
+    fn reference_class(&mut self, value: Value) -> Option<String> {
+        // Retain the legacy embedding word namespace accepted before #110.
+        // All current production allocations use the ordinary0x1000 heap base.
+        let base = if value.payload >= 0x2000_0000 {
+            0x2000_0000
+        } else {
+            0x1000
+        };
+        self.objects
+            .get(value.payload.checked_sub(base)? as usize)
+            .map(|object| object.class.clone())
+    }
+
+    fn make_string(&mut self, value: Value) -> u32 {
+        use crate::format::{sprintf, FormatArg};
+        let text = match value.tag {
+            TypeTag::Int => sprintf(b"%d", &[FormatArg::Word(value.payload)]),
+            TypeTag::Float => sprintf(b"%.3f", &[FormatArg::Double(f64::from(value.as_f32()))]),
+            _ => panic!("numeric String conversion requires I or F"),
+        }
+        .expect("fixed numeric format with one matching argument");
+        self.intern_string(Some(&text))
+            .expect("loaded String metadata required for conversion")
+    }
+
+    fn target_name(&self, descriptor: &str) -> &'static str {
+        TypeTag::intern(descriptor).name()
+    }
+}
+
+impl Host for VmHost {
+    fn receiver_value(&mut self, word: u32) -> Result<Value, VmError> {
+        let class = self
+            .reference_class(Value::reference(word))
+            .ok_or(HostError::BadCast)?;
+        let descriptor = if class.starts_with('[') {
+            class
+        } else {
+            format!("L{class};")
+        };
+        Ok(Value {
+            tag: TypeTag::intern(&descriptor),
+            payload: word,
+        })
+    }
+    fn body(&self, id: BodyId) -> &[Node] {
+        self.loader.body(id).unwrap_or(&[])
+    }
+
+    fn read_cell(&mut self, slot: HeapSlot) -> Result<Value, VmError> {
+        match slot {
+            HeapSlot::Object { word, slot } => self
+                .objects
+                .get(word.checked_sub(0x1000).ok_or(HostError::MissingMember)? as usize)
+                .and_then(|object| object.fields.get(slot))
+                .copied()
+                .ok_or_else(|| HostError::MissingMember.into()),
+            HeapSlot::Static { context, slot } => self
+                .static_cells
+                .get(&context)
+                .and_then(|fields| fields.get(slot))
+                .copied()
+                .ok_or_else(|| HostError::MissingMember.into()),
+            HeapSlot::Array { word, index } => self
+                .array_cells
+                .get(&word)
+                .and_then(|cells| cells.get(index))
+                .copied()
+                .ok_or_else(|| HostError::MissingMember.into()),
+        }
+    }
+
+    fn write_cell(&mut self, slot: HeapSlot, value: Value) -> Result<(), VmError> {
+        match slot {
+            HeapSlot::Object { word, slot } => {
+                *self
+                    .objects
+                    .get_mut(word.checked_sub(0x1000).ok_or(HostError::MissingMember)? as usize)
+                    .and_then(|object| object.fields.get_mut(slot))
+                    .ok_or(HostError::MissingMember)? = value;
+                Ok(())
+            }
+            HeapSlot::Static { context, slot } => {
+                *self
+                    .static_cells
+                    .get_mut(&context)
+                    .and_then(|fields| fields.get_mut(slot))
+                    .ok_or(HostError::MissingMember)? = value;
+                Ok(())
+            }
+            HeapSlot::Array { word, index } => {
+                *self
+                    .array_cells
+                    .get_mut(&word)
+                    .and_then(|cells| cells.get_mut(index))
+                    .ok_or(HostError::MissingMember)? = value;
+                Ok(())
+            }
+        }
+    }
+
+    fn store_value(
+        &mut self,
+        alu: &mut crate::ops::Alu,
+        destination: &mut Value,
+        source: &mut Value,
+    ) {
+        alu.store_with(destination, source, Some(self));
+    }
+
+    fn extern_op(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        match op.kind {
+            ExternKind::Declare => self.declare(thread, op),
+            ExternKind::ResolveName => self.resolve_name(thread, op),
+            ExternKind::FieldRef
+            | ExternKind::FieldByName
+            | ExternKind::MemberAccess
+            | ExternKind::ArrayElement => self.field(thread, op),
+            ExternKind::ArgArray => self.arg_array(thread, op),
+            ExternKind::CallStatic
+            | ExternKind::CallInstance
+            | ExternKind::CallInit
+            | ExternKind::CallThisInit
+            | ExternKind::CallSuperInit
+            | ExternKind::CallResolved => self.call(thread, op),
+            ExternKind::New => self.new_object(thread, op),
+            ExternKind::NewArray => self.new_array(thread, op),
+            ExternKind::InstanceOf => self.instance_of(thread, op),
+            ExternKind::Cast => self.cast(thread, op),
+            ExternKind::ResourceLiteral => self.resource_literal(thread, op),
+            ExternKind::StringLiteral => self.string_literal(thread, op),
+        }
+    }
+
+    /// The `+`/`+=` string gate: when exactly one side is
+    /// `java.lang.String` the other side converts toward String, and when
+    /// both sides are String the gate falls through to `Alu::add` (which
+    /// logs, since concatenation needs booted string objects).
+    ///
+    /// exe: FUN_00417a70
+    fn operator_on_refs(
+        &mut self,
+        op: RefOperator,
+        left: &mut Value,
+        right: &mut Value,
+    ) -> Option<Result<(), VmError>> {
+        // `FUN_0041b4d0` via `FUN_00417a70`: exactly-one-String-side
+        // converts, both-String concatenates, other classes fall through.
+        let l_str = left.tag.name() == TypeTag::STRING;
+        let r_str = right.tag.name() == TypeTag::STRING;
+        match (l_str, r_str) {
+            (true, true) => {
+                // Concatenation needs the char bytes (open: string objects
+                // hold only lengths here); report unhandled so the plain
+                // helper logs `unsupported class type` like the exe does
+                // for a missing pool.
+                let _ = op;
+                None
+            }
+            (false, false) => None,
+            _ => {
+                // Convert the non-String side toward String.
+                let (target, val) = if l_str { (left, right) } else { (right, left) };
+                let name = target.tag.name();
+                // `loader_convert` reads `LoaderConvert` from `self`.
+                let res = {
+                    let host: &mut dyn LoaderConvert = self;
+                    crate::values::loader_convert(host, val, name)
+                };
+                Some(res.map_err(|_| VmError::Unsupported(0x1007)))
+            }
+        }
+    }
+}
+
+impl VmHost {
+    /// The declaration immediate is a local index; its following node
+    /// carries the type-pool index, optionally preceded by a 402e name.
+    /// exe: FUN_00408d60
+    fn declare(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let owner = self
+            .loader
+            .body_class(op.pc.body)
+            .ok_or(HostError::UnresolvedName)?
+            .to_owned();
+        let nodes = self
+            .loader
+            .body(op.pc.body)
+            .ok_or(HostError::UnresolvedName)?;
+        let mut index = op.pc.idx + 1;
+        let name = if let Some(node) = nodes.get(index).filter(|node| node.opword == 0x402e) {
+            index += 1;
+            Some(
+                self.loader
+                    .pool_text(&owner, node.imm)
+                    .map_err(|_| HostError::UnresolvedName)?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let node = nodes.get(index).ok_or(HostError::UnresolvedName)?;
+        let ty = self
+            .loader
+            .pool_text(&owner, node.imm)
+            .map_err(|_| HostError::UnresolvedName)?
+            .to_owned();
+        let push_lvalue = nodes
+            .get(index + 1)
+            .is_some_and(|node| node.opword == 0x002c);
+        let name = name.map_or(0, |name| self.intern_variable_name(&name));
+        let variable = thread.new_var(
+            Value {
+                tag: TypeTag::intern(&ty),
+                payload: 0,
+            },
+            name,
+        );
+        thread
+            .frames
+            .last_mut()
+            .ok_or(VmError::NoFrame)?
+            .locals
+            .push(variable);
+        if push_lvalue {
+            index += 1;
+            let slot = thread
+                .frames
+                .last()
+                .ok_or(VmError::NoFrame)?
+                .locals
+                .get(op.node.imm as usize)
+                .copied()
+                .map_or(Slot::Null, Slot::Var);
+            thread.push(slot)?;
+        }
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: index,
+        });
+        Ok(Flow::Advance)
+    }
+
+    /// Evaluate the inline field-name chain and borrow its final variable.
+    /// Method-name/call record evaluation belongs to the separate 4208e0 path.
+    /// exe: FUN_00420d20
+    fn resolve_name(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let owner = self
+            .loader
+            .body_class(op.pc.body)
+            .ok_or(HostError::UnresolvedName)?
+            .to_owned();
+        let start = op.pc.idx + 1;
+        let end = start
+            .checked_add(op.node.imm as usize)
+            .ok_or(HostError::UnresolvedName)?;
+        let nodes = self
+            .loader
+            .body(op.pc.body)
+            .and_then(|body| body.get(start..end))
+            .ok_or(HostError::UnresolvedName)?
+            .to_vec();
+        let mut current = None;
+        let mut qualified = None;
+        for component in nodes {
+            match component.opword {
+                0x1019 if current.is_none() && qualified.is_none() => {
+                    let class = self
+                        .loader
+                        .pool_text(&owner, component.imm)
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .to_owned();
+                    self.loader.find(&class).ok_or(HostError::UnresolvedName)?;
+                    qualified = Some(class);
+                }
+                0x1001 => {
+                    let variable = thread
+                        .frames
+                        .last()
+                        .ok_or(VmError::NoFrame)?
+                        .locals
+                        .get(component.imm as usize)
+                        .copied()
+                        .ok_or(HostError::MissingMember)?;
+                    current = Some(Slot::Var(variable));
+                }
+                0x101b => {
+                    let receiver = if let Some(slot) = current {
+                        self.borrow_slot(thread, slot)?.payload
+                    } else if qualified.is_some() {
+                        0
+                    } else {
+                        thread.frames.last().ok_or(VmError::NoFrame)?.receiver
+                    };
+                    if current.is_some() && receiver == 0 {
+                        return Err(HostError::MissingMember.into());
+                    }
+                    let dynamic = if receiver != 0 {
+                        Some(
+                            self.objects
+                                .get(
+                                    receiver
+                                        .checked_sub(0x1000)
+                                        .ok_or(HostError::MissingMember)?
+                                        as usize,
+                                )
+                                .ok_or(HostError::MissingMember)?
+                                .class
+                                .clone(),
+                        )
+                    } else {
+                        qualified.clone()
+                    };
+                    let (encoded, name, ty) = self
+                        .loader
+                        .field_reference(&owner, component.imm)
+                        .map_err(|_| HostError::MissingMember)?;
+                    if ty.starts_with('(') {
+                        return Err(HostError::MissingMember.into());
+                    }
+                    let (encoded, name) = (encoded.to_owned(), name.to_owned());
+                    let (slot, is_static) =
+                        self.field_index(dynamic.as_deref().unwrap_or(&encoded), &name)?;
+                    current = Some(Slot::Heap(if is_static {
+                        self.static_slot(&encoded, slot)?
+                    } else if receiver != 0 {
+                        HeapSlot::Object {
+                            word: receiver,
+                            slot,
+                        }
+                    } else {
+                        return Err(HostError::MissingMember.into());
+                    }));
+                    qualified = None;
+                }
+                0x101a | 0x001d if current.is_some() => {
+                    let receiver = self.borrow_slot(thread, current.unwrap())?.payload;
+                    let name = self
+                        .loader
+                        .pool_text(&owner, component.imm)
+                        .map_err(|_| HostError::MissingMember)?
+                        .to_owned();
+                    current = Some(Slot::Heap(self.member_slot(receiver, &name)?));
+                }
+                _ => return Err(HostError::UnresolvedName.into()),
+            }
+        }
+        thread.push(current.ok_or(HostError::UnresolvedName)?)?;
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: end - 1,
+        });
+        Ok(Flow::Advance)
+    }
+
+    fn borrow_slot(&mut self, thread: &Thread, slot: Slot) -> Result<Value, VmError> {
+        match slot {
+            Slot::Var(id) => thread
+                .vars
+                .try_get(id)
+                .map(|var| var.value)
+                .ok_or(VmError::DanglingVar),
+            Slot::Heap(slot) => <Self as Host>::read_cell(self, slot),
+            Slot::Value(value) => Ok(value),
+            Slot::Null => Err(VmError::NullSlot),
+        }
+    }
+
+    fn field(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        if op.kind == ExternKind::ArrayElement {
+            use crate::interp::ArrayError;
+            let array = thread.pop_deref_with(self)?;
+            let index = thread.pop_deref_with(self)?;
+            if index.tag != TypeTag::Int {
+                return Err(VmError::ArrayAccess(ArrayError::IndexType));
+            }
+            if index.as_i32() < 0 {
+                return Err(VmError::ArrayAccess(ArrayError::NegativeIndex));
+            }
+            if !matches!(array.tag, TypeTag::Array(_)) {
+                return Err(VmError::ArrayAccess(ArrayError::NotArray));
+            }
+            if array.payload == 0 {
+                return Err(VmError::ArrayAccess(ArrayError::NullArray));
+            }
+            let length = self
+                .objects
+                .get(
+                    array
+                        .payload
+                        .checked_sub(0x1000)
+                        .ok_or(HostError::MissingMember)? as usize,
+                )
+                .and_then(|object| object.fields.first())
+                .ok_or(HostError::MissingMember)?
+                .as_i32();
+            let index = index.as_i32() as usize;
+            let elements = self
+                .array_cells
+                .get(&array.payload)
+                .ok_or(HostError::MissingMember)?;
+            let slot = if index < length.max(0) as usize && index < elements.len() {
+                Slot::Heap(HeapSlot::Array {
+                    word: array.payload,
+                    index,
+                })
+            } else {
+                Slot::Null
+            };
+            thread.release();
+            thread.release();
+            thread.push(slot)?;
+            return Ok(Flow::Advance);
+        }
+
+        if op.kind == ExternKind::FieldRef {
+            let owner = self
+                .loader
+                .body_class(op.pc.body)
+                .ok_or(HostError::MissingMember)?
+                .to_owned();
+            let receiver = thread.frames.last().ok_or(VmError::NoFrame)?.receiver;
+            let slot = self.indexed_field(&owner, op.node.imm, receiver)?;
+            thread.push(Slot::Heap(slot))?;
+            return Ok(Flow::Advance);
+        }
+        if !matches!(op.kind, ExternKind::FieldByName | ExternKind::MemberAccess) {
+            return Err(HostError::MissingMember.into());
+        }
+        let class = self
+            .loader
+            .body_class(op.pc.body)
+            .ok_or(HostError::MissingMember)?;
+        let name = match self
+            .loader
+            .pool(class)
+            .and_then(|pool| pool.get(op.node.imm as usize))
+        {
+            Some(slr_fmt_tufa::PoolEntry::Str(name)) => name.clone(),
+            _ => return Err(HostError::MissingMember.into()),
+        };
+        let explicit = op.kind == ExternKind::MemberAccess;
+        let word = if explicit {
+            thread.pop_deref_with(self)?.payload
+        } else {
+            thread.frames.last().ok_or(VmError::NoFrame)?.receiver
+        };
+        let slot = if word == 0 && !explicit {
+            let context = thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx;
+            let class = self
+                .loader
+                .context_name(context)
+                .ok_or(HostError::MissingMember)?
+                .to_owned();
+            let index = self
+                .loader
+                .find(&class)
+                .ok_or(HostError::MissingMember)?
+                .fields
+                .iter()
+                .filter(|field| field.is_static)
+                .enumerate()
+                .filter(|(_, field)| field.name == name)
+                .last()
+                .map(|(index, _)| index)
+                .ok_or(HostError::MissingMember)?;
+            self.static_slot(&class, index)?
+        } else {
+            self.member_slot(word, &name)?
+        };
+        thread.push(Slot::Heap(slot))?;
+        if explicit {
+            thread.release();
+        }
+        Ok(Flow::Advance)
+    }
+
+    fn arg_array(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        if op.node.imm == 0 {
+            thread.push_new(Value::reference(0))?;
+            return Ok(Flow::Advance);
+        }
+        let mut items = Vec::with_capacity(op.node.imm as usize);
+        for _ in 0..op.node.imm {
+            items.push(thread.pop_deref_with(self)?);
+            thread.release();
+        }
+        let target = *thread
+            .frames
+            .last()
+            .ok_or(VmError::NoFrame)?
+            .stack
+            .last()
+            .ok_or(VmError::NullSlot)?;
+        if !matches!(target, Slot::Var(_) | Slot::Heap(_)) {
+            return Err(VmError::NotLvalue);
+        }
+        let target = self.borrow_slot(thread, target)?;
+        let descriptor = target.tag.name();
+        let element = descriptor.strip_prefix('[').ok_or(HostError::BadCast)?;
+        if parameter_types(&format!("({element})"))?.len() != 1 {
+            return Err(HostError::BadCast.into());
+        }
+        let word = self.alloc_array(element, items.len())?;
+        for (index, mut source) in items.into_iter().rev().enumerate() {
+            let slot = HeapSlot::Array { word, index };
+            let mut cell = self.read_cell(slot)?;
+            self.store_value(&mut thread.alu, &mut cell, &mut source);
+            self.write_cell(slot, cell)?;
+        }
+        thread.push_new(Value {
+            tag: target.tag,
+            payload: word,
+        })?;
+        Ok(Flow::Advance)
+    }
+
+    fn call(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        match op.kind {
+            ExternKind::CallResolved => self.call_resolved(thread, op),
+            ExternKind::CallInit | ExternKind::CallThisInit | ExternKind::CallSuperInit => {
+                self.call_constructor(thread, op)
+            }
+            ExternKind::CallInstance | ExternKind::CallStatic => self.call_named(thread, op),
+            _ => Err(VmError::Unsupported(op.node.opword)),
+        }
+    }
+
+    fn call_named(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let frame = thread.frames.last().ok_or(VmError::NoFrame)?;
+        let owner = self
+            .loader
+            .context_name(frame.class_ctx)
+            .ok_or(HostError::MissingMethod)?
+            .to_owned();
+        let name = self
+            .loader
+            .pool_text(&owner, op.node.imm)
+            .map_err(|_| HostError::MissingMethod)?
+            .to_owned();
+        let (class, receiver) = if op.kind == ExternKind::CallInstance {
+            let receiver = thread.pop_deref_with(self)?.payload;
+            thread.release();
+            (
+                self.reference_class(Value::reference(receiver))
+                    .ok_or(HostError::BadCast)?,
+                receiver,
+            )
+        } else {
+            (
+                self.loader
+                    .find(&owner)
+                    .and_then(|class| class.base.clone())
+                    .ok_or(HostError::MissingMethod)?,
+                frame.receiver,
+            )
+        };
+        self.call_dynamic(thread, &class, receiver, &name)
+    }
+
+    fn call_constructor(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let frame = thread.frames.last().ok_or(VmError::NoFrame)?;
+        let (class, receiver) = if op.kind == ExternKind::CallInit {
+            let count_slot = *frame.stack.last().ok_or(VmError::NullSlot)?;
+            let count = self.borrow_slot(thread, count_slot)?.payload as usize;
+            let stack = &thread.frames.last().ok_or(VmError::NoFrame)?.stack;
+            let index = stack
+                .len()
+                .checked_sub(count.checked_add(2).ok_or(VmError::NullSlot)?)
+                .ok_or(VmError::NullSlot)?;
+            let receiver = self.borrow_slot(thread, stack[index])?.payload;
+            (
+                self.reference_class(Value::reference(receiver))
+                    .ok_or(HostError::BadCast)?,
+                receiver,
+            )
+        } else {
+            let receiver = frame.receiver;
+            let class = self
+                .loader
+                .context_name(frame.class_ctx)
+                .ok_or(HostError::MissingMethod)?;
+            let class = if op.kind == ExternKind::CallSuperInit {
+                let Some(parent) = self
+                    .loader
+                    .find(class)
+                    .ok_or(HostError::MissingMethod)?
+                    .base
+                    .as_deref()
+                else {
+                    return Ok(Flow::Advance);
+                };
+                parent
+            } else {
+                class
+            };
+            (class.to_owned(), receiver)
+        };
+        self.call_dynamic(thread, &class, receiver, "<init>")
+    }
+
+    fn call_resolved(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let owner = self
+            .loader
+            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::UnresolvedName)?
+            .to_owned();
+        let nodes = self.body(op.pc.body).to_vec();
+        let mut cursor = op.pc.idx + 1;
+        let first = *nodes.get(cursor).ok_or(VmError::PcOutOfRange)?;
+        let count = if first.opword == 0x101a {
+            1
+        } else if first.opword == 0x1011 {
+            cursor += 1;
+            first.imm as usize
+        } else {
+            return Err(HostError::UnresolvedName.into());
+        };
+        let end = cursor.checked_add(count).ok_or(HostError::UnresolvedName)?;
+        let components = nodes.get(cursor..end).ok_or(VmError::PcOutOfRange)?;
+        let mut receiver = thread.frames.last().ok_or(VmError::NoFrame)?.receiver;
+        let mut class = if receiver == 0 {
+            owner.clone()
+        } else {
+            self.reference_class(Value::reference(receiver))
+                .ok_or(HostError::BadCast)?
+        };
+        for (offset, component) in components.iter().enumerate() {
+            match component.opword {
+                0x1019 if offset == 0 => {
+                    class = self
+                        .loader
+                        .pool_text(&owner, component.imm)
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .to_owned();
+                    receiver = 0;
+                }
+                0x1001 => {
+                    let id = *thread
+                        .frames
+                        .last()
+                        .ok_or(VmError::NoFrame)?
+                        .locals
+                        .get(component.imm as usize)
+                        .ok_or(HostError::MissingMember)?;
+                    receiver = thread.vars.get(id).value.payload;
+                    class = self
+                        .reference_class(Value::reference(receiver))
+                        .ok_or(HostError::BadCast)?;
+                }
+                0x101a if offset + 1 == components.len() => {
+                    // The argument-count temporary is consumed by evalName before
+                    // decoding the cached method reference (4208e0).
+                    thread.pop_deref_with(self)?;
+                    thread.release();
+                    let (_, name, sig) = self
+                        .loader
+                        .field_reference(&owner, component.imm)
+                        .map_err(|_| HostError::MissingMethod)?;
+                    let (name, sig) = (name.to_owned(), sig.to_owned());
+                    let (method, defining) = self
+                        .loader
+                        .resolve_method(&class, &name, &sig)
+                        .ok_or(HostError::MissingMethod)?;
+                    let method = method.clone();
+                    thread.pc = Some(crate::interp::Pc {
+                        body: op.pc.body,
+                        idx: cursor + offset,
+                    });
+                    return self.dispatch_method(thread, &method, &defining, receiver);
+                }
+                0x4012 if offset + 1 == components.len() => {
+                    let name = self
+                        .loader
+                        .pool_text(&owner, component.imm)
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .to_owned();
+                    thread.pc = Some(crate::interp::Pc {
+                        body: op.pc.body,
+                        idx: cursor + offset,
+                    });
+                    return self.call_dynamic(thread, &class, receiver, &name);
+                }
+                _ => return Err(HostError::UnresolvedName.into()),
+            }
+        }
+        Err(HostError::MissingMethod.into())
+    }
+
+    fn dispatch_method(
+        &mut self,
+        thread: &mut Thread,
+        method: &crate::vmclass::Method,
+        defining: &str,
+        receiver: u32,
+    ) -> Result<Flow, VmError> {
+        let receiver = if method.flags & 8 != 0 { 0 } else { receiver };
+        if method.flags & 8 == 0 && receiver == 0 {
+            return Err(VmError::InstanceMethodWithoutReceiver);
+        }
+        if method.is_native {
+            return self.invoke_method_native(thread, method, defining, receiver);
+        }
+        if method.is_abstract {
+            return Err(HostError::NoBody.into());
+        }
+        let body = self
+            .loader
+            .body_id(defining, method.body as usize)
+            .ok_or(HostError::NoBody)?;
+        let target = crate::interp::ScriptMethod {
+            body,
+            class_ctx: self
+                .class_context(defining)
+                .ok_or(HostError::MissingMethod)?,
+            signature: 0,
+            is_static: method.flags & 8 != 0,
+            params: parameter_types(&method.sig)?,
+        };
+        thread.call_script_method_with(self, &target, receiver)?;
+        Ok(Flow::Stay)
+    }
+
+    fn call_dynamic(
+        &mut self,
+        thread: &mut Thread,
+        class: &str,
+        receiver: u32,
+        name: &str,
+    ) -> Result<Flow, VmError> {
+        self.loader.find(class).ok_or(HostError::MissingMethod)?;
+        let count = thread.pop_deref_with(self)?.payload as usize;
+        thread.release();
+        let stack = &thread.frames.last().ok_or(VmError::NoFrame)?.stack;
+        let arguments = stack
+            .get(stack.len().checked_sub(count).ok_or(VmError::NullSlot)?..)
+            .ok_or(VmError::NullSlot)?
+            .to_vec();
+        let mut types = Vec::with_capacity(count);
+        for slot in arguments {
+            let value = self.borrow_slot(thread, slot)?;
+            let tag = if value.tag.is_ref() && value.payload != 0 {
+                self.receiver_value(value.payload)?.tag
+            } else {
+                value.tag
+            };
+            types.push(tag);
+        }
+        let selected = self
+            .loader
+            .resolve_overload(class, name, &types)
+            .map_err(|_| HostError::MissingMethod)?
+            .ok_or(HostError::MissingMethod)?;
+        let (method, defining) = (selected.method.clone(), selected.defining.to_owned());
+        if selected.ambiguous {
+            self.method_diagnostics
+                .push("Class::getMethod: more matching methods found");
+        }
+        self.dispatch_method(thread, &method, &defining, receiver)
+    }
+
+    /// The native branch of41fbc0 receives a resolved method and receiver;
+    /// the receiver is appended after the reversed, typed parameter cells.
+    fn invoke_method_native(
+        &mut self,
+        thread: &mut Thread,
+        method: &crate::vmclass::Method,
+        defining: &str,
+        receiver: u32,
+    ) -> Result<Flow, VmError> {
+        if method.flags & 8 == 0 && receiver == 0 {
+            return Err(VmError::InstanceMethodWithoutReceiver);
+        }
+        let implementation = self
+            .natives
+            .resolve(&method.class, &method.name, &method.sig)
+            .ok_or(HostError::MissingMethod)?;
+        let native = *self
+            .native_impls
+            .get(&implementation)
+            .ok_or(HostError::NoBody)?;
+        let return_tag = if method.sig.ends_with(')') {
+            None
+        } else {
+            Some(return_type(&method.sig).ok_or(HostError::MissingMethod)?)
+        };
+        let parameters = parameter_types(&method.sig)?;
+        let mut args = Vec::with_capacity(parameters.len() + 1);
+        for tag in parameters.into_iter().rev() {
+            let mut source = thread.pop_deref_with(self)?;
+            let mut value = Value { tag, payload: 0 };
+            self.store_value(&mut thread.alu, &mut value, &mut source);
+            args.push(value);
+            thread.release();
+        }
+        args.push(Value {
+            tag: TypeTag::intern(&format!("L{defining};")),
+            payload: receiver,
+        });
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            args: &args,
+            class: &method.class,
+            name: &method.name,
+            sig: &method.sig,
+        };
+        let payload = native(self, &info).unwrap_or(0);
+        if let Some(tag) = return_tag {
+            thread.push_new(Value {
+                tag,
+                payload: if tag.name() == "V" { 0 } else { payload },
+            })?;
+        }
+        Ok(Flow::Advance)
+    }
+
+    fn new_object(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let token = *self
+            .body(op.pc.body)
+            .get(op.pc.idx + 1)
+            .ok_or(VmError::PcOutOfRange)?;
+        let owner = self
+            .loader
+            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::BadCast)?;
+        let class = self
+            .loader
+            .pool_text(owner, token.imm)
+            .map_err(|_| HostError::BadCast)?
+            .to_owned();
+        let word = self.alloc_object(&class)?;
+        thread.push_new(Value {
+            tag: TypeTag::intern(&format!("L{class};")),
+            payload: word,
+        })?;
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: op.pc.idx + 1,
+        });
+        Ok(Flow::Advance)
+    }
+
+    fn new_array(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let token = *self
+            .body(op.pc.body)
+            .get(op.pc.idx + 1)
+            .ok_or(VmError::PcOutOfRange)?;
+        let owner = self
+            .loader
+            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::BadCast)?;
+        let descriptor = self
+            .loader
+            .pool_text(owner, token.imm)
+            .map_err(|_| HostError::BadCast)?
+            .to_owned();
+        let dimensions = descriptor.bytes().take_while(|byte| *byte == b'[').count();
+        if dimensions == 0 {
+            return Err(HostError::BadCast.into());
+        }
+        if dimensions != 1 {
+            return Err(HostError::MultiArray.into());
+        }
+        let element = &descriptor[1..];
+        if parameter_types(&format!("({element})"))?.len() != 1 {
+            return Err(HostError::BadCast.into());
+        }
+        let size = thread.pop_deref_with(self)?;
+        thread.release();
+        if size.as_i32() < 0 {
+            return Err(HostError::BadCast.into());
+        }
+        let word = self.alloc_array(element, size.as_i32() as usize)?;
+        thread.push_new(Value {
+            tag: TypeTag::intern(&descriptor),
+            payload: word,
+        })?;
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: op.pc.idx + 1,
+        });
+        Ok(Flow::Advance)
+    }
+
+    fn instance_of(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let value = thread.pop_deref_with(self)?;
+        thread.release();
+        let token = *self
+            .body(op.pc.body)
+            .get(op.pc.idx + 1)
+            .ok_or(VmError::PcOutOfRange)?;
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: op.pc.idx + 1,
+        });
+        let matched = if value.payload == 0 {
+            false
+        } else {
+            let owner = self
+                .loader
+                .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+                .ok_or(HostError::BadCast)?;
+            let target = self
+                .loader
+                .pool_text(owner, token.imm)
+                .map_err(|_| HostError::BadCast)?
+                .to_owned();
+            let actual = self.reference_class(value).ok_or(HostError::BadCast)?;
+            let target = self.load_class(&target).ok_or(HostError::BadCast)?;
+            self.loader
+                .is_inherited_from(&actual, &target)
+                .map_err(|_| HostError::BadCast)?
+        };
+        thread.push_new(Value::int(i32::from(matched)))?;
+        Ok(Flow::Advance)
+    }
+
+    fn cast(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let mut value = thread.pop_deref_with(self)?;
+        let token = *self
+            .body(op.pc.body)
+            .get(op.pc.idx + 1)
+            .ok_or(VmError::PcOutOfRange)?;
+        thread.pc = Some(crate::interp::Pc {
+            body: op.pc.body,
+            idx: op.pc.idx + 1,
+        });
+        let owner = self
+            .loader
+            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::BadCast)?;
+        let text = self
+            .loader
+            .pool_text(owner, token.imm)
+            .map_err(|_| HostError::BadCast)?
+            .to_owned();
+        let target = match token.opword {
+            0x1006 => text,
+            0x1019 => {
+                let class = self.load_class(&text).ok_or(HostError::BadCast)?;
+                if class.starts_with('[') {
+                    class
+                } else {
+                    format!("L{class};")
+                }
+            }
+            _ => return Err(HostError::BadCast.into()),
+        };
+        // Pointer-identical descriptors bypass conversion in the original. All
+        // other conversions dispatch only on the supported I/F/L/[ families;
+        // notably a generic null reference cannot become a V cell.
+        if value.tag.name() != target
+            && (!matches!(
+                value.tag.name().as_bytes().first(),
+                Some(b'I' | b'F' | b'L' | b'[')
+            ) || !matches!(target.as_bytes().first(), Some(b'I' | b'F' | b'L' | b'[')))
+        {
+            return Err(HostError::BadCast.into());
+        }
+        let tag = TypeTag::intern(&target);
+        if crate::values::assign_convert(&mut value, tag).is_err() {
+            crate::values::loader_convert(self, &mut value, &target)
+                .map_err(|_| HostError::BadCast)?;
+        }
+        thread.push(Slot::Value(value))?;
+        Ok(Flow::Advance)
+    }
+
+    /// Literal100e reads a resource Member, not String text. The original
+    /// returns I0 for another pool kind without invoking the RID resolver.
+    /// Valid Members call the installed resource-world resolver; absent backends
+    /// fail explicitly rather than guessing a global ID.
+    /// exe: FUN_00406660
+    fn resource_literal(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let context = thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx;
+        let owner = self
+            .loader
+            .context_name(context)
+            .ok_or(HostError::UnresolvedName)?;
+        let pool = self.loader.pool(owner).ok_or(HostError::UnresolvedName)?;
+        let value = if let Some(slr_fmt_tufa::PoolEntry::Member { name, extra }) =
+            pool.get(op.node.imm as usize)
+        {
+            let package = if (*name as i32) < 0 {
+                None
+            } else {
+                match pool.get(*name as usize) {
+                    Some(slr_fmt_tufa::PoolEntry::Str(text)) => Some(text.clone()),
+                    Some(slr_fmt_tufa::PoolEntry::RawStr(_)) => {
+                        return Err(HostError::UnresolvedName.into())
+                    }
+                    Some(_) => None,
+                    None => return Err(HostError::UnresolvedName.into()),
+                }
+            };
+            let id = *extra;
+            let resolver = self.resource_resolver.ok_or(VmError::Unsupported(0x100e))?;
+            resolver(self, package.as_deref(), id)?
+        } else {
+            0
+        };
+        thread.push_new(Value::int(value as i32))?;
+        Ok(Flow::Advance)
+    }
+
+    fn string_literal(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
+        let owner = self
+            .loader
+            .context_name(thread.frames.last().ok_or(VmError::NoFrame)?.class_ctx)
+            .ok_or(HostError::UnresolvedName)?;
+        let bytes = self
+            .loader
+            .pool_bytes(owner, op.node.imm)
+            .map_err(|_| HostError::UnresolvedName)?
+            .map(<[u8]>::to_vec);
+        let word = self.intern_string(bytes.as_deref())?;
+        thread.push_new(Value::reference_named(word, "Ljava.lang.String;"))?;
+        Ok(Flow::Advance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interp::{Frame, Pc};
+    use slr_fmt_tufa::Node;
+
+    fn host_with_class() -> VmHost {
+        let mut h = VmHost::new();
+        h.boot();
+        h.loader.insert_test_class(crate::vmclass::Class {
+            kind: 0,
+            name: "java.lang.Object".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        h
+    }
+
+    fn thread_with_frame(nodes: Vec<Node>) -> (Thread, TestBodies) {
+        let mut th = Thread::new();
+        th.frames.push(Frame::new(
+            Some(Pc {
+                body: BodyId(0),
+                idx: 0,
+            }),
+            0,
+        ));
+        th.pc = Some(Pc {
+            body: BodyId(0),
+            idx: 0,
+        });
+        (th, TestBodies(nodes))
+    }
+
+    struct TestBodies(Vec<Node>);
+    impl Host for TestBodies {
+        fn body(&self, _id: BodyId) -> &[Node] {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn declare_rejects_missing_owner_pool_and_type_node() {
+        let mut h = host_with_class();
+        let nodes = vec![
+            Node {
+                opword: 0x1002,
+                operand: 1,
+                imm: 0,
+            },
+            Node {
+                opword: 0x002c,
+                operand: 1,
+                imm: 0,
+            },
+        ];
+        let (mut th, bodies) = thread_with_frame(nodes);
+        // The host reads bodies from itself; use the test bodies
+        // indirectly: drive `declare` through a manual op.
+        let _ = bodies;
+        let op = ExternOp {
+            kind: ExternKind::Declare,
+            pc: Pc {
+                body: BodyId(0),
+                idx: 0,
+            },
+            node: Node {
+                opword: 0x1002,
+                operand: 1,
+                imm: 0,
+            },
+            discard: false,
+        };
+        // The declaring body/pool and following type node are required metadata.
+        assert!(h.extern_op(&mut th, op).is_err());
+        assert!(th.frames[0].locals.is_empty());
+    }
+
+    #[test]
+    fn new_and_arg_array_allocate() {
+        let mut h = host_with_class();
+        let (mut th, _) = thread_with_frame(vec![]);
+        let op = ExternOp {
+            kind: ExternKind::New,
+            pc: Pc {
+                body: BodyId(0),
+                idx: 0,
+            },
+            node: Node {
+                opword: 0x1007,
+                operand: 1,
+                imm: 0x1e,
+            },
+            discard: false,
+        };
+        // No class node in empty bodies -> PcOutOfRange (honest: the host
+        // needs the real body bytes).
+        assert!(h.extern_op(&mut th, op).is_err());
+    }
+
+    #[test]
+    fn string_plus_converts_one_sided_int() {
+        let mut h = host_with_class();
+        h.loader.insert_test_class(crate::vmclass::Class {
+            kind: 0,
+            name: "java.lang.String".into(),
+            base: Some("java.lang.Object".into()),
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![crate::vmclass::Field {
+                class: "java.lang.String".into(),
+                name: "ptr".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+            bodies: vec![],
+        });
+        let mut left = Value::reference_named(0, "Ljava.lang.String;");
+        let mut right = Value::int(7);
+        let r = h.operator_on_refs(RefOperator::Add, &mut left, &mut right);
+        assert!(r.is_some(), "one-sided String converts");
+        r.unwrap().expect("converts");
+        assert_eq!(right.tag, TypeTag::Ref(TypeTag::STRING));
+    }
+
+    #[test]
+    fn pool_entry_shapes_are_visible() {
+        // The host reads pool entries for declare/literals; pin the shapes.
+        let e = slr_fmt_tufa::PoolEntry::Str("x".into());
+        assert!(matches!(e, slr_fmt_tufa::PoolEntry::Str(_)));
+    }
+
+    // ---- native-call ABI (`FUN_0045d910`) ----------------------------
+    //
+    // Every expectation below is an oracle row: the exe's own marshaller
+    // run under Unicorn with a hand-built container and sig record. The
+    // container is `[..., receiver]` and the parameters sit under it,
+    // first declared at `count-2`.
+
+    fn info<'a>(args: &'a [Value], sig: &'a str) -> CallInfo<'a> {
+        CallInfo {
+            jvm: 0,
+            thread: 0,
+            args,
+            class: "java.lang.System",
+            name: "log",
+            sig,
+        }
+    }
+
+    /// The marshaller writes `(I)V`'s one parameter from `args[count-2]`,
+    /// with `args[count-1]` going to `out[0]`.
+    #[test]
+    fn marshal_int_and_receiver_slot() {
+        let args = [Value::int(0x11), Value::int(0x22)];
+        let mut out = [0xdead_0000u32; 4];
+        let n = marshal_args(&info(&args, "(I)V"), &mut out).expect("marshals");
+        assert_eq!(n, 2, "receiver slot + one parameter");
+        assert_eq!(out[0], 0x22, "receiver/return slot = container top");
+        assert_eq!(out[1], 0x11, "first parameter = count-2");
+        assert_eq!(out[2], 0xdead_0000, "later out words untouched");
+    }
+
+    #[test]
+    fn marshal_two_ints_descends() {
+        // Oracle `(II)V` count 3 -> out[0..=2] = [0xcc, 0xbb, 0xaa].
+        let args = [Value::int(0xaa), Value::int(0xbb), Value::int(0xcc)];
+        let mut out = [0u32; 4];
+        let n = marshal_args(&info(&args, "(II)V"), &mut out).expect("marshals");
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], &[0xcc, 0xbb, 0xaa]);
+    }
+
+    #[test]
+    fn marshal_four_ints_descends() {
+        let args = [
+            Value::int(0xaa),
+            Value::int(0xbb),
+            Value::int(0xcc),
+            Value::int(0xdd),
+            Value::int(0xee),
+        ];
+        let mut out = [0u32; 6];
+        let n = marshal_args(&info(&args, "(IIII)V"), &mut out).expect("marshals");
+        assert_eq!(n, 5);
+        assert_eq!(&out[..5], &[0xee, 0xdd, 0xcc, 0xbb, 0xaa]);
+    }
+
+    #[test]
+    fn marshal_empty_signature_writes_only_the_receiver_slot() {
+        // Oracle `()I` with count 1 -> out[0] = the only cell, nothing else.
+        let args = [Value::int(0xaa)];
+        let mut out = [0xdead_0001u32; 3];
+        let n = marshal_args(&info(&args, "()I"), &mut out).expect("marshals");
+        assert_eq!(n, 1);
+        assert_eq!(&out[..2], &[0xaa, 0xdead_0001]);
+    }
+
+    /// `F` copies the payload word verbatim (no float conversion here: the
+    /// `st0`/`eax` split happens on the caller side).
+    #[test]
+    fn marshal_float_copies_bits() {
+        let args = [Value::float(1.0), Value::int(0xbb)];
+        let mut out = [0u32; 3];
+        let n = marshal_args(&info(&args, "(F)V"), &mut out).expect("marshals");
+        assert_eq!(n, 2);
+        assert_eq!(out[0], 0xbb);
+        assert_eq!(out[1], 0x3f80_0000, "f32 1.0 bits");
+    }
+
+    /// `L` copies the word and scans to the `;`, so the *next* parameter is
+    /// `count-3`, not `count-2` (oracle `(Ljava/lang/String;I)V`).
+    #[test]
+    fn marshal_class_type_scans_to_semicolon() {
+        let args = [Value::int(0xaa), Value::int(0xbb), Value::int(0xcc)];
+        let mut out = [0u32; 4];
+        let n = marshal_args(&info(&args, "(Ljava.lang.String;I)V"), &mut out).expect("marshals");
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], &[0xcc, 0xbb, 0xaa]);
+    }
+
+    /// A lone `L` parameter must not consume a second slot: oracle
+    /// `(Ljava/lang/String;)V` leaves `out[2]` at the sentinel.
+    #[test]
+    fn marshal_single_class_parameter_takes_one_slot() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0002u32; 4];
+        let n = marshal_args(&info(&args, "(Ljava.lang.String;)V"), &mut out).expect("marshals");
+        assert_eq!(n, 2);
+        assert_eq!(&out[..3], &[0xbb, 0xaa, 0xdead_0002]);
+    }
+
+    /// Arrays: every extra `[` is skipped, the payload word is copied, then
+    /// an `I`/`F`/`L` element consumes the following slot as well. Oracle
+    /// `([[I)V` -> `[0xbb, 0xaa]`; `[[I[I)V` -> `[0x33, 0x22, 0x11]`.
+    #[test]
+    fn marshal_array_skips_brackets_and_takes_payload() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0002u32; 4];
+        let n = marshal_args(&info(&args, "([[I)V"), &mut out).expect("marshals");
+        assert_eq!(n, 2);
+        assert_eq!(&out[..3], &[0xbb, 0xaa, 0xdead_0002]);
+    }
+
+    #[test]
+    fn marshal_two_arrays_descend_two_slots_each() {
+        let args = [Value::int(0x11), Value::int(0x22), Value::int(0x33)];
+        let mut out = [0u32; 4];
+        let n = marshal_args(&info(&args, "([[I[I)V"), &mut out).expect("marshals");
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], &[0x33, 0x22, 0x11]);
+    }
+
+    /// `[[Ljava.lang.String;`: brackets skipped, `L` element also consumes
+    /// one slot — oracle `([[Ljava/lang/String;)V` writes two words.
+    #[test]
+    fn marshal_array_of_class_takes_two_slots() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0002u32; 4];
+        let n = marshal_args(&info(&args, "([[Ljava.lang.String;)V"), &mut out).expect("marshals");
+        assert_eq!(n, 2);
+        assert_eq!(&out[..3], &[0xbb, 0xaa, 0xdead_0002]);
+    }
+
+    /// Container has exactly `count-1` parameter slots; a longer descriptor
+    /// stops at the first missing one and leaves the rest untouched.
+    #[test]
+    fn marshal_not_enough_parameters() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0002u32; 4];
+        let err = marshal_args(&info(&args, "(II)V"), &mut out).unwrap_err();
+        assert_eq!(err, MarshalError::NotEnoughParameters);
+        assert_eq!(&out[..3], &[0xbb, 0xaa, 0xdead_0002]);
+        assert_eq!(
+            err.log_line(&info(&args, "(II)V")),
+            "!CallInfo.parseParameters: not enough parameters passed to native function\
+             java.lang.Systemlog(II)V"
+        );
+    }
+
+    /// The container check (`test eax,eax; je 0x45dabf`) precedes the type
+    /// switch, so an exhausted container reports the missing parameter even
+    /// though the next descriptor byte is also bogus.
+    #[test]
+    fn marshal_missing_parameter_wins_over_unknown_type() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0002u32; 4];
+        let err = marshal_args(&info(&args, "(IX)V"), &mut out).unwrap_err();
+        assert_eq!(err, MarshalError::NotEnoughParameters);
+        assert_eq!(&out[..3], &[0xbb, 0xaa, 0xdead_0002]);
+    }
+
+    #[test]
+    fn marshal_unknown_type() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0xdead_0001u32; 3];
+        let err = marshal_args(&info(&args, "(X)V"), &mut out).unwrap_err();
+        assert_eq!(err, MarshalError::UnknownType);
+        assert_eq!(&out[..2], &[0xbb, 0xdead_0001], "nothing written");
+        assert_eq!(
+            err.message(),
+            "CallInfo.parseParameters: unknown type in signature"
+        );
+    }
+
+    /// The array arm copies the payload *before* testing the element type,
+    /// so `[X` writes its word and then reports the array-specific message
+    /// (with the trailing space).
+    #[test]
+    fn marshal_unknown_array_element_after_copy() {
+        let args = [Value::int(0xaa), Value::int(0xbb)];
+        let mut out = [0u32; 3];
+        let err = marshal_args(&info(&args, "([X)V"), &mut out).unwrap_err();
+        assert_eq!(err, MarshalError::UnknownArrayElement);
+        assert_eq!(&out[..2], &[0xbb, 0xaa]);
+        assert_eq!(
+            err.message(),
+            "CallInfo.parseParameters: unknown type in signature "
+        );
+    }
+
+    #[test]
+    fn parameter_slots_counts_the_same_walk() {
+        assert_eq!(parameter_slots("()V"), Some(0));
+        assert_eq!(parameter_slots("(I)I"), Some(1));
+        assert_eq!(parameter_slots("(II)V"), Some(2));
+        assert_eq!(parameter_slots("(F)V"), Some(1));
+        assert_eq!(parameter_slots("(Ljava.lang.String;)V"), Some(1));
+        assert_eq!(parameter_slots("([[I)V"), Some(1));
+        assert_eq!(
+            parameter_slots("(Ljava.lang.Object;ILjava.lang.Object;II)V"),
+            Some(5)
+        );
+        assert_eq!(parameter_slots("([[Ljava.lang.String;[I)V"), Some(2));
+        assert_eq!(parameter_slots("I)V"), None, "missing (");
+        assert_eq!(parameter_slots("(I"), None, "missing )");
+        assert_eq!(parameter_slots("(X)V"), None);
+        assert_eq!(parameter_slots("([X)V"), None);
+    }
+
+    /// The caller side pops the parameters last-declared first and the
+    /// receiver last, so the container ends with the receiver on top (the
+    /// slot `marshal_args` reads at `count-1`).
+    #[test]
+    fn collect_args_puts_the_receiver_on_top() {
+        let mut h = host_with_class();
+        let (mut th, _) = thread_with_frame(vec![]);
+        // Push order: receiver, first parameter, second parameter.
+        th.push_new(Value::int(0x01)).expect("receiver");
+        th.push_new(Value::int(0x02)).expect("first param");
+        th.push_new(Value::int(0x03)).expect("second param");
+        let args = collect_args(&mut th, "(II)V").expect("collects");
+        assert_eq!(args.len(), 3, "container count includes the receiver");
+        assert_eq!(args[2].payload, 0x01, "receiver on top");
+        let mut out = [0u32; 3];
+        let n = marshal_args(&info(&args, "(II)V"), &mut out).expect("marshals");
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], &[0x01, 0x02, 0x03]);
+        assert_eq!(th.frames[0].stack.len(), 0, "operands consumed");
+        let _ = &mut h;
+    }
+
+    #[test]
+    fn return_type_reads_the_descriptor_tail() {
+        assert_eq!(return_type("()V"), Some(TypeTag::intern("V")));
+        assert_eq!(return_type("()I"), Some(TypeTag::Int));
+        assert_eq!(return_type("(F)F"), Some(TypeTag::Float));
+        assert_eq!(
+            return_type("()Ljava.lang.String;"),
+            Some(TypeTag::intern("Ljava.lang.String;"))
+        );
+        assert_eq!(return_type("()[I"), Some(TypeTag::intern("[I")));
+        assert_eq!(return_type("("), None);
+    }
+}

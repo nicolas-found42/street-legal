@@ -45,9 +45,9 @@ fn tag_of(s: &str) -> TypeTag {
     match s {
         "I" => TypeTag::Int,
         "F" => TypeTag::Float,
-        "L" => TypeTag::Ref,
-        "[" => TypeTag::Array,
-        "V" => TypeTag::Ref,
+        "L" => TypeTag::Ref("L;"),
+        "[" => TypeTag::Array("["),
+        "V" => TypeTag::Ref("V"),
         _ => panic!("unknown tag {s}"),
     }
 }
@@ -103,6 +103,7 @@ fn values_match_oracle_vectors() {
     }
 
     if !any_file {
+        eprintln!("SLR_ORACLE_SKIPPED: values_match_oracle_vectors");
         eprintln!("SKIP: no oracle vectors (run re/oracle/vmval_vectors.py gen)");
         return;
     }

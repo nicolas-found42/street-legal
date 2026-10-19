@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 slr-fmt-core = { path = "../slr-fmt-core" }
+
+[dev-dependencies]
+serde_json = "1"

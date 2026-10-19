@@ -61,6 +61,23 @@ struct Counts {
     scm: usize,
     /// `material` entries across parsed `.scm` files.
     scm_materials: usize,
+    /// Particle emitter scripts (`particle_clouds/*.cfg`).
+    particle_cfgs: usize,
+    /// `[ACTION]` lines across the emitter scripts.
+    particle_actions: usize,
+    /// Skidmark scripts (`skids/**/*.cfg`).
+    skid_cfgs: usize,
+    /// `;`-commented lines across both particle dialects.
+    particle_comment_lines: usize,
+    /// `.bon` bind-pose files and their bones.
+    bon: usize,
+    bon_bones: usize,
+    /// `.skl` joint-limit skeleton files and their bones.
+    skl: usize,
+    skl_bones: usize,
+    /// `.matrixdata` animation files and their keys (bones x keys per bone).
+    matrixdata: usize,
+    matrixdata_keys: usize,
 }
 
 // Derived 2026-10-17 by running the parsers over the clean stock install.
@@ -96,6 +113,16 @@ const STOCK: Counts = Counts {
     spl_points: 453,
     scm: 2,
     scm_materials: 183,
+    particle_cfgs: 10,
+    particle_actions: 40,
+    skid_cfgs: 4,
+    particle_comment_lines: 11,
+    bon: 19,
+    bon_bones: 433,
+    skl: 17,
+    skl_bones: 429,
+    matrixdata: 17,
+    matrixdata_keys: 9337,
 };
 
 // The modded install keeps the previously asserted counts.
@@ -132,6 +159,16 @@ const MODDED: Counts = Counts {
     spl_points: 453,
     scm: 5,
     scm_materials: 213,
+    particle_cfgs: 10,
+    particle_actions: 40,
+    skid_cfgs: 4,
+    particle_comment_lines: 11,
+    bon: 21,
+    bon_bones: 455,
+    skl: 18,
+    skl_bones: 449,
+    matrixdata: 18,
+    matrixdata_keys: 9437,
 };
 
 fn stock_root() -> Option<PathBuf> {
@@ -215,7 +252,40 @@ fn check_verify(name: &str, root: &Path, c: &Counts) {
     );
     assert_eq!(rep.parsed["scm"], c.scm, "{name} parsed scm");
     assert_eq!(rep.scm_files, c.scm, "{name} scm files");
+    assert_eq!(rep.by_ext["bon"], c.bon, "{name} bon files");
+    assert_eq!(rep.parsed["bon"], c.bon, "{name} parsed bon");
+    assert_eq!(rep.bon_bones, c.bon_bones, "{name} bon bones");
+    assert_eq!(rep.by_ext["skl"], c.skl, "{name} skl files");
+    assert_eq!(rep.parsed["skl"], c.skl, "{name} parsed skl");
+    assert_eq!(rep.skl_bones, c.skl_bones, "{name} skl bones");
+    assert_eq!(
+        rep.by_ext["matrixdata"], c.matrixdata,
+        "{name} matrixdata files"
+    );
+    assert_eq!(
+        rep.parsed["matrixdata"], c.matrixdata,
+        "{name} parsed matrixdata"
+    );
+    assert_eq!(
+        rep.matrixdata_keys, c.matrixdata_keys,
+        "{name} matrixdata keys"
+    );
     assert_eq!(rep.scm_materials, c.scm_materials, "{name} scm materials");
+    // Particle dialects: every cfg parses and no line is skipped except `;` comments.
+    assert_eq!(rep.particle_cfgs, c.particle_cfgs, "{name} particle cfgs");
+    assert_eq!(
+        rep.particle_actions, c.particle_actions,
+        "{name} particle actions"
+    );
+    assert_eq!(rep.skid_cfgs, c.skid_cfgs, "{name} skid cfgs");
+    assert_eq!(
+        rep.particle_comment_lines, c.particle_comment_lines,
+        "{name} particle comment lines"
+    );
+    assert_eq!(
+        rep.particle_ignored_lines, 0,
+        "{name} particle/skid lines skipped by the parsers"
+    );
 }
 
 fn check_trc(name: &str, root: &Path, c: &Counts) {
@@ -303,7 +373,7 @@ fn check_tufa_pool(name: &str, root: &Path, c: &Counts) {
             entries += pool.len();
             for e in &pool {
                 let t = match e {
-                    tufa::PoolEntry::Str(_) => 0,
+                    tufa::PoolEntry::Str(_) | tufa::PoolEntry::RawStr(_) => 0,
                     tufa::PoolEntry::Int(_) => 1,
                     tufa::PoolEntry::Float(_) => 2,
                     tufa::PoolEntry::Member { .. } => 3,

@@ -71,12 +71,55 @@ Bodies are script-ordered little-endian records through the exe's `File` natives
   `{group, vaxisID, deviceID, axisID: u32, from_min/max, to_min/max, dead_zone: f32}`,
   `vasp` vector (`u32` count + `{id: u32, 5x f32}`), footer `[0, 0, 8]`.
 - vehicle: `Vehicle.save`/`load` (`sl/Scripts/game/Vehicle.class`): `(id=5, ver)`,
-  the `Part.save` part-record run (interior slot grammar open), the JPEG-slot run
-  (`[index, 7, 0]` triples), the resource table (`u32` count + `(index, len, path)`
-  with dense 1-based indices, `RPK` paths for `resID` words), and a trailing `u32`.
+  the `Part.save` part-record run (interior slot grammar open), then the footer
+  the exe writes in `File.close()` (below): slot-count word, JPEG-slot run
+  (`[index, 7, 0]` triples), resource table (`u32` count + `(index, len, path)`
+  with dense 1-based indices, `RPK` paths for `resID` words) and the byte total.
 Numbered companions (`<basename>.<i>`, exe `sprintf "%s.%d"`, store `FUN_00484fa0`
 refs `0x485141`/`0x4850f6`) are JFIF JPEGs (`FF D8 FF E0`), one per JPEG slot
 (stock 131 files; e.g. `ROC_GT2_1` has 19 for 19 slots).
+
+### Exe store path (differentially tested, `crates/slr-fmt-sdat/src/store.rs`)
+- `File` natives `FUN_00485b20` (write int), `FUN_00485bc0` (write float),
+  `FUN_00485b70` (readInt), `FUN_00485c10` (readFloat): each pops its frame
+  (`0x45d910`), resolves the object's `handle` int field to a native file struct
+  (`0x42ab50`; a NULL field or other field type makes the native a no-op / return
+  0), then moves exactly 4 raw little-endian bytes through the file layer
+  (`0x54cf00` write / `0x54cec0` read). A closed handle (slot word 0) skips the
+  I/O; the write natives pass the file layer's return value through. `readInt` /
+  `readFloat` on a closed handle or after a short read return an uninitialised
+  stack word (undefined; the port returns `None`), and on a missing field the
+  constant 0 / 0.0.
+- JPEG-slot run writer `FUN_00484fa0`: for each slot node (id, kind, object)
+  writes `id`, `kind` (4 bytes each); kind 5 then writes a zero word and saves the
+  companion `<name>.<id>` (`0x48daa0`); kind 7 writes the object's blob inline
+  (`len`, bytes) only if `sscanf(blob, "sourcefile %5s")` yields something other
+  than `save\` / `save/`, else a zero word and the companion (`0x48da30`, the
+  shipped case: every stock triple is `[index, 7, 0]`); any other kind writes only
+  `(id, kind)`. Slots with an object get a prepare call (`0x419860`) first. The
+  return value is the number of bytes written. A blob not starting with
+  `sourcefile` leaves the exe's `sscanf` buffer uninitialised (undefined; the port
+  errors).
+- `File.close()` `0x485870`: slot 0 skips straight to cleanup; mode 0 (read)
+  closes; mode 1 (write) writes the footer then closes; other modes do not close.
+  Footer by file-format major version (byte at `0x612c76`, 2 in the shipped
+  `0x00020100`): version 2 =
+  `[slot_count][slot run][resource_count]{[id][len][path NUL]}*[total]` with
+  `total = 4 + slot-run bytes + 4 + sum(8 + len)` (so the vehicle "trailing u32"
+  is a byte total, not an opaque value); version 1 = entries, their byte sum,
+  `resource_count`; other versions write no footer. `slot_count` /
+  `resource_count` are words kept by the script side (`file+0x28` / `file+8`) and
+  are not recomputed. Cleanup frees the helper lists, the struct and clears the
+  handle field.
+- Evidence: 79 Unicorn rows (`re/oracle/sdat_vectors.py`, consumer
+  `crates/slr-fmt-sdat/tests/sdat_oracle.rs`) compare results and the ordered
+  file-layer event log; the oracle replaces only the file layer, the companion
+  savers and the list plumbing (the real exe code runs `0x45d910`, `0x42ab50`,
+  strcmp, sprintf and sscanf). All 8 stock vehicle saves (and the 9 modded) end
+  with exactly the version-2 footer the port produces.
+Not covered: `File.readString` (`0x486060`), `readResID` (`FUN_00485ea0`),
+`write(String)` / `write(ResourceRef)` (`0x485fd0`, `FUN_00485c60`), the CRT
+`fwrite` slot table under the file layer, and the SDAT header writer / open path.
 
 ## TRC (`.trc` traffic road graph)
 `u32 version(=1)`, seven raw header words `(53, 218, 484, 1572, 4, 760, 194816)`,
@@ -129,10 +172,22 @@ Verified: stock 127/127 and modded 127/127 files, zero leftover (stock 336 mips:
 97 with alpha on every mip, 30 RGB-only; mip counts `{1:90, 5:3, 6:12, 7:17, 8:5}`;
 modded 339 mips `{1:90, 5:3, 6:9, 7:20, 8:5}`). Container ports `FUN_00507110`
 (header words at `res+4/8/0xc`, first entry at `res+0x10`, per-mip advance
-`next = cur + *cur + 0x14`; `texture_size` clamp at `DAT_006188b8` drops high mips),
+`next = cur + *cur + 0x14`; `texture_size` clamp at `DAT_006188b4`, live value 4:
+`dropped = max(1, mip_count - texture_size)` compared **signed**, and unless
+`dropped >= mip_count` the base dimensions are right-shifted by `dropped` — entries are
+stored smallest-first, so the clamp keeps that many smallest mips and drops the largest),
 per-mip slices feed the JPEG decode request `FUN_00564b50` from `FUN_00506ad0`
 (`payload+0x14`, `rgb_size`) with the alpha branch in `FUN_00506c70`
 (`alpha_size != 0`). JPEG decode is tier D via `zune-jpeg`: dimensions asserted only.
+Differential evidence (M2 follow-up #105): the Unicorn harness
+`re/oracle/ptx_vectors.py` runs the init path as real exe code (only the `[ebx+0xec]`
+device-allocation slot is a scratch sentry, and the two `FUN_004f6230` checksum calls are
+hooked) plus the walk path with `FUN_00506ad0`/`FUN_00506c70` stubbed as event-log
+stubs: 225 rows (185 stock, 9 reference, 31 synthetic/clamp), **225/225 byte-identical**,
+replayed by `crates/slr-fmt-texture/tests/ptx_oracle.rs` (`SLR_PTX_VECTORS=$PWD/re/out/ptx
+cargo test -p slr-fmt-texture --test ptx_oracle`). The walk assertion covers the loader's
+advance/finish rule, not the JPEG decode: `FUN_00506ad0`/`FUN_00506c70` bottom out in the
+exe's static libjpeg (`FUN_00564b50` et al.) and need a booted device heap.
 
 ## SPL (`.spl` AI spline)
 One control point per line: `x y z dx dy dz\twidth\tspeed[\tflag_a[\text_a\text_b\tflag_b]]`
@@ -176,3 +231,144 @@ cfg line `"%x,%f,%f,%f,%f,%f,%f,%s,%s"`, `.rdata 0x00610f10`, carries the
 `material` store `19 → "1"`, `74 → "Material"` with present flag set was
 differential-tested under the Unicorn oracle). Decoder:
 `crates/slr-fmt-ground` (facade `slr_formats::ground`).
+
+## Particle scripts (`particles/scripts/**/*.cfg`)
+Two dialects, 14 files in the stock install (modded overlay: the same 14).
+**Emitter scripts** (`particle_clouds/*.cfg`, 10 files, 40 `[ACTION]` lines, 11
+`;`-commented lines): `[STATE]` then keyword lines (`type`, `velscale`, `dimension`,
+`source_size`/`dest_size`/`source_color`/`dest_color`/`source_alpha`/`dest_alpha`/
+`source_angle`/`dest_angle`/`texture_offset`/`angular_velocity`/`lifetime` each followed by
+a *domain*), then `[ACTION]` lines (`source`, `gravity`, `bounce`, `move`, `damping`,
+`explosion`, `counter`, `directsource`; label as 2nd field). Domains (`FUN_005195e0`):
+`point x y z`, `line a b`, `triangle p q r`, `plane p n`, `rectangle p u v`, `box a b`,
+`sphere c r1 r2`. Parser `FUN_0051ac20` (file via `FUN_0054c880/0054cdd0/0054cec0`, lines
+via `FUN_005511c0`, markers by `strstr` so `[ACTION]` matches anywhere in a line, even a
+`;` comment; state lines `FUN_00519110`, action lines `FUN_0051a140`) builds a 0xbc-byte
+object: header (`1000, 0, 1.0f`), an intrusive action list, and a 0x34-word state block
+with eleven domain pointers (defaults from `FUN_0051bbc0`). **Skidmark scripts**
+(`skids/{sliding,frontend}/*.cfg`, 4 files): no sections, `maxcount`, `texture`, `width`
+(stored halved), `height`, `uv_normal`, `uv_end`, `fade`; `FUN_00521e10`, 0xb0-byte object.
+Tokens split on ` ,\t\r\n`, keywords case-insensitive (`FUN_005d7190`), unknown lines (and
+every `;` comment) skipped silently. Numbers use the game's own `sscanf` `FUN_00553890`, not
+the CRT: `%f` takes `[-]digits[.digits]` only (`+3`, `.5`, `1e5` do not parse as written),
+fraction digits are summed on the x87 stack, `%d` accepts a `0x` prefix, `%x` *requires* it
+(`texture 0` converts nothing and leaves id 0). Derived domain fields (triangle/plane/
+rectangle normals and offsets) follow the exe's x87 evaluation order at PC=24.
+Crate `slr-fmt-cfg` (`particle`, `skid`, `scan`; facade `slr_formats::cfg`).
+Verified: stock and modded 10 + 4 files, zero skipped lines apart from comments;
+differential test vs FUN_0051ac20/FUN_00521e10 in Unicorn (155 + 48 vectors incl. all 14
+cfgs of both installs), see `docs/fidelity.md`.
+## Skeletons and animations (`.bon`, `.skl`, `.matrixdata`)
+Stock: 19 `.bon` (433 bones), 17 `.skl` (429 bones), 17 `.matrixdata` (9,337 keys); modded
+21/18/18 (455/449 bones, 9,437 keys). All in `humans/{drivers,nicelady,pedestrians}` plus
+`parts/running_gear/meshes/{shock_absorber,spring}.bon` (two bones, both roots). The extensions
+are not literals in the exe: the paths come from model/animation descriptor scripts.
+
+**`.bon` / `.skl` (text, CRLF).** Same format, one reader. Per bone nine lines: `name`, `parent`
+(`%d`, index in file order, `-1` root; the parent may come later in the file, `vin.bon` lists
+`Bip01 Spine` with parent 3), three rotation rows `%f,%f,%f`, a translation row (stored x 0.1,
+`.rdata 0x005f08e8`), three `%f, %f` joint-limit lines (min, max radians). `.bon` limits are
+`-pi..pi` everywhere; `.skl` carries the animator limits (a min may exceed its max, stored
+verbatim) and differs slightly in bind pose and parent table. Reader `FUN_00531e90`
+(`thiscall(skeleton, buf, size)`, from the `skeleton %s` line of a model descriptor in
+`FUN_00549720`): lines by `FUN_005511c0`, fields by the exe's own scanner `FUN_00553890`. Bone
+record `0xe4` bytes: `+0` parent, `+4` thread link, `+8` local 4x4 (rows 0..2 as written with
+column 3 zero, row 3 = translation x 0.1 with w = 1), `+0x48` name (line capped at 255 bytes, then
+the last **two** bytes cut: a CRLF assumption, so an LF-only file loses a name character),
+`+0x4c` mins, `+0x58` maxs (all three limit lines must scan to two numbers, else every axis
+falls back to `-pi`/`+pi`). `FUN_00530cd0` threads the bones parent-before-child (`next`, `head`).
+World/inverse matrices (`+0x64..`, `FUN_0054f3d0`) are derived state and not ported.
+
+**The scanner is not `strtod`.** `FUN_00553890` `%f` accepts `[ws] ['-'] digit+ ['.' digit*]`
+only (no `+`, no leading `.`, no exponent: `1e-3` scans as `1`), accumulates in x87 registers
+(integer part by `FILD`, then `acc += d*scale; scale *= 0.1` with `scale` starting at `0.1f` and
+the multiplier the `f64` `0.1`), and stores one `f32` (`FSTP m32`). The result depends on the x87
+precision control and is often one ulp from the correctly rounded `f32`: of 4,422 decimal tokens in
+the stock `.spl` files 1,229 differ at PC=24 (`slr-fmt-spline` uses `str::parse::<f32>`; see the
+follow-up in the M2-09 close notes). The port reproduces it with `slr-x87` (PC=24 production,
+ADR 0007; the oracle vectors also cover PC=53).
+
+**`.matrixdata` (binary, little endian).** `u32 bones`, then per bone `u32 key_count` and
+`key_count` x 32 bytes (`f32 time`, `f32 q[4]`, `f32 d[3]`), then one `\n`-terminated name per
+bone in bone order (the exe drops the last byte, then caps at 255). Reader `FUN_00532e70`
+(`thiscall(object, buf, size)`, from the `sourcefile` line, `FUN_00538840`): sizes everything from
+the **first** bone's key count and skips the later count words unread (all shipped files agree),
+takes the times from bone 0, and stores keys key-major (`(key * bones + bone) * 7` floats).
+Names equal the sibling `.bon`/`.skl` bone names, in order (corpus test, every model). `q` is a
+unit quaternion on every shipped key (`x y z w` order inferred from `w ~ 1`); `d` is near unit
+length on most keys and looks like the bone translation over its bind length (inference; the exe
+only copies the floats). Shipped files have 5 to 84 keys per bone.
+
+Decoder: `crates/slr-fmt-skeleton` (facade `slr_formats::skeleton`). Verification:
+
+- corpus: every file parses; per file the parent-before-child thread visits each bone once, all
+  limits scan, `.bon` limits are `+-pi`, quaternions are unit, times strictly increase, and the
+  names of each model's `.bon`, `.skl` and `.matrixdata` agree (stock and modded).
+- Unicorn function oracle (`re/oracle/skel_vectors.py`, vectors in git-ignored `re/out/skel/`):
+  `FUN_00531e90` and `FUN_00532e70` run on the corpus bytes plus synthetic edge cases and compared
+  bit for bit (skeleton: 35 distinct corpus files + 11 synthetic rows at control word `0x007F` and again at
+  `0x027F`; matrixdata: 23 rows). Unicorn honours the control word's precision bits for
+  `FADD`/`FMUL` here, and a guard test proves the PC=24 and PC=53 vectors differ and that the port
+  at the wrong precision fails.
+- Not covered: which thread runs the loader (so PC=24 vs 53 in the real game is the ADR 0007
+  default, not observed), the `%f` grammar beyond plain decimals (probed, unit-tested only), and
+  the world-matrix pass.
+
+## Standard media (DDS/PNG/TGA, WAV/MP3; M2-11)
+No exe-side decoder is ported: the exe statically links libpng/libjpeg/zlib, its DDS path is D3DX
+(error string "Could not get level Description of D3DX texture"), and its WAV/MP3 loading path is
+not yet located (strings `.wav`, `.mp3`, `DSOUND.dll`, `mciSendCommandA`; follow-up). Everything goes through
+maintained crates (ADR 0008 licence rule: MIT/Apache-compatible only), decoded pixels/samples are tier D
+(ADR 0009), and the tests assert dimensions, formats and frame counts against headers re-read from the raw
+bytes in the test (never against the crate's own header parse).
+- `slr-fmt-texture`: `dds` (`ddsfile` 0.6 MIT + `texture2ddecoder` 0.1 MIT/Apache; DXT1/3/5, payload must
+  equal the header-implied mip chain exactly, cube/volume rejected), `pngdec` (`png` 0.18, to RGBA8),
+  `tga` (`tinytga` 0.5, types 1/2/3 uncompressed; header bytes 2/12/14/16; origin normalised to top-first).
+  Stock: DDS 1,462 (DXT1 1,138 / DXT3 122 / DXT5 202; 8,076 mips) all decode, PNG 370 (8-bit RGB 103 /
+  RGBA 257 / gray+alpha 10), TGA 12 (type 1 8-bit palette 24-bit x7, type 2 32-bit x2, type 3 gray8 x3).
+  Modded profile: 1,559 DDS (2 uncompressed A8R8G8B8 cubemaps are out of scope, reported `unsupported`),
+  506 PNG (adds 2 indexed), 13 TGA (adds one 24-bit).
+- `slr-fmt-sound`: `wav` (`hound` 3.5 Apache-2.0; 8/16-bit integer PCM, 8-bit widened `i8 << 8`), `mp3`
+  (`nanomp3` 0.2 MIT/Apache, a bit-exact safe-Rust port of minimp3; Layer III). Stock: WAV 147 (11025/
+  22050/32000/44100 Hz, mono/stereo, 8 and 16 bit), MP3 15 (12 MPEG-1 44.1 kHz, 3 MPEG-2 22.05 kHz, all
+  stereo CBR); decoded samples per channel equal `frames * samples_per_frame` from an independent header
+  walk for all 15. Cinepak/AVI is covered in the AVI + Cinepak section below (M2-12).
+
+## AVI + Cinepak (`Data/Fmv/*.avi`)
+Three stock files, byte-identical in the modded profile: `Activision.avi`
+(640x480, 304 frames, 33367 us/frame), `Invictus.avi` (640x400, 373 frames,
+40000 us), `Prime.avi` (160x120, 834 frames, 41667 us). All carry one `cvid`
+(Cinepak) 24-bit video stream; Activision and Invictus add a PCM audio stream
+(`auds`, 2 ch, 44100 Hz, 16 bit; one audio chunk more than video chunks) and
+an OpenDML `LIST odml`/`dmlh`, plus `idx1`; `Prime.avi` is video only, plain
+AVI 1.0 with `idx1`. Layout: `RIFF AVI` { `hdrl` { `avih`, `strl` per stream,
+`odml`/`dmlh` }, `JUNK`, `LIST movi`, `idx1` }, then (Activision, Invictus) a
+`JUNK` outside the RIFF. `idx1` offsets are relative to the `movi` list type
+fourcc (resolved 1:1 against the walked chunks in all three files). `Prime.avi`
+stores its video frames under `00db` chunk ids (the "uncompressed DIB" id)
+although the stream is `cvid`; the other two use `00dc`/`01wb`. A zero-length
+frame chunk is a dropped frame (the previous picture stays). The exe does not
+decode video itself: it plays through WINMM `mciSendCommandA` (natives
+`openVideo`/`closeVideo`/`isPlayingVideo`), i.e. Windows' own Cinepak codec.
+
+Cinepak bitstream (big-endian; own implementation, public format): frame =
+`u8 flags, u24 size, u16 w, u16 h, u16 strips`; strip = `u8 id (0x10 key / 0x11
+inter), u24 size (incl. the 12-byte header), u16 y1, x1, y2, x2` (`y1 == 0`:
+below the previous strip, `y2` = height); chunk = `u8 id, u24 size (incl. 4)`.
+Chunks `0x20/0x21` V4 codebook (full / selective update by 32-bit flag words,
+MSB first), `0x22/0x23` V1 codebook, `0x24..0x27` grayscale (4-byte entries),
+`0x30` intra vectors, `0x31` inter vectors (flag bit = coded, next bit = V4),
+`0x32` V1-only. Codebook entry = `y0 y1 y2 y3 u v` for a 2x2 block; V1 index =
+entry doubled to 4x4, V4 = four indices, one per quadrant. Colour `r = y+2v`,
+`g = y - trunc(u/2) - v`, `b = y+2u`, clipped. Codebooks persist per strip
+across frames; with frame flag bit 0 clear, strip n starts from strip n-1's.
+
+Verified: stock 3/3 and modded 3/3 decode every frame (1511 frames total) and
+the decoded count equals the `idx1` video record count, `avih.dwTotalFrames`,
+`strh.dwLength` and `dmlh.dwTotalFrames`; all 1511 frames are byte-identical
+RGB24 to FFmpeg 9.0.2's Cinepak decoder (independent decoder, run locally, no
+exe oracle exists; the test skips without `ffmpeg` on `PATH`). The OpenDML
+super index (`indx`) and `ixNN` chunk bodies are not interpreted (none in the
+shipped files). The exe's string table also names `Data\FMV\StreetLegal.avi`,
+which is not shipped (stock has `Prime.avi` instead); decoder-independent, for
+the parity tickets (P01, P30). Decoder: `crates/slr-fmt-video`.

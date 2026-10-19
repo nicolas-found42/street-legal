@@ -19,6 +19,12 @@
 #        to an independent msiextract tree; SHA-256 of
 #        StreetLegal_Redline.exe starts with 16b25cac and
 #        StreetLegal_Redline.bak.exe equals 7d77466a...2e8edde.
+#     6. Writes <target>/.slr-manifest (M7-04): SHA-256, size and relative
+#        path of every file, tab separated, generated from the tree verified
+#        in step 5. The game's startup check (crates/slr-io, module stock)
+#        verifies the install against it, replacing the original's CD check.
+#        The manifest lives inside the git-ignored target and is never
+#        committed: it holds hashes derived from the original's files.
 #
 # Pipeline justification: cabextract plus our own msiinfo table-driven
 # placement is the primary path (every placement is auditable against the
@@ -291,4 +297,27 @@ esac
 [ "$bak_hash" = "$EXPECTED_BAK" ] \
     || die "StreetLegal_Redline.bak.exe hash mismatch: $bak_hash (expected $EXPECTED_BAK)"
 
-log "OK: $actual files verified (count, sizes, msiextract tree, exe hashes)"
+# --- Checksum manifest for the game's startup check (M7-04). Hashes are taken
+# from the tree verified above and stay inside the git-ignored target. ---
+MANIFEST="$TARGET/.slr-manifest"
+(
+    cd "$TARGET"
+    find . -type f -print0 | xargs -0 shasum -a 256
+) | awk -F'\t' -v OFS='\t' '
+    FILENAME ~ /mapping\.tsv$/ { size[$2] = $3; next }
+    {
+        # shasum output: "<64 hex>  ./<path>"
+        hash = substr($0, 1, 64); rel = substr($0, 69)
+        if (!(rel in size)) { printf "NOT_IN_MAPPING\t%s\n", rel > "/dev/stderr"; failed = 1; next }
+        print hash, size[rel], rel
+    }
+    END { if (failed) exit 1 }
+' "$TDIR/mapping.tsv" - | LC_ALL=C sort -t "$TAB" -k3,3 > "$TDIR/manifest.rows" \
+    || die "could not build the checksum manifest"
+rows="$(wc -l < "$TDIR/manifest.rows" | tr -d ' ')"
+[ "$rows" -eq "$EXPECTED_COUNT" ] \
+    || die "manifest has $rows rows, expected exactly $EXPECTED_COUNT"
+{ echo "# slr-stock-manifest v1"; cat "$TDIR/manifest.rows"; } > "$MANIFEST"
+log "manifest: $MANIFEST ($rows files; SHA-256, size, path)"
+
+log "OK: $actual files verified (count, sizes, msiextract tree, exe hashes, manifest)"

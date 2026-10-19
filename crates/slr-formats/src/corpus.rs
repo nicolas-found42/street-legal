@@ -1,6 +1,6 @@
 //! Whole-install inventory: classify and parse every file under a reference directory.
 
-use crate::{cfg, ground, pedestrian, rpak, scx, sdat, spline, traffic, tufa, Result};
+use crate::{cfg, ground, pedestrian, rpak, scx, sdat, skeleton, spline, traffic, tufa, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,11 @@ pub fn walk(root: &Path) -> Result<Vec<PathBuf>> {
             let ft = e.file_type()?;
             if ft.is_dir() {
                 stack.push(p);
-            } else if ft.is_file() && e.file_name() != ".DS_Store" {
+            } else if ft.is_file()
+                && e.file_name() != ".DS_Store"
+                // checksum manifest written by tools/extract-stock.sh (M7-04), not a game file
+                && e.file_name() != ".slr-manifest"
+            {
                 out.push(p);
             }
         }
@@ -54,6 +58,23 @@ pub struct Report {
     pub scm_materials: usize,
     /// `.scm`/`.SCM` paths left unparsed (binary addon variants).
     pub scm_binary: usize,
+    /// Emitter scripts under `particles/scripts/particle_clouds/` (`[STATE]`/`[ACTION]`).
+    pub particle_cfgs: usize,
+    /// `[ACTION]` lines across them.
+    pub particle_actions: usize,
+    /// Skidmark scripts under `particles/scripts/skids/`.
+    pub skid_cfgs: usize,
+    /// `;`-commented lines across both particle dialects.
+    pub particle_comment_lines: usize,
+    /// Lines of either dialect the parsers had to skip (not comments).
+    pub particle_ignored_lines: usize,
+    pub bon_files: usize,
+    pub bon_bones: usize,
+    pub skl_files: usize,
+    pub skl_bones: usize,
+    pub matrixdata_files: usize,
+    /// Keys (bones x keys per bone) across all `.matrixdata` files.
+    pub matrixdata_keys: usize,
 }
 /// Parse every file whose format this crate understands; collect failures.
 pub fn verify(root: &Path) -> Result<Report> {
@@ -106,6 +127,23 @@ pub fn verify(root: &Path) -> Result<Report> {
                 }
                 "cfg" => {
                     cfg::Cfg::open(&p).map_err(|e| e.to_string())?;
+                    let path = p.to_string_lossy().replace('\\', "/");
+                    if path.contains("/particles/scripts/particle_clouds/") {
+                        let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                        let (c, d) =
+                            cfg::particle::ParticleCfg::parse_diagnosed(&data, cfg::Precision::F32);
+                        rep.particle_cfgs += 1;
+                        rep.particle_actions += c.actions.len();
+                        rep.particle_comment_lines += d.comments;
+                        rep.particle_ignored_lines += d.ignored.len();
+                    } else if path.contains("/particles/scripts/skids/") {
+                        let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                        let (_, d) =
+                            cfg::skid::SkidCfg::parse_diagnosed(&data, cfg::Precision::F32);
+                        rep.skid_cfgs += 1;
+                        rep.particle_comment_lines += d.comments;
+                        rep.particle_ignored_lines += d.ignored.len();
+                    }
                     Ok(Some("cfg"))
                 }
                 "walk" => {
@@ -131,6 +169,26 @@ pub fn verify(root: &Path) -> Result<Report> {
                     rep.trc_lanes += trc.lanes.len();
                     rep.trc_lane_items += trc.lanes.iter().map(|l| l.items.len()).sum::<usize>();
                     Ok(Some("trc"))
+                }
+                "bon" | "skl" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let sk = skeleton::parse_skeleton(&data).map_err(|e| e.to_string())?;
+                    if ext == "bon" {
+                        rep.bon_files += 1;
+                        rep.bon_bones += sk.bones.len();
+                        Ok(Some("bon"))
+                    } else {
+                        rep.skl_files += 1;
+                        rep.skl_bones += sk.bones.len();
+                        Ok(Some("skl"))
+                    }
+                }
+                "matrixdata" => {
+                    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let a = skeleton::parse_animation(&data).map_err(|e| e.to_string())?;
+                    rep.matrixdata_files += 1;
+                    rep.matrixdata_keys += a.keys.len();
+                    Ok(Some("matrixdata"))
                 }
                 "spl" => {
                     let data = std::fs::read(&p).map_err(|e| e.to_string())?;

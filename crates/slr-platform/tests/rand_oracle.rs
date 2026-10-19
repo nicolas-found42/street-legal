@@ -21,6 +21,7 @@ fn rand_matches_oracle_vectors() {
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => {
+            eprintln!("SLR_ORACLE_SKIPPED: rand_matches_oracle_vectors");
             eprintln!("SKIP: no oracle vectors (run re/oracle/rand_vectors.py)");
             return;
         }

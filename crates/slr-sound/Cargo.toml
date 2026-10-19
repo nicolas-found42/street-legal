@@ -3,3 +3,10 @@ name = "slr-sound"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+slr-calllog = { path = "../slr-calllog" }
+slr-vm = { path = "../slr-vm" }
+
+[dev-dependencies]
+serde_json = "1"

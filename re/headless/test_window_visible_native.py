@@ -1,0 +1,118 @@
+"""Optional original-code CREATE/visible continuations; captures remain ignored."""
+
+import hashlib
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from desktop import DesktopProfile
+from graphics import GraphicsProfile
+from media import MediaProfile
+from startup import OUTPUT_ROOT, REPO, Startup
+
+EXE = REPO / "reference/raw/StreetLegal_Redline.bak.exe"
+HERE = OUTPUT_ROOT / "window-visible"
+CASES = HERE / "visible-cases.json"
+MEDIA = OUTPUT_ROOT / "hypothetical-cd-toc.json"
+GRAPHICS = OUTPUT_ROOT / "d3d/single-accepted.json"
+
+
+@unittest.skipUnless(
+    EXE.exists() and CASES.exists() and MEDIA.exists() and GRAPHICS.exists(),
+    "local original and ignored visible captures absent",
+)
+class OriginalVisibleMessageTests(unittest.TestCase):
+    def check_trace(self, run, trace, case):
+        self.assertEqual(trace["instructions"], case["instruction_counter"])
+        self.assertEqual(trace["stop"], case["stop"])
+        self.assertEqual(
+            [e for e in trace["events"] if "callback" in e or "callback_return" in e],
+            case["callbacks"],
+        )
+        calls = [
+            e for e in trace["events"] if e.get("import") == "user32.dll!DefWindowProcA"
+        ]
+        self.assertEqual(calls, case["default_calls"])
+        self.assertEqual(trace["pending_window_callbacks"], case["pending_count"])
+        calc = next(e for e in calls if e["args"][1] == 0x83)
+        self.assertEqual(
+            run.read_u32s(calc["args"][3], 4), calc["desktop"]["output_rect"]
+        )
+        create = next(
+            e
+            for e in trace["events"]
+            if e.get("import") == "user32.dll!CreateWindowExA"
+        )
+        self.assertNotIn("result", create)
+        if case["pending_count"]:
+            self.assertNotIn("result", calls[-1])
+        self.assertEqual(run.read_u32s(case["state_base"], 4), case["state_words"])
+        self.assertEqual(trace["desktop_scenario"], run.desktop_profile.metadata)
+        self.assertFalse(trace["desktop_scenario"]["physical_desktop_observed"])
+        for address in case["required_original_addresses"]:
+            self.assertIn(address, trace["trail"])
+        self.assertEqual(trace["status"], "incomplete")
+        self.assertTrue(trace["winmain_reached"])
+        self.assertFalse(trace["main_menu_reached"])
+
+    def test_original_create_results_and_visible_state_writes_repeat(self):
+        self.assertLessEqual(CASES.stat().st_size, 32768)
+        cases = json.loads(CASES.read_text())
+        self.assertEqual(len(cases), 4)
+        for case in cases:
+            profile = HERE / case["profile"]
+            self.assertEqual(profile.parent, HERE)
+
+            def scenario(profile=profile):
+                return Startup(
+                    EXE,
+                    media_profile=MediaProfile.load(MEDIA),
+                    graphics_profile=GraphicsProfile.load(GRAPHICS),
+                    desktop_profile=DesktopProfile.load(profile),
+                    record_limit=20000,
+                )
+
+            with self.subTest(profile=profile.name):
+                run = scenario()
+                first = run.run(5000000)
+                self.check_trace(run, first, case)
+                receipt = {
+                    "profile": profile.name,
+                    "instructions": first["instructions"],
+                    "stop": first["stop"],
+                    "callbacks": [
+                        e
+                        for e in first["events"]
+                        if "callback" in e or "callback_return" in e
+                    ],
+                    "default_calls": [
+                        e
+                        for e in first["events"]
+                        if e.get("import") == "user32.dll!DefWindowProcA"
+                    ],
+                    "state_base": case["state_base"],
+                    "state_words": run.read_u32s(case["state_base"], 4),
+                    "required_original_addresses_observed": [
+                        a
+                        for a in case["required_original_addresses"]
+                        if a in first["trail"]
+                    ],
+                    "pending_callbacks": first["pending_window_callbacks"],
+                    "status": first["status"],
+                    "main_menu_reached": first["main_menu_reached"],
+                }
+                (HERE / (profile.stem + "-receipt.json")).write_text(
+                    json.dumps(receipt, indent=2) + "\n"
+                )
+                self.assertEqual(first, scenario().run(5000000))
+                blob = json.dumps(first, sort_keys=True, indent=2) + "\n"
+                (HERE / (profile.stem + "-startup.json")).write_text(blob)
+                (HERE / (profile.stem + "-startup.sha256")).write_text(
+                    hashlib.sha256(blob.encode()).hexdigest() + "\n"
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

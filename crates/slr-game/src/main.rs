@@ -62,8 +62,29 @@ fn parse_args() -> Args {
     }
 }
 
+/// M7-04: the original's CD check is not ported; refuse to start unless the clean stock install
+/// (`SLR_STOCK`, default `stock/`) verifies against its checksum manifest.
+fn require_clean_stock() {
+    let stock = std::env::var_os("SLR_STOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("stock"));
+    match slr_io::stock::verify_stock(&stock) {
+        Ok(r) => eprintln!(
+            "stock install verified: {} files, {} bytes ({})",
+            r.files,
+            r.bytes,
+            stock.display()
+        ),
+        Err(e) => {
+            eprintln!("street-legal: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[macroquad::main(conf)]
 async fn main() {
+    require_clean_stock();
     let args = parse_args();
     let (cat, loaded) = match Catalog::load(&args.reference) {
         Ok(c) if !c.cars.is_empty() && !c.tyres.is_empty() => (c, true),

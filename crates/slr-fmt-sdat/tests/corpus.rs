@@ -240,3 +240,69 @@ fn companion_index_splits_names() {
     assert_eq!(companion_index("foo.bar"), None);
     assert_eq!(companion_index("foo."), None);
 }
+
+/// The exe's `File.close()` footer (`store::close_file`, version 2) is the
+/// tail of every shipped vehicle save: slot-count word, slot run, resource
+/// table, byte total. Independent evidence for the oracle-tested writer.
+fn check_vehicle_footers(root: &Path, expect: usize, tag: &str, all_companions: bool) {
+    let mut n = 0;
+    let mut missing = 0;
+    for f in sdat_files(root) {
+        let data = std::fs::read(&f).unwrap();
+        let Ok(sdat) = slr_fmt_sdat::parse(&data, Some(&STOCK_OPTIONS_FLOATS))
+            .or_else(|_| slr_fmt_sdat::parse(&data, Some(&REF_OPTIONS_FLOATS)))
+        else {
+            panic!("{}: parse", f.display());
+        };
+        let slr_fmt_sdat::Body::Vehicle(v) = &sdat.body else {
+            continue;
+        };
+        let footer = v.exe_footer().expect("footer");
+        assert!(
+            data.ends_with(&footer),
+            "{}: tail differs from the exe footer model",
+            f.display()
+        );
+        let total = u32::from_le_bytes(footer[footer.len() - 4..].try_into().unwrap());
+        assert_eq!(total, v.trailer, "{}: byte total", f.display());
+        assert_eq!(total as usize, footer.len() - 4, "{}", f.display());
+        // the word before the slot run is the slot count
+        let n_slots = v.jpeg_slots.len() as u32;
+        assert_eq!(u32::from_le_bytes(footer[..4].try_into().unwrap()), n_slots);
+        // one companion per slot beside the save
+        let dir = f.parent().unwrap();
+        let stem = f.file_name().unwrap().to_string_lossy().into_owned();
+        for s in &v.jpeg_slots {
+            let c = format!("{stem}.{}", s.index);
+            if !dir.join(&c).is_file() {
+                // the modded profile is a played install: some screenshots
+                // are gone (Muscle.5, Muscle.17); the stock install is whole
+                assert!(!all_companions, "{c}");
+                missing += 1;
+            }
+        }
+        n += 1;
+    }
+    assert_eq!(n, expect, "{tag}: vehicle saves");
+    eprintln!(
+        "{tag}: {n} vehicle footers match the exe close() model ({missing} companions absent)"
+    );
+}
+
+#[test]
+fn stock_vehicle_footers_match_exe_model() {
+    let Some(root) = stock_root() else {
+        eprintln!("SKIP stock: no stock dir");
+        return;
+    };
+    check_vehicle_footers(&root, 8, "stock", true);
+}
+
+#[test]
+fn modded_vehicle_footers_match_exe_model() {
+    let Some(root) = modded_root() else {
+        eprintln!("SKIP modded: no reference dir");
+        return;
+    };
+    check_vehicle_footers(&root, 9, "modded", false);
+}

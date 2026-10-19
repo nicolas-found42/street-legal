@@ -37,6 +37,9 @@
 mod ffi;
 pub mod trans;
 
+#[cfg(test)]
+mod tests;
+
 use ffi::{ExtF80, SfFlags, SfMode, SfPrec, SfTiny};
 use std::sync::{Mutex, MutexGuard};
 
@@ -209,13 +212,15 @@ impl X87 {
         exp == 0x7FFF && (self.significand() & 0x7FFF_FFFF_FFFF_FFFF) != 0
     }
 
-    /// Whether the value is a signaling NaN (integer bit set, C0/C1/C2 payload
-    /// nonzero, quiet bit clear — the 8086-SSE `extF80_isSignalingNaN` rule).
+    /// Whether the value is a signaling NaN: biased exponent 0x7FFF, quiet bit
+    /// (bit 62) clear, and a nonzero payload below it (bits 0-61). This is
+    /// SoftFloat's `extF80_isSignalingNaN`, which Intel SDM Vol 1 §4.8.3 agrees
+    /// with. The exponent check matters: a finite value such as 2.5
+    /// (4000:A000000000000000) has an SNaN-looking significand but is not a NaN.
     pub fn is_signaling_nan(self) -> bool {
+        let (_, exp) = self.sign_exp();
         let sig = self.significand();
-        (sig & 0x8000_0000_0000_0000) != 0
-            && (sig & 0x3FFF_FFFF_FFFF_FFFF) != 0
-            && (sig & 0x4000_0000_0000_0000) == 0
+        exp == 0x7FFF && (sig & 0x4000_0000_0000_0000) == 0 && (sig & 0x3FFF_FFFF_FFFF_FFFF) != 0
     }
 
     /// Whether the value is infinite.

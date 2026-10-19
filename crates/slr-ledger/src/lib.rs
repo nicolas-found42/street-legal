@@ -186,10 +186,21 @@ pub fn parse_annotations_in_text(text: &str, file: &str) -> Vec<Annotation> {
                         None => break false,
                         Some(l) => {
                             let t = l.trim_start();
-                            if t.is_empty() || t.starts_with("///") || t.starts_with("//") {
+                            // Attributes sit between a doc comment and the
+                            // item they document (`/// exe: X` then
+                            // `#[must_use]` then `pub fn X`), so they are
+                            // transparent to the lookahead: skipping them
+                            // would attach the symbol to the enclosing scope
+                            // and render `file:file:line`.
+                            if t.is_empty()
+                                || t.starts_with("///")
+                                || t.starts_with("//")
+                                || t.starts_with("#[")
+                                || t.starts_with("#![")
+                            {
                                 continue;
                             }
-                            break item_name(l).is_some() || t.starts_with("///");
+                            break item_name(l).is_some();
                         }
                     }
                 }
@@ -239,7 +250,9 @@ pub fn parse_annotations_in_text(text: &str, file: &str) -> Vec<Annotation> {
 /// else return `None`.
 fn item_name(line: &str) -> Option<&str> {
     let t = line.trim_start();
-    let t = t.strip_prefix("pub")?.trim_start();
+    // `pub` is optional: `install` and friends are private helpers, and an
+    // annotation on one must still name the item, not the enclosing `impl`.
+    let t = t.strip_prefix("pub").map(str::trim_start).unwrap_or(t);
     let t = t.strip_prefix("unsafe").map(str::trim_start).unwrap_or(t);
     for kw in [
         "fn", "struct", "enum", "type", "const", "static", "mod", "trait",
@@ -505,6 +518,18 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].symbol, "FUN_0041a5f0");
         assert_eq!(a[0].line, 2);
+    }
+
+    #[test]
+    fn annotation_attaches_across_an_attribute() {
+        // `#[must_use]` between the doc comment and the item must not push
+        // the symbol onto the enclosing scope, which rendered the row as
+        // `file:file:line` instead of `file:item:line`.
+        let text = "/// exe: LAB_0047c730
+///\n/// prose\n#[must_use]\npub fn is_alive(&self) {}\n";
+        let a = parse_annotations_in_text(text, "crates/slr-lang/src/thread.rs");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].item, "is_alive");
     }
 
     #[test]
