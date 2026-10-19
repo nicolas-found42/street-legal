@@ -19,6 +19,7 @@ fn empty_class(name: &str, base: Option<&str>) -> Class {
         kind: 0,
         name: name.into(),
         base: base.map(str::to_owned),
+        base_id: None,
         interfaces: vec![],
         methods: vec![],
         fields: vec![],
@@ -815,9 +816,16 @@ fn new_expressions_allocate_the_requested_loaded_class_like_original() {
         thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
         let value = thread.pop_deref().unwrap();
         let object = &vm.objects[(value.payload - 0x1000) as usize];
-        assert_eq!(object.class, row["result"]["events"][0]["name"]);
+        let class_name = match &object.class {
+            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
+            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+        };
         assert_eq!(
-            json!([{"type":value.tag.name(),"is_supplied_leaf_instance":object.class=="Leaf"}]),
+            class_name,
+            row["result"]["events"][0]["name"].as_str().unwrap()
+        );
+        assert_eq!(
+            json!([{"type":value.tag.name(),"is_supplied_leaf_instance":class_name=="Leaf"}]),
             row["result"]["stack"]
         );
     }
@@ -1047,7 +1055,11 @@ fn new_arrays_create_typed_persistent_element_cells_like_original() {
         let array = thread.pop_deref().unwrap();
         assert_eq!(array.tag.name(), row["result"]["descriptor"]);
         let object = &vm.objects[(array.payload - 0x1000) as usize];
-        assert_eq!(object.class, descriptor);
+        let array_class = match &object.class {
+            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
+        };
+        assert_eq!(array_class, descriptor);
         assert_eq!(
             object.fields[0].payload,
             row["result"]["length"].as_u64().unwrap() as u32
@@ -1175,10 +1187,13 @@ fn casts_and_instanceof_match_original_runtime_types_nulls_and_string_bytes() {
             .iter()
             .find_map(|event| event["string"].as_str())
         {
-            assert_eq!(
-                vm.objects[(value.payload - 0x1000) as usize].class,
-                "java.lang.String"
-            );
+            let string_class = match &vm.objects[(value.payload - 0x1000) as usize].class {
+                slr_vm::vmclass::ClassRef::Loaded(id) => {
+                    vm.loader.class_name(*id).unwrap().to_owned()
+                }
+                slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+            };
+            assert_eq!(string_class, "java.lang.String");
             assert_eq!(
                 vm.string_bytes(value.payload),
                 Some(text.as_bytes()),
@@ -1299,10 +1314,13 @@ fn argument_arrays_preserve_target_lvalues_item_order_and_typed_copies_like_orig
         assert_eq!(value.tag.name(), expected["type"]);
         assert_eq!(json!(value.payload == 0), expected["null"]);
         if value.payload != 0 {
-            assert_eq!(
-                vm.objects[(value.payload - 0x1000) as usize].class,
-                descriptor
-            );
+            let array_class = match &vm.objects[(value.payload - 0x1000) as usize].class {
+                slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+                slr_vm::vmclass::ClassRef::Loaded(id) => {
+                    vm.loader.class_name(*id).unwrap().to_owned()
+                }
+            };
+            assert_eq!(array_class, descriptor);
             let cells = expected["cells"].as_array().unwrap();
             assert_eq!(
                 vm.objects[(value.payload - 0x1000) as usize].fields[0].payload,

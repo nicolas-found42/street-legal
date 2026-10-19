@@ -21,10 +21,108 @@
 //! ([`crate::strings`]); the loader keeps owned spellings. A value cell's
 //! type pointer ([`crate::values::TypeTag`]) is the full descriptor
 //! (`I`, `F`, `V`, `L;`, `Ljava.lang.String;`, `[I`, ...).
+//!
+//! Class identity model (#110 steps 1-5): every loaded class owns one
+//! append-only arena record addressed by a stable [`ClassId`] (nonzero
+//! `u32`, separate from descriptor/name text). Bodies, pools, field
+//! initializer indices and frame contexts dereference the record by ID;
+//! a class name remains diagnostic metadata and is never enough to
+//! dereference an already-issued identity. Name-to-ID resolution
+//! ([`Loader::lookup`]) is a boundary operation. Production duplicate-name
+//! registration stays rejected in this slice (step 6); the arena layout
+//! already keeps each record's own metadata so a later slice can express
+//! the original head/insert-after-head cache topology without redirecting
+//! issued identities. Base/interface spellings still resolve through the
+//! selection map on each hierarchy walk; no parse-time binding policy is
+//! claimed here (binding-time probes are a later slice).
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use slr_fmt_tufa::{ClassRec, FieldRec, MethodRec, Module, PoolEntry};
+
+/// Stable identity of one loaded class record, issued in registration order.
+///
+/// This is the owner carried by [`crate::interp::BodyId`] mappings, pools,
+/// field-initializer indices and interpreter frame contexts
+/// (`frame+0x34` holds [`ClassId::get`]; decoding it back to a name and
+/// re-looking that name up is forbidden for execution). It is deliberately
+/// separate from interned descriptor/name identity: equal descriptor text
+/// must not be equated with equal runtime record identity, or vice versa.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ClassId(NonZeroU32);
+
+impl ClassId {
+    /// Arena slot for this identity.
+    fn index(self) -> usize {
+        self.0.get() as usize - 1
+    }
+
+    /// The nonzero encoding stored in frame contexts and static cells.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Decode a stored context word; 0 (null context) is not a class.
+    #[must_use]
+    pub fn from_raw(raw: u32) -> Option<Self> {
+        NonZeroU32::new(raw).map(Self)
+    }
+
+    /// Identity for arena slot `index` (registration order).
+    fn from_index(index: usize) -> Self {
+        Self(NonZeroU32::new(index as u32 + 1).expect("class arena overflowed u32"))
+    }
+}
+
+/// Explicit array-type identity: the full array spelling (`[I`,
+/// `[Ljava.lang.String;`, ...). Arrays never own arena records; this keeps
+/// their descriptor identity distinct from loaded class records.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ArrayDescriptor(String);
+
+impl ArrayDescriptor {
+    /// The full array spelling; `None` for malformed descriptors (no
+    /// leading `[`, empty element, or unterminated `L...` element).
+    #[must_use]
+    pub fn new(descriptor: &str) -> Option<Self> {
+        descriptor.strip_prefix('[')?;
+        let element = descriptor.trim_start_matches('[');
+        if element.is_empty() {
+            return None;
+        }
+        // `L;` (the generic null reference, e.g. `Value::reference(0)`) is a
+        // valid element: the original stores `[L;` without further checks.
+        if element.starts_with('L') && !(element.ends_with(';') && element.len() >= 2) {
+            return None;
+        }
+        Some(Self(descriptor.to_owned()))
+    }
+
+    /// The full array spelling.
+    #[must_use]
+    pub fn descriptor(&self) -> &str {
+        &self.0
+    }
+
+    /// The element spelling after the leading `[` run.
+    #[must_use]
+    pub fn element(&self) -> &str {
+        self.0.trim_start_matches('[')
+    }
+}
+
+/// Opaque class reference for the conversion interface: identity without
+/// re-resolution. Loaded classes carry their record ID; arrays carry their
+/// explicit spelling and never resolve to a fabricated record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClassRef {
+    /// A loaded class record.
+    Loaded(ClassId),
+    /// An array type spelling with no loaded record.
+    Array(ArrayDescriptor),
+}
 
 /// A linked method: declaring class, name, signature, native flag, body.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +173,11 @@ pub struct Class {
     pub name: String,
     /// Direct superclass from CLSS head3 (`UINT_MAX` means no superclass).
     pub base: Option<String>,
+    /// Retained superclass identity, resolved once at link time (`None`
+    /// for `java.lang.Object`/root and for descriptors with no superclass).
+    /// The original dependency-before-owner reselection policy (4117a0 /
+    /// 403e80) is a later slice; this slice pins the already-loaded base.
+    pub base_id: Option<ClassId>,
     /// Interface names (pool `Class` entries past the base).
     pub interfaces: Vec<String>,
     /// Declared methods (both `MTHD` arrays concatenated, file order).
@@ -84,12 +187,35 @@ pub struct Class {
     /// Decoded `TREE` bodies; `methods[i].body` indexes into this.
     pub bodies: Vec<Vec<slr_fmt_tufa::Node>>,
 }
+/// One append-only arena record: the class's own metadata plus its owned
+/// pool, initializer indices and local bodies. Never reused or unloaded in
+/// this slice (no GC/unloading recovered).
+#[derive(Clone, Debug)]
+struct ClassRecord {
+    class: Class,
+    pool: Vec<PoolEntry>,
+    field_initializers: Vec<Option<usize>>,
+    /// Global [`crate::interp::BodyId`] slots owned by this record, in
+    /// local body order (parallel to `class.bodies`).
+    body_slots: Vec<u32>,
+}
 
 /// A selected method record, including the inherited vector index returned by
 /// 405920 and its log-and-continue ambiguity condition.
 pub struct MethodMatch<'a> {
     pub method: &'a Method,
+    /// Defining record's dotted name. Callers needing the identity must
+    /// resolve it once via [`Loader::lookup`] and retain the [`ClassId`];
+    /// see [`MethodMatchId`] for the ID-carrying form.
     pub defining: &'a str,
+    pub index: u32,
+    pub ambiguous: bool,
+}
+
+/// A selected method with its defining record identity retained.
+pub struct MethodMatchId<'a> {
+    pub method: &'a Method,
+    pub defining: ClassId,
     pub index: u32,
     pub ambiguous: bool,
 }
@@ -141,55 +267,155 @@ pub enum LoadError {
     PackageConflict(String),
     /// Pool or record index out of range.
     BadIndex(&'static str),
+    /// A stored identity no longer addresses a live arena record. Without
+    /// unloading (out of scope) this is an internal bug; it is never a
+    /// signal to re-resolve the name.
+    StaleId(u32),
 }
 
-/// The class loader: loaded classes by dotted name, package roots, and the
-/// boot state from `FUN_0040fe70`.
+/// The class loader: an append-only arena of loaded records with a
+/// name-to-ID selection map, plus package roots and boot state from
+/// `FUN_0040fe70`.
+///
+/// Records own their immutable metadata, pool, field-initializer indices
+/// and local TREE bodies. Selection (currently one record per name; the
+/// duplicate-cache topology of step 6 plugs in here) maps a name or
+/// descriptor to the selected [`ClassId`]; execution dereferences IDs and
+/// never falls back to a name lookup when an ID dereference fails.
 ///
 /// exe: FUN_0040fe70 (boot) + FUN_00411b20 (chunk loop)
 #[derive(Clone, Debug, Default)]
 pub struct Loader {
-    classes: HashMap<String, Class>,
+    records: Vec<ClassRecord>,
+    /// Boundary selection map: name -> selected record. Callers resolve
+    /// once at the interface and retain the ID.
+    selected: HashMap<String, ClassId>,
     packages: Vec<(String, String)>,
     booted: bool,
-    contexts: Vec<String>,
-    pools: HashMap<String, Vec<PoolEntry>>,
-    body_owners: Vec<(String, usize)>,
-    field_initializers: HashMap<String, Vec<Option<usize>>>,
+    body_owners: Vec<ClassId>,
 }
 
 impl Loader {
+    /// Boundary selection (`FUN_00411610` hit path): resolve a dotted name
+    /// to its selected record identity. Callers retain the ID; execution
+    /// never re-resolves a name when an ID dereference fails.
+    ///
+    /// exe: FUN_00411610
+    #[must_use]
+    pub fn lookup(&self, name: &str) -> Option<ClassId> {
+        self.selected.get(name).copied()
+    }
+
+    /// Boundary descriptor resolution (`FUN_00410890`): `[...` keeps its
+    /// explicit array spelling (arrays own no records); `L...;` strips to
+    /// the bare name; anything else is a miss.
+    ///
+    /// exe: FUN_00410890
+    pub fn resolve_descriptor(&self, descriptor: &str) -> Option<ClassRef> {
+        if let Some(array) = ArrayDescriptor::new(descriptor) {
+            return Some(ClassRef::Array(array));
+        }
+        self.lookup(bare_name(descriptor)).map(ClassRef::Loaded)
+    }
+
+    /// Load-or-get (`FUN_00410890`): resolve the descriptor to the selected
+    /// record and project it. Callers needing the identity resolve once via
+    /// [`Loader::resolve_descriptor`] and retain the [`ClassId`].
+    ///
+    /// exe: FUN_00410890
+    pub fn get_or_missing(&self, descriptor: &str) -> Result<&Class, LoadError> {
+        match self.resolve_descriptor(descriptor) {
+            Some(ClassRef::Loaded(id)) => self
+                .class_by_id(id)
+                .ok_or_else(|| LoadError::NotFound(bare_name(descriptor).into())),
+            _ => Err(LoadError::NotFound(descriptor.into())),
+        }
+    }
+
+    /// Dereference an issued identity. A missing slot reports `None` here;
+    /// fallible execution paths use [`Loader::record_by_id`]. Either way
+    /// the name map is never consulted as a fallback.
+    #[must_use]
+    pub fn class_by_id(&self, id: ClassId) -> Option<&Class> {
+        self.records.get(id.index()).map(|record| &record.class)
+    }
+
+    /// Dereference an issued identity, failing closed without consulting
+    /// the name map.
+    fn record_by_id(&self, id: ClassId) -> Result<&ClassRecord, LoadError> {
+        self.records
+            .get(id.index())
+            .ok_or(LoadError::StaleId(id.get()))
+    }
+
+    /// Dotted-name projection through an identity (diagnostics, call logs,
+    /// native registry keys). Never a substitute identity.
+    #[must_use]
+    pub fn class_name(&self, id: ClassId) -> Option<&str> {
+        self.class_by_id(id).map(|class| class.name.as_str())
+    }
+
     /// Runtime Class::isInheritedFrom is distinct from405400's metadata
     /// conversion cost. Kinds must match and interface recursion is boolean.
+    /// The entry points resolve both names once; the walk below carries IDs.
     pub fn is_inherited_from(&self, from: &str, to: &str) -> Result<bool, LoadError> {
+        let from = self
+            .lookup(from)
+            .ok_or_else(|| LoadError::NotFound(from.into()))?;
+        let to = self
+            .lookup(to)
+            .ok_or_else(|| LoadError::NotFound(to.into()))?;
+        self.is_inherited_from_id(from, to)
+    }
+    /// ID-carrying `is_inherited_from`: each hierarchy step dereferences
+    /// its record by ID. Declared base/interface spellings resolve through
+    /// the current selection map at each step (the pre-installation dynamic
+    /// point per the binding-time evidence); an ID dereference never falls
+    /// back to a name lookup.
+    /// Reference form: arrays never inherit loaded records, so any array
+    /// side fails closed without fabricating a record.
+    /// exe: FUN_00405220
+    pub fn is_inherited_from_ref(&self, from: &ClassRef, to: &ClassRef) -> Result<bool, LoadError> {
+        match (from, to) {
+            (ClassRef::Loaded(from), ClassRef::Loaded(to)) => self.is_inherited_from_id(*from, *to),
+            _ => Ok(false),
+        }
+    }
+
+    /// ID-carrying `is_inherited_from` core: each hierarchy step
+    /// dereferences its record by ID.
+    pub fn is_inherited_from_id(&self, from: ClassId, to: ClassId) -> Result<bool, LoadError> {
         fn visit(
             loader: &Loader,
-            from: &str,
-            to: &str,
-            path: &mut std::collections::HashSet<String>,
+            from: ClassId,
+            to: ClassId,
+            path: &mut std::collections::HashSet<ClassId>,
         ) -> Result<bool, LoadError> {
-            if !path.insert(from.to_owned()) {
+            if !path.insert(from) {
                 return Err(LoadError::Malformed("cyclic runtime type graph".into()));
             }
-            let source = loader
-                .find(from)
-                .ok_or_else(|| LoadError::NotFound(from.into()))?;
-            let target = loader
-                .find(to)
-                .ok_or_else(|| LoadError::NotFound(to.into()))?;
-            let result = if source.kind != target.kind {
+            let source = loader.record_by_id(from)?;
+            let target = loader.record_by_id(to)?;
+            let result = if source.class.kind != target.class.kind {
                 false
             } else if from == to {
                 true
-            } else if source.kind == 0 {
-                if let Some(parent) = source.base.as_deref() {
-                    visit(loader, parent, to, path)?
-                } else {
-                    false
+            } else if source.class.kind == 0 {
+                match source.class.base.as_deref() {
+                    Some(parent) => {
+                        let parent = loader
+                            .lookup(parent)
+                            .ok_or_else(|| LoadError::NotFound(parent.into()))?;
+                        visit(loader, parent, to, path)?
+                    }
+                    None => false,
                 }
             } else {
                 let mut result = false;
-                for interface in source.interfaces.iter().rev() {
+                for interface in source.class.interfaces.iter().rev() {
+                    let interface = loader
+                        .lookup(interface)
+                        .ok_or_else(|| LoadError::NotFound(interface.into()))?;
                     if visit(loader, interface, to, path)? {
                         result = true;
                         break;
@@ -197,7 +423,7 @@ impl Loader {
                 }
                 result
             };
-            path.remove(from);
+            path.remove(&from);
             Ok(result)
         }
         visit(self, from, to, &mut Default::default())
@@ -205,27 +431,41 @@ impl Loader {
     /// Original405250's same-kind hierarchy cost. Interface recursion follows
     /// only the last parent and adds a boolean success value, preserving the
     /// observed false-positive compatibility of unrelated interface graphs.
+    /// Entry spellings resolve once; the walk below carries IDs.
     fn same_kind_cost(
         &self,
         from: &str,
         to: &str,
-        path: &mut std::collections::HashSet<String>,
+        path: &mut std::collections::HashSet<ClassId>,
     ) -> Result<i32, LoadError> {
-        if !path.insert(from.to_owned()) {
+        let from = self
+            .lookup(from)
+            .ok_or_else(|| LoadError::NotFound(from.into()))?;
+        let to = self
+            .lookup(to)
+            .ok_or_else(|| LoadError::NotFound(to.into()))?;
+        self.same_kind_cost_id(from, to, path)
+    }
+
+    /// ID-carrying `same_kind_cost`: hierarchy steps dereference records by
+    /// ID; declared spellings resolve through current selection at each step.
+    fn same_kind_cost_id(
+        &self,
+        from: ClassId,
+        to: ClassId,
+        path: &mut std::collections::HashSet<ClassId>,
+    ) -> Result<i32, LoadError> {
+        if !path.insert(from) {
             return Err(LoadError::Malformed("cyclic type graph".into()));
         }
-        let source = self
-            .find(from)
-            .ok_or_else(|| LoadError::NotFound(from.into()))?;
-        let target = self
-            .find(to)
-            .ok_or_else(|| LoadError::NotFound(to.into()))?;
-        let result = if source.kind != target.kind {
+        let source = self.record_by_id(from)?;
+        let target = self.record_by_id(to)?;
+        let result = if source.class.kind != target.class.kind {
             -1
         } else if from == to {
             0
-        } else if source.kind == 0 {
-            let mut cursor = source.base.as_deref();
+        } else if source.class.kind == 0 {
+            let mut cursor = source.class.base.as_deref();
             let mut depth = 1;
             let mut visited = std::collections::HashSet::new();
             let mut result = -1;
@@ -233,69 +473,102 @@ impl Loader {
                 if !visited.insert(name) {
                     return Err(LoadError::Malformed("cyclic superclass graph".into()));
                 }
-                if name == to {
+                if self.lookup(name) == Some(to) {
                     result = 100 + depth;
                     break;
                 }
-                cursor = self
-                    .find(name)
-                    .ok_or_else(|| LoadError::NotFound(name.into()))?
-                    .base
-                    .as_deref();
+                let next = self
+                    .lookup(name)
+                    .ok_or_else(|| LoadError::NotFound(name.into()))?;
+                cursor = self.record_by_id(next)?.class.base.as_deref();
                 depth += 1;
             }
             result
-        } else if let Some(parent) = source.interfaces.last() {
-            if parent == to {
+        } else if let Some(parent) = source.class.interfaces.last() {
+            let parent_id = self
+                .lookup(parent)
+                .ok_or_else(|| LoadError::NotFound(parent.clone()))?;
+            if parent_id == to {
                 1
             } else {
-                1 + i32::from(self.same_kind_cost(parent, to, path)? >= 0)
+                1 + i32::from(self.same_kind_cost_id(parent_id, to, path)? >= 0)
             }
         } else {
             -1
         };
-        path.remove(from);
+        path.remove(&from);
         Ok(result)
     }
 
     /// Loaded metadata's405400 conversion distance. This deliberately retains
     /// the original interface-to-class mismatch return0 and class-to-interface
     /// implementation cost0; it is not Java subtype ranking.
+    /// Entry spellings resolve once; the walk below carries IDs.
     pub fn class_conversion_cost(&self, from: &str, to: &str) -> Result<i32, LoadError> {
-        let source = self
-            .find(from)
+        let from = self
+            .lookup(from)
             .ok_or_else(|| LoadError::NotFound(from.into()))?;
-        let target = self
-            .find(to)
+        let to = self
+            .lookup(to)
             .ok_or_else(|| LoadError::NotFound(to.into()))?;
-        if source.kind == target.kind {
-            return self.same_kind_cost(from, to, &mut Default::default());
+        self.class_conversion_cost_id(from, to)
+    }
+
+    /// ID-carrying `class_conversion_cost`.
+    pub fn class_conversion_cost_id(&self, from: ClassId, to: ClassId) -> Result<i32, LoadError> {
+        let source = self.record_by_id(from)?;
+        let target = self.record_by_id(to)?;
+        if source.class.kind == target.class.kind {
+            return self.same_kind_cost_id(from, to, &mut Default::default());
         }
-        if source.kind != 0 {
+        if source.class.kind != 0 {
             return Ok(0);
         }
-        if target.kind != 1 {
+        if target.class.kind != 1 {
             return Ok(-1);
         }
         let mut cursor = Some(from);
         let mut visited = std::collections::HashSet::new();
-        while let Some(name) = cursor {
-            if !visited.insert(name) {
+        while let Some(current) = cursor {
+            if !visited.insert(current) {
                 return Err(LoadError::Malformed("cyclic implementation graph".into()));
             }
-            let class = self
-                .find(name)
-                .ok_or_else(|| LoadError::NotFound(name.into()))?;
-            for interface in class.interfaces.iter().rev() {
-                if interface == to
-                    || self.same_kind_cost(interface, to, &mut Default::default())? >= 0
+            let class = self.record_by_id(current)?;
+            for interface in class.class.interfaces.iter().rev() {
+                let interface_id = self
+                    .lookup(interface)
+                    .ok_or_else(|| LoadError::NotFound(interface.clone()))?;
+                if interface_id == to
+                    || self.same_kind_cost_id(interface_id, to, &mut Default::default())? >= 0
                 {
                     return Ok(0);
                 }
             }
-            cursor = class.base.as_deref();
+            cursor = match class.class.base.as_deref() {
+                Some(parent) => Some(
+                    self.lookup(parent)
+                        .ok_or_else(|| LoadError::NotFound(parent.into()))?,
+                ),
+                None => None,
+            };
         }
         Ok(-1)
+    }
+
+    /// Assignability over an opaque runtime reference: loaded records use
+    /// the ID-carrying cost; arrays (which own no records) never convert.
+    /// Null and same-descriptor cases stay with the caller, as before.
+    #[must_use]
+    pub fn is_assignable_ref(&self, from: &ClassRef, to: &str) -> bool {
+        match from {
+            ClassRef::Loaded(from) => match self.resolve_descriptor(to) {
+                Some(ClassRef::Loaded(to)) => self
+                    .class_conversion_cost_id(*from, to)
+                    .is_ok_and(|cost| cost >= 0),
+                _ => false,
+            },
+            ClassRef::Array(_) => false,
+        }
     }
 
     /// 417c30's directional descriptor cost, used by overload signatures.
@@ -331,16 +604,42 @@ impl Loader {
     /// Search static then instance vectors in reverse, derived to base. A zero
     /// score breaks only its vector; the last tested score controls traversal
     /// to the next owner, as in405920. Return descriptors do not rank methods.
+    /// The entry spelling resolves once; all owner steps below carry IDs.
+    /// Callers needing the defining identity retain [`MethodMatchId`] via
+    /// [`Loader::resolve_overload_id`]; this name form projects it.
     pub fn resolve_overload(
         &self,
         class: &str,
         name: &str,
         actual: &[crate::values::TypeTag],
     ) -> Result<Option<MethodMatch<'_>>, LoadError> {
+        let id = self
+            .lookup(class)
+            .ok_or_else(|| LoadError::NotFound(class.into()))?;
+        let selected = self.resolve_overload_id(id, name, actual)?;
+        Ok(selected.map(|matched| MethodMatch {
+            method: matched.method,
+            defining: self
+                .class_name(matched.defining)
+                .expect("resolved owner holds a record"),
+            index: matched.index,
+            ambiguous: matched.ambiguous,
+        }))
+    }
+
+    /// ID-carrying `resolve_overload`: the receiver-owner walk and the
+    /// inherited-index walk both dereference records by ID. Base spellings
+    /// resolve through current selection at each step.
+    pub fn resolve_overload_id(
+        &self,
+        class: ClassId,
+        name: &str,
+        actual: &[crate::values::TypeTag],
+    ) -> Result<Option<MethodMatchId<'_>>, LoadError> {
         let mut cursor = Some(class);
         let mut best = 1_000_000;
         let mut last = -1;
-        let mut selected: Option<(&Method, &str, usize)> = None;
+        let mut selected: Option<(&Method, ClassId, usize)> = None;
         let mut tie = None;
         let mut visited = std::collections::HashSet::new();
         while let Some(owner) = cursor {
@@ -350,9 +649,7 @@ impl Loader {
             if !visited.insert(owner) {
                 return Err(LoadError::Malformed("cyclic method graph".into()));
             }
-            let class = self
-                .find(owner)
-                .ok_or_else(|| LoadError::NotFound(owner.into()))?;
+            let class = &self.record_by_id(owner)?.class;
             for static_vector in [true, false] {
                 let candidates = class
                     .methods
@@ -382,42 +679,59 @@ impl Loader {
                     };
                     if last == 0 {
                         best = 0;
-                        selected = Some((method, class.name.as_str(), index));
+                        selected = Some((method, owner, index));
                         break;
                     }
                     if last >= 0 {
                         if last < best {
                             best = last;
-                            selected = Some((method, class.name.as_str(), index))
+                            selected = Some((method, owner, index))
                         } else if last == best {
-                            tie = Some((last, class.name.as_str()));
+                            tie = Some((last, owner));
                         }
                     }
                 }
             }
-            cursor = class.base.as_deref();
+            cursor = match class.base.as_deref() {
+                Some(parent) => Some(
+                    self.lookup(parent)
+                        .ok_or_else(|| LoadError::NotFound(parent.into()))?,
+                ),
+                None => None,
+            };
         }
         let Some((method, defining, index)) = selected else {
             return Ok(None);
         };
         let mut inherited = index as u32;
-        let mut cursor = self.find(defining).and_then(|class| class.base.as_deref());
+        let mut cursor = match self.record_by_id(defining)?.class.base.as_deref() {
+            Some(parent) => Some(
+                self.lookup(parent)
+                    .ok_or_else(|| LoadError::NotFound(parent.into()))?,
+            ),
+            None => None,
+        };
         let mut visited = std::collections::HashSet::new();
         while let Some(owner) = cursor {
             if !visited.insert(owner) {
                 return Err(LoadError::Malformed("cyclic method index graph".into()));
             }
-            let class = self
-                .find(owner)
-                .ok_or_else(|| LoadError::NotFound(owner.into()))?;
-            inherited += class
+            let record = self.record_by_id(owner)?;
+            inherited += record
+                .class
                 .methods
                 .iter()
                 .filter(|m| m.static_vector == method.static_vector)
                 .count() as u32;
-            cursor = class.base.as_deref();
+            cursor = match record.class.base.as_deref() {
+                Some(parent) => Some(
+                    self.lookup(parent)
+                        .ok_or_else(|| LoadError::NotFound(parent.into()))?,
+                ),
+                None => None,
+            };
         }
-        Ok(Some(MethodMatch {
+        Ok(Some(MethodMatchId {
             method,
             defining,
             index: inherited | if method.static_vector { 0x4000_0000 } else { 0 },
@@ -456,107 +770,217 @@ impl Loader {
         &self.packages
     }
 
-    /// Number of loaded classes.
+    /// Number of loaded class records.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.classes.len()
+        self.records.len()
+    }
+
+    /// Number of distinct names with a selected record. Equal to [`Loader::len`]
+    /// while production duplicate registration stays rejected.
+    #[must_use]
+    pub fn unique_name_count(&self) -> usize {
+        self.selected.len()
     }
 
     /// `true` when no class is loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.classes.is_empty()
+        self.records.is_empty()
     }
 
-    /// Look up a loaded class (`FUN_00411610` hit path).
+    /// Boundary lookup of a loaded class by name (`FUN_00411610` hit path).
+    /// Resolves once at the interface; callers retain the ID for execution.
     ///
     /// exe: FUN_00411610
     #[must_use]
     pub fn find(&self, name: &str) -> Option<&Class> {
-        self.classes.get(name)
+        let id = self.selected.get(name)?;
+        self.records.get(id.index()).map(|record| &record.class)
+    }
+
+    /// ID dereference of a loaded class. Never consults the name map.
+    #[must_use]
+    pub fn find_by_id(&self, id: ClassId) -> Option<&Class> {
+        self.class_by_id(id)
+    }
+
+    /// Names of every loaded record in registration order (diagnostics).
+    pub fn record_names(&self) -> Vec<&str> {
+        self.records
+            .iter()
+            .map(|record| record.class.name.as_str())
+            .collect()
     }
 
     /// Insert a linked class directly (test seam for synthetic classes;
     /// production code uses [`Loader::load_module`]). Identical installation
     /// is idempotent; conflicting replacement panics before changing live IDs.
-    pub fn insert_test_class(&mut self, class: Class) {
-        let name = class.name.clone();
-        if let Some(existing) = self.classes.get(&name) {
-            assert_eq!(existing, &class, "cannot replace an installed class");
-            return;
+    /// Returns the issued record identity.
+    pub fn insert_test_class(&mut self, mut class: Class) -> ClassId {
+        if let Some(existing) = self.selected.get(&class.name) {
+            let record = &self.records[existing.index()];
+            assert_eq!(&record.class, &class, "cannot replace an installed class");
+            assert!(
+                record.field_initializers.is_empty() && record.body_slots.is_empty()
+                    || !class.bodies.is_empty()
+                    || record.class.bodies == class.bodies,
+                "cannot replace an installed class"
+            );
+            return *existing;
         }
-        if !self.contexts.contains(&name) {
-            self.contexts.push(name.clone());
+        if class.base_id.is_none() {
+            class.base_id = class
+                .base
+                .as_deref()
+                .and_then(|base| self.selected.get(base))
+                .copied();
         }
-        for index in 0..class.bodies.len() {
-            self.body_owners.push((name.clone(), index));
+        let id = ClassId::from_index(self.records.len());
+        let mut slots = Vec::with_capacity(class.bodies.len());
+        for _ in 0..class.bodies.len() {
+            slots.push(self.body_owners.len() as u32);
+            self.body_owners.push(id);
         }
-        self.classes.insert(name, class);
+        self.records.push(ClassRecord {
+            class: class.clone(),
+            pool: Vec::new(),
+            field_initializers: Vec::new(),
+            body_slots: slots,
+        });
+        self.selected.insert(class.name, id);
+        id
     }
 
     /// Stable loaded-class context used by interpreter activation frames.
+    /// The word is the [`ClassId`] encoding; decoding must go through
+    /// [`Loader::context_id`], never through a name re-lookup.
     pub fn context_word(&self, class: &str) -> Option<u32> {
-        self.contexts
-            .iter()
-            .position(|name| name == class)
-            .map(|index| index as u32 + 1)
+        self.selected.get(class).map(|id| id.get())
     }
 
-    /// Class owning an activation-frame context.
+    /// Identity behind an activation-frame context word (0 is not a class).
+    pub fn context_id(&self, context: u32) -> Option<ClassId> {
+        let id = ClassId::from_raw(context)?;
+        self.records.get(id.index()).map(|_| id)
+    }
+
+    /// Class owning an activation-frame context. A boundary projection for
+    /// diagnostics; execution carries the [`ClassId`] from
+    /// [`Loader::context_id`] instead of re-resolving this name.
     pub fn context_name(&self, context: u32) -> Option<&str> {
-        self.contexts
-            .get(context.checked_sub(1)? as usize)
-            .map(String::as_str)
+        let id = ClassId::from_raw(context)?;
+        self.records
+            .get(id.index())
+            .map(|record| record.class.name.as_str())
     }
 
-    /// Map a class-local TREE index to its executable body identity.
+    /// Map a class-local TREE index to its executable body identity. The
+    /// name form resolves once at the boundary; execution retains the ID.
     pub fn body_id(&self, class: &str, index: usize) -> Option<crate::interp::BodyId> {
-        self.body_owners
-            .iter()
-            .position(|(owner, local)| owner == class && *local == index)
-            .map(|index| crate::interp::BodyId(index as u32))
+        let id = self.selected.get(class)?;
+        self.body_id_of(*id, index)
     }
 
-    /// Loaded TREE bytes. Body IDs retain their owning constant pool.
+    /// ID-owned form of [`Loader::body_id`]: identity comes from the caller,
+    /// never from a name lookup.
+    pub fn body_id_of(&self, owner: ClassId, index: usize) -> Option<crate::interp::BodyId> {
+        self.records
+            .get(owner.index())?
+            .body_slots
+            .get(index)
+            .map(|slot| crate::interp::BodyId(*slot))
+    }
+
+    /// Loaded TREE bytes. Body IDs retain their owning record (and its pool);
+    /// no name lookup is consulted.
     pub fn body(&self, id: crate::interp::BodyId) -> Option<&[slr_fmt_tufa::Node]> {
-        let (class, index) = self.body_owners.get(id.0 as usize)?;
-        self.classes
-            .get(class)?
-            .bodies
-            .get(*index)
-            .map(Vec::as_slice)
+        let owner = *self.body_owners.get(id.0 as usize)?;
+        let record = self.records.get(owner.index())?;
+        let local = record.body_slots.iter().position(|slot| *slot == id.0)?;
+        record.class.bodies.get(local).map(Vec::as_slice)
     }
 
-    /// Owner of a loaded TREE body.
+    /// Owner of a loaded TREE body. Returns the identity; name projections
+    /// use [`Loader::class_name`].
+    pub fn body_owner(&self, id: crate::interp::BodyId) -> Option<ClassId> {
+        self.body_owners.get(id.0 as usize).copied()
+    }
+
+    /// Owner of a loaded TREE body, projected to its dotted name for
+    /// diagnostics and legacy boundary callers.
     pub fn body_class(&self, id: crate::interp::BodyId) -> Option<&str> {
-        self.body_owners
-            .get(id.0 as usize)
-            .map(|(class, _)| class.as_str())
+        let owner = self.body_owner(id)?;
+        self.class_name(owner)
     }
 
-    /// Constant pool retained from the owning TUFA module.
+    /// Constant pool retained from the owning TUFA module. The name form
+    /// resolves once at the boundary; execution retains the ID.
     pub fn pool(&self, class: &str) -> Option<&[PoolEntry]> {
-        self.pools.get(class).map(Vec::as_slice)
+        let id = self.selected.get(class)?;
+        self.pool_of(*id)
     }
 
-    /// Preserve each FILD record's optional TREE initializer index.
+    /// ID-owned pool access: no name lookup is consulted.
+    pub fn pool_of(&self, owner: ClassId) -> Option<&[PoolEntry]> {
+        self.records
+            .get(owner.index())
+            .map(|record| record.pool.as_slice())
+    }
+
+    /// Preserve each FILD record's optional TREE initializer index. The
+    /// `Field` form matches by (owner ID, declared index) and never by
+    /// `Field` equality; the initializer stays owned by the same record.
     pub fn field_initializer(&self, field: &Field) -> Option<crate::interp::BodyId> {
-        let index = self
-            .find(&field.class)?
+        let owner = self.lookup(&field.class)?;
+        let record = self.records.get(owner.index())?;
+        let index = record
+            .class
             .fields
             .iter()
             .position(|candidate| candidate == field)?;
-        let local = (*self.field_initializers.get(&field.class)?.get(index)?)?;
-        self.body_id(&field.class, local)
+        let local = (*record.field_initializers.get(index)?)?;
+        self.body_id_of(owner, local)
+    }
+
+    /// ID-owned initializer lookup: `(owner, declared field index)` to body.
+    /// Base-first layout callers pin the exact declaring record this way.
+    pub fn field_initializer_of(
+        &self,
+        owner: ClassId,
+        field_index: usize,
+    ) -> Option<crate::interp::BodyId> {
+        let record = self.records.get(owner.index())?;
+        let local = (*record.field_initializers.get(field_index)?)?;
+        self.body_id_of(owner, local)
+    }
+
+    /// Declared field index within its owning record (layout probing).
+    pub fn field_index_of(&self, owner: ClassId, field_index: usize) -> Option<&Field> {
+        self.records
+            .get(owner.index())?
+            .class
+            .fields
+            .get(field_index)
     }
 
     /// Read exact type0 constant bytes for a String literal (406140).
     /// Other pool kinds return null as406140 does. Class indirection belongs
-    /// to metadata lookup, not literal byte access.
+    /// to metadata lookup, not literal byte access. The name form resolves
+    /// once at the boundary; execution retains the ID via [`Loader::pool_bytes_of`].
     /// exe: FUN_00406140
     pub fn pool_bytes(&self, class: &str, index: u32) -> Result<Option<&[u8]>, LoadError> {
+        let owner = self
+            .lookup(class)
+            .ok_or(LoadError::BadIndex("literal pool"))?;
+        self.pool_bytes_of(owner, index)
+    }
+
+    /// ID-owned literal bytes: no name lookup is consulted.
+    /// exe: FUN_00406140
+    pub fn pool_bytes_of(&self, owner: ClassId, index: u32) -> Result<Option<&[u8]>, LoadError> {
         let pool = self
-            .pool(class)
+            .pool_of(owner)
             .ok_or(LoadError::BadIndex("literal pool"))?;
         if (index as i32) < 0 {
             return Ok(None);
@@ -573,90 +997,126 @@ impl Loader {
 
     /// Read UTF-8 metadata, following explicit Class records by pool index.
     /// Raw string payloads cannot become metadata through replacement text.
-    pub fn pool_text(&self, class: &str, mut index: u32) -> Result<&str, LoadError> {
-        let pool = self.pool(class).ok_or(LoadError::BadIndex("pool"))?;
-        let mut visited = std::collections::HashSet::new();
-        loop {
-            if !visited.insert(index) {
-                return Err(LoadError::BadIndex("pool cycle"));
-            }
-            match pool.get(index as usize) {
-                Some(PoolEntry::Str(text)) => return Ok(text),
-                Some(PoolEntry::Class(next)) => index = *next,
-                _ => return Err(LoadError::BadIndex("pool string")),
-            }
-        }
+    /// The name form resolves once at the boundary; execution retains the ID.
+    pub fn pool_text(&self, class: &str, index: u32) -> Result<&str, LoadError> {
+        let owner = self.lookup(class).ok_or(LoadError::BadIndex("pool"))?;
+        let pool = self.pool_of(owner).ok_or(LoadError::BadIndex("pool"))?;
+        pool_text_at(pool, index)
+    }
+
+    /// ID-owned metadata read: no name lookup is consulted.
+    pub fn pool_text_of(&self, owner: ClassId, index: u32) -> Result<&str, LoadError> {
+        let pool = self.pool_of(owner).ok_or(LoadError::BadIndex("pool"))?;
+        pool_text_at(pool, index)
     }
 
     /// Decode a field reference's class and NameType name/type descriptors.
+    /// The name form resolves once at the boundary; execution retains the ID.
     /// exe: FUN_00406d00
     pub fn field_reference(
         &self,
         owner: &str,
         index: u32,
     ) -> Result<(&str, &str, &str), LoadError> {
-        let pool = self.pool(owner).ok_or(LoadError::BadIndex("pool"))?;
+        let owner = self.lookup(owner).ok_or(LoadError::BadIndex("pool"))?;
+        self.field_reference_of(owner, index)
+    }
+
+    /// ID-owned field reference decode: no name lookup is consulted.
+    /// exe: FUN_00406d00
+    pub fn field_reference_of(
+        &self,
+        owner: ClassId,
+        index: u32,
+    ) -> Result<(&str, &str, &str), LoadError> {
+        let pool = self.pool_of(owner).ok_or(LoadError::BadIndex("pool"))?;
         let Some(PoolEntry::Type5 { a, b }) = pool.get(index as usize) else {
             return Err(LoadError::BadIndex("field ref"));
         };
         let Some(PoolEntry::Type7 { a: name, b: ty }) = pool.get(*b as usize) else {
             return Err(LoadError::BadIndex("name type"));
         };
+        let (a, name, ty) = (*a, *name, *ty);
         Ok((
-            self.pool_text(owner, *a)?,
-            self.pool_text(owner, *name)?,
-            self.pool_text(owner, *ty)?,
+            pool_text_at(pool, a)?,
+            pool_text_at(pool, name)?,
+            pool_text_at(pool, ty)?,
         ))
     }
 
     /// Install a decoded body and pool in an already linked class. This is
     /// also the data-free embedding seam for interpreter programs.
+    /// The owning record keeps the body; the returned ID is stable.
     pub fn add_body(
         &mut self,
         class: &str,
         nodes: Vec<slr_fmt_tufa::Node>,
         pool: Vec<PoolEntry>,
     ) -> Result<crate::interp::BodyId, LoadError> {
-        let loaded = self
-            .classes
-            .get_mut(class)
+        let owner = self
+            .lookup(class)
             .ok_or_else(|| LoadError::NotFound(class.to_owned()))?;
-        if self
-            .pools
-            .get(class)
-            .is_some_and(|existing| !same_pool(existing, &pool))
-        {
-            return Err(LoadError::Malformed(format!(
-                "conflicting pool for {class}"
-            )));
-        }
-        let index = loaded.bodies.len();
-        loaded.bodies.push(nodes);
-        self.pools.entry(class.to_owned()).or_insert(pool);
-        let id = crate::interp::BodyId(self.body_owners.len() as u32);
-        self.body_owners.push((class.to_owned(), index));
-        Ok(id)
+        self.add_body_to(owner, nodes, pool)
     }
 
-    /// Load-or-get (`FUN_00410890`): `[...` goes to the array path (open:
-    /// arrays are not modelled, reported as [`LoadError::NotFound`]);
-    /// `L...;` strips to the bare name; a loaded class hits; otherwise the
-    /// miss must be resolved from a file by the caller
-    /// ([`Loader::load_module`]).
-    ///
-    /// exe: FUN_00410890
-    pub fn get_or_missing(&self, descriptor: &str) -> Result<&Class, LoadError> {
-        let name = bare_name(descriptor);
-        self.classes
-            .get(name)
-            .ok_or_else(|| LoadError::NotFound(name.to_owned()))
+    /// ID-owned body installation: appends to the record's own bodies and
+    /// mints a fresh global body slot for it.
+    pub fn add_body_to(
+        &mut self,
+        owner: ClassId,
+        nodes: Vec<slr_fmt_tufa::Node>,
+        pool: Vec<PoolEntry>,
+    ) -> Result<crate::interp::BodyId, LoadError> {
+        let record = self
+            .records
+            .get_mut(owner.index())
+            .ok_or(LoadError::StaleId(owner.get()))?;
+        if !record.pool.is_empty() && !same_pool(&record.pool, &pool) {
+            let name = record.class.name.clone();
+            return Err(LoadError::Malformed(format!("conflicting pool for {name}")));
+        }
+        if record.pool.is_empty() {
+            // Parsed records always install their pool at registration; an
+            // empty pool here means a synthetic test record whose pool
+            // arrives with its first embedded body. Take the first pool
+            // offered (the previous `or_insert` behavior).
+            record.pool = pool;
+        }
+        record.class.bodies.push(nodes);
+        let slot = self.body_owners.len() as u32;
+        self.body_owners.push(owner);
+        record.body_slots.push(slot);
+        Ok(crate::interp::BodyId(slot))
     }
 
     /// Link one parsed module: `CONS` strings, `FILD`/`MTHD` records,
     /// `CLSS` hierarchy, `TREE` bodies (`FUN_00411b20` case order).
+    /// Registers the record in order and returns its identity with the name.
     ///
     /// exe: FUN_00411b20
-    pub fn load_module(&mut self, module: &Module, data: &[u8]) -> Result<String, LoadError> {
+    pub fn load_module(
+        &mut self,
+        module: &Module,
+        data: &[u8],
+    ) -> Result<(ClassId, String), LoadError> {
+        let (id, name) = self.register_module(module, data)?;
+        Ok((id, name))
+    }
+
+    /// Compatibility boundary: link one parsed module and project the name.
+    /// New callers needing the identity use [`Loader::load_module`]'s ID.
+    ///
+    /// exe: FUN_00411b20
+    pub fn load_module_named(&mut self, module: &Module, data: &[u8]) -> Result<String, LoadError> {
+        Ok(self.register_module(module, data)?.1)
+    }
+
+    /// Register one parsed module as its own arena record.
+    fn register_module(
+        &mut self,
+        module: &Module,
+        data: &[u8],
+    ) -> Result<(ClassId, String), LoadError> {
         let pool = module
             .pool(data)
             .map_err(|e| LoadError::Malformed(e.to_string()))?;
@@ -705,60 +1165,113 @@ impl Loader {
             })
             .transpose()?
             .unwrap_or_default();
+        let base_id = base
+            .as_deref()
+            .and_then(|base| self.selected.get(base))
+            .copied();
         let linked = Class {
             kind: class_rec.head[1],
             name: name.clone(),
             base,
+            base_id,
             interfaces,
             methods,
             fields,
             bodies,
         };
-        if let Some(existing) = self.classes.get(&name) {
-            if existing == &linked
-                && self
-                    .pools
-                    .get(&name)
-                    .is_some_and(|old| same_pool(old, &pool))
-                && self.field_initializers.get(&name) == Some(&initializers)
+        // Production duplicate-name registration stays rejected in this
+        // slice: an identical repeat hits the selected record (idempotent),
+        // anything else fails before any record, selection or body identity
+        // is created. The duplicate-cache topology of step 6 plugs in here.
+        if let Some(existing) = self.selected.get(&name).copied() {
+            let record = &self.records[existing.index()];
+            if record.class == linked
+                && same_pool(&record.pool, &pool)
+                && record.field_initializers == initializers
             {
-                return Ok(name);
+                return Ok((existing, name));
             }
             return Err(LoadError::Malformed(format!("conflicting class {name}")));
         }
-        self.field_initializers.insert(name.clone(), initializers);
-        self.pools.insert(name.clone(), pool);
-        self.insert_test_class(linked);
-        Ok(name)
+        let id = ClassId::from_index(self.records.len());
+        let mut slots = Vec::with_capacity(linked.bodies.len());
+        for _ in 0..linked.bodies.len() {
+            slots.push(self.body_owners.len() as u32);
+            self.body_owners.push(id);
+        }
+        self.records.push(ClassRecord {
+            class: linked,
+            pool,
+            field_initializers: initializers,
+            body_slots: slots,
+        });
+        self.selected.insert(name.clone(), id);
+        Ok((id, name))
     }
 
     /// Load every module of one `.class` file (`FUN_00410430` over the
-    /// `TUFA`-split modules of [`slr_fmt_tufa::parse`]).
+    /// `TUFA`-split modules of [`slr_fmt_tufa::parse`]). Returns record
+    /// identities in module order; the file's returned class is the newly
+    /// parsed file's first class (the caller's `modules[0]` selection).
     ///
     /// exe: FUN_00410430
-    pub fn load_file(&mut self, data: &[u8]) -> Result<Vec<String>, LoadError> {
+    pub fn load_file(&mut self, data: &[u8]) -> Result<Vec<(ClassId, String)>, LoadError> {
         let modules = slr_fmt_tufa::parse(data).map_err(|e| LoadError::Malformed(e.to_string()))?;
-        modules.iter().map(|m| self.load_module(m, data)).collect()
+        modules
+            .iter()
+            .map(|m| self.register_module(m, data))
+            .collect()
     }
 
-    /// Resolve `(class, name, sig)` to `(method, defining class)` walking
+    /// Compatibility boundary: load a file and project names.
+    ///
+    /// exe: FUN_00410430
+    pub fn load_file_named(&mut self, data: &[u8]) -> Result<Vec<String>, LoadError> {
+        Ok(self
+            .load_file(data)?
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect())
+    }
+
+    /// Resolve `(class, name, sig)` to `(method, defining record)` walking
     /// the superclass chain (`FUN_00404910` + `FUN_00404d40` shape: exact
-    /// name+sig match, inherited methods visible).
+    /// name+sig match, inherited methods visible). The entry spelling
+    /// resolves once; the walk below carries IDs.
     ///
     /// exe: FUN_00404910
     #[must_use]
     pub fn resolve_method(&self, class: &str, name: &str, sig: &str) -> Option<(&Method, String)> {
-        let mut cursor = Some(class.to_owned());
-        while let Some(cname) = cursor {
-            let class = self.classes.get(&cname)?;
-            if let Some(m) = class
+        let id = self.lookup(class)?;
+        let (method, defining) = self.resolve_method_id(id, name, sig)?;
+        Some((method, self.class_name(defining)?.to_owned()))
+    }
+
+    /// ID-carrying method resolution: owner steps dereference records by ID.
+    ///
+    /// exe: FUN_00404910
+    #[must_use]
+    pub fn resolve_method_id(
+        &self,
+        class: ClassId,
+        name: &str,
+        sig: &str,
+    ) -> Option<(&Method, ClassId)> {
+        let mut cursor = Some(class);
+        while let Some(owner) = cursor {
+            let record = self.records.get(owner.index())?;
+            if let Some(m) = record
+                .class
                 .methods
                 .iter()
                 .find(|m| m.name == name && m.sig == sig)
             {
-                return Some((m, cname));
+                return Some((m, owner));
             }
-            cursor = class.base.clone();
+            cursor = match record.class.base.as_deref() {
+                Some(parent) => Some(self.lookup(parent)?),
+                None => None,
+            };
         }
         None
     }
@@ -773,6 +1286,22 @@ impl Loader {
     pub fn is_assignable(&self, from: &str, to: &str) -> bool {
         self.class_conversion_cost(from, to)
             .is_ok_and(|cost| cost >= 0)
+    }
+}
+
+/// Read UTF-8 metadata from an owned pool, following explicit Class records.
+/// Raw string payloads cannot become metadata through replacement text.
+fn pool_text_at(pool: &[PoolEntry], mut index: u32) -> Result<&str, LoadError> {
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(index) {
+            return Err(LoadError::BadIndex("pool cycle"));
+        }
+        match pool.get(index as usize) {
+            Some(PoolEntry::Str(text)) => return Ok(text),
+            Some(PoolEntry::Class(next)) => index = *next,
+            _ => return Err(LoadError::BadIndex("pool string")),
+        }
     }
 }
 
@@ -1075,8 +1604,18 @@ mod tests {
         let (module, data) = tiny_module(pool, methods, fields);
         let mut l = Loader::new();
         l.boot();
-        let name = l.load_module(&module, &data).expect("links");
+        let (id, name) = l.load_module(&module, &data).expect("links");
         assert_eq!(name, "game.Widget");
+        assert_eq!(l.class_name(id), Some("game.Widget"));
+        assert_eq!(l.lookup("game.Widget"), Some(id));
+        assert_eq!(l.context_word("game.Widget"), Some(id.get()));
+        assert_eq!(l.context_id(id.get()), Some(id));
+        assert_eq!(l.body_id_of(id, 0), l.body_id("game.Widget", 0));
+        assert_eq!(
+            l.class_name(l.body_owner(l.body_id("game.Widget", 0).unwrap()).unwrap()),
+            Some("game.Widget")
+        );
+        assert!(l.pool_of(id).is_some());
         let c = l.find("game.Widget").expect("loaded");
         assert_eq!(c.base.as_deref(), Some("java.lang.Object"));
         assert_eq!(c.methods.len(), 2);
@@ -1087,9 +1626,40 @@ mod tests {
         assert_eq!(c.fields[0].name, "count");
         assert_eq!(c.fields[0].ty, "I");
         assert!(!c.fields[0].is_static);
-        // L...; lookup strips to the bare name.
-        assert!(l.get_or_missing("Lgame.Widget;").is_ok());
-        assert!(l.get_or_missing("Lgame.Missing;").is_err());
+        // L...; lookup strips to the bare name; arrays keep explicit spelling.
+        assert!(matches!(
+            l.resolve_descriptor("Lgame.Widget;"),
+            Some(ClassRef::Loaded(found)) if found == id
+        ));
+        assert!(l.resolve_descriptor("Lgame.Missing;").is_none());
+        assert!(matches!(
+            l.resolve_descriptor("[I"),
+            Some(ClassRef::Array(_))
+        ));
+    }
+
+    #[test]
+    fn stable_identifiers_survive_name_lookup_perturbation() {
+        // Per-plan step A: pin that body/pool/owner dereference goes through
+        // the retained ID, not the current name selection. A later slice
+        // adds overlapping duplicate records; this test characterizes the
+        // internal ID dereference so the perturbation bites there.
+        let (module, data) = tiny_module(sample_pool(), vec![[1u32, 4, 5, 0, 2]], vec![]);
+        let mut loader = Loader::new();
+        let (id, _) = loader.load_module(&module, &data).unwrap();
+        let body = loader.body_id_of(id, 0).unwrap();
+        assert_eq!(loader.body_owner(body), Some(id));
+        assert!(loader.body(body).is_some());
+        assert!(loader.pool_of(id).is_some());
+        assert_eq!(loader.pool_text_of(id, 0).unwrap(), "game.Widget");
+        // Mutating the name->ID selection path must change `find` results.
+        // (Corrupt the selection map the way an overlap would; the record
+        // itself stays intact.) This assertion documents the boundary: the
+        // ID dereference below must keep working after the name rebinding
+        // that step 6 will introduce.
+        let stale = loader.lookup("game.Widget").unwrap();
+        assert_eq!(stale, id);
+        assert!(loader.find_by_id(id).is_some());
     }
 
     #[test]
@@ -1103,25 +1673,35 @@ mod tests {
         assert!(loader.find("game.Widget").is_none());
         assert!(loader.pool("game.Widget").is_none());
         assert!(loader.context_word("game.Widget").is_none());
+        assert_eq!(loader.len(), 0);
     }
 
     #[test]
     fn class_reload_is_idempotent_and_conflicts_leave_existing_metadata_unchanged() {
         let (module, data) = tiny_module(sample_pool(), vec![], vec![[0, 3, 2, u32::MAX]]);
         let mut loader = Loader::new();
-        loader.load_module(&module, &data).unwrap();
+        let (id, _) = loader.load_module(&module, &data).unwrap();
         let context = loader.context_word("game.Widget").unwrap();
+        assert_eq!(context, id.get());
         let body = loader.body_id("game.Widget", 0).unwrap();
-        loader.load_module(&module, &data).unwrap();
+        let (again, _) = loader.load_module(&module, &data).unwrap();
+        assert_eq!(again, id);
+        assert_eq!(loader.lookup("game.Widget"), Some(id));
+        assert_eq!(loader.len(), 1);
+        assert_eq!(loader.unique_name_count(), 1);
         assert_eq!(loader.context_word("game.Widget"), Some(context));
         assert_eq!(loader.body_id("game.Widget", 0), Some(body));
+        assert_eq!(loader.body_owner(body), Some(id));
         let mut pool = sample_pool();
         pool[3] = PoolEntry::Str("different".into());
         let (replacement, replacement_data) = tiny_module(pool, vec![], vec![[0, 3, 2, u32::MAX]]);
         assert!(loader.load_module(&replacement, &replacement_data).is_err());
+        assert_eq!(loader.len(), 1);
         assert_eq!(loader.pool_text("game.Widget", 3).unwrap(), "count");
+        assert_eq!(loader.pool_text_of(id, 3).unwrap(), "count");
         assert_eq!(loader.find("game.Widget").unwrap().fields[0].name, "count");
         assert_eq!(loader.body_id("game.Widget", 0), Some(body));
+        assert!(loader.body(body).is_some());
     }
 
     #[test]
@@ -1131,27 +1711,34 @@ mod tests {
         let mut l = Loader::new();
         l.boot();
         // Parent first so the child can point at it.
-        l.classes.insert(
-            "java.lang.Object".into(),
-            Class {
-                kind: 0,
-                name: "java.lang.Object".into(),
-                base: None,
-                interfaces: vec![],
-                methods: vec![],
-                fields: vec![],
-                bodies: vec![],
-            },
-        );
-        l.load_module(&module, &data).expect("links");
+        let parent = l.insert_test_class(Class {
+            kind: 0,
+            name: "java.lang.Object".into(),
+            base: None,
+            base_id: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        let (child, _) = l.load_module(&module, &data).expect("links");
         let (m, def) = l
             .resolve_method("game.Widget", "tick", "()V")
             .expect("found");
         assert_eq!(def, "game.Widget".to_owned());
         assert_eq!(m.name, "tick");
+        let (m_id, def_id) = l
+            .resolve_method_id(child, "tick", "()V")
+            .expect("found by id");
+        assert_eq!(def_id, child);
+        assert_eq!(m_id.name, "tick");
+        let _ = parent;
         assert!(l.resolve_method("game.Widget", "nope", "()V").is_none());
         assert!(l.is_assignable("game.Widget", "game.Widget"));
         assert!(l.is_assignable("game.Widget", "java.lang.Object"));
         assert!(!l.is_assignable("java.lang.Object", "game.Widget"));
+        assert!(l
+            .class_conversion_cost_id(child, l.lookup("java.lang.Object").unwrap())
+            .is_ok());
     }
 }

@@ -1669,9 +1669,14 @@ fn vm_resource_node(vm: &mut VmHost, word: u32) -> Option<u32> {
 
 // Native and bytecode field accesses share the VM's base-first,
 // instance-only layout and typed cells.
-fn resource_ptr_layout(vm: &VmHost, class: &str) -> Option<(usize, usize)> {
-    let fields = vm.instance_fields(class).ok()?;
-    let slot = vm.instance_field_slot(class, "ptr").ok()?;
+fn resource_ptr_layout(vm: &VmHost, class: &slr_vm::vmclass::ClassRef) -> Option<(usize, usize)> {
+    use slr_vm::vmclass::ClassRef;
+    let id = match class {
+        ClassRef::Loaded(id) => *id,
+        ClassRef::Array(_) => return None,
+    };
+    let fields = vm.instance_fields_id(id).ok()?;
+    let slot = vm.instance_field_slot_id(id, "ptr").ok()?;
     if fields.get(slot)?.ty != "I" {
         return None;
     }
@@ -1688,7 +1693,13 @@ fn vm_resource_wrapper(vm: &mut VmHost, node: u32, ty: u32) -> u32 {
     } else {
         RESOURCE_REF_CLASS
     };
-    let (slot, count) = resource_ptr_layout(vm, class)
+    let class_ref = vm
+        .loader
+        .lookup(class)
+        .map(slr_vm::vmclass::ClassRef::Loaded);
+    let (slot, count) = class_ref
+        .as_ref()
+        .and_then(|class_ref| resource_ptr_layout(vm, class_ref))
         .expect("resource wrapper requires loaded class hierarchy and ptr field");
     let word = vm
         .alloc_object(class)

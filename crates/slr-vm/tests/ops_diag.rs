@@ -241,12 +241,32 @@ fn loader_converts_int_to_string_on_store() {
         next: u32,
     }
     impl LoaderConvert for Fake {
-        fn load_class(&mut self, d: &str) -> Option<String> {
-            matches!(d, "java.lang.String" | "Ljava.lang.String;")
-                .then(|| "java.lang.String".to_owned())
+        fn load_class(&mut self, d: &str) -> Option<slr_vm::vmclass::ClassRef> {
+            use slr_vm::vmclass::{ArrayDescriptor, ClassId, ClassRef};
+            if let Some(array) = ArrayDescriptor::new(d) {
+                return Some(ClassRef::Array(array));
+            }
+            let bare = d
+                .strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or(d);
+            matches!(bare, "java.lang.String")
+                .then(|| ClassRef::Loaded(ClassId::from_raw(1).unwrap()))
         }
-        fn is_assignable(&mut self, from: &str, to: &str) -> bool {
-            from == "java.lang.String" && matches!(to, "java.lang.String" | "Ljava.lang.String;")
+        fn string_target(
+            &mut self,
+            target: &slr_vm::vmclass::ClassRef,
+            _string: &slr_vm::vmclass::ClassRef,
+        ) -> bool {
+            matches!(target, slr_vm::vmclass::ClassRef::Loaded(_))
+        }
+        fn is_assignable(&mut self, from: &slr_vm::vmclass::ClassRef, to: &str) -> bool {
+            let bare = to
+                .strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or(to);
+            matches!(from, slr_vm::vmclass::ClassRef::Loaded(_))
+                && matches!(bare, "java.lang.String")
         }
         fn make_string(&mut self, _v: Value) -> u32 {
             let w = self.next;

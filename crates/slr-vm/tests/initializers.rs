@@ -198,7 +198,11 @@ fn instance_initializers_observe_only_the_installed_field_prefix() {
         }
         assert_eq!(vm.objects.len(), 1);
         let object = &vm.objects[0];
-        assert_eq!(object.class, "ReadClass");
+        let object_class = match &object.class {
+            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
+            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+        };
+        assert_eq!(object_class, "ReadClass");
         let actual=object.fields.iter().enumerate().map(|(index,value)|json!({"name":(["a","b","c"][index]),"type":value.tag.name(),"value":value.payload})).collect::<Vec<_>>();
         assert_eq!(json!(actual), row["result"]["instance"], "case{read}");
     }
@@ -767,10 +771,11 @@ fn new_initializers_allocate_real_target_objects_in_both_drivers() {
         // Original supplies allocation at404e20; compare its requested runtime
         // class, not that seam's arbitrary pointer, against the real Rust heap.
         let expected_class = row["result"]["calls"][1]["new"].as_str().unwrap();
-        assert_eq!(
-            vm.objects[(values[0].payload - 0x1000) as usize].class,
-            expected_class
-        );
+        let actual_class = match &vm.objects[(values[0].payload - 0x1000) as usize].class {
+            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
+            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+        };
+        assert_eq!(actual_class, expected_class);
         assert_eq!(
             values[1].payload,
             expected[1]["value"].as_u64().unwrap() as u32
