@@ -19,7 +19,6 @@ fn empty_class(name: &str, base: Option<&str>) -> Class {
         kind: 0,
         name: name.into(),
         base: base.map(str::to_owned),
-        base_id: None,
         interfaces: vec![],
         methods: vec![],
         fields: vec![],

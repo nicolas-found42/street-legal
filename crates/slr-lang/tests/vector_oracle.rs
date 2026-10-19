@@ -89,7 +89,6 @@ fn class(name: &str, fields: &[&str]) -> Class {
         kind: 0,
         name: name.to_owned(),
         base: None,
-        base_id: None,
         interfaces: Vec::new(),
         methods: Vec::new(),
         fields: fields
