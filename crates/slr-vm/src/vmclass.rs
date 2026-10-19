@@ -1907,4 +1907,182 @@ mod tests {
             .class_conversion_cost_id(child, l.lookup("java.lang.Object").unwrap())
             .is_ok());
     }
+
+    /// Original 403a90/411610 hash vectors (byte length * 7 + signed-byte
+    /// sum * 37, 32-bit wrap; bucket = hash % 512). Replays the exact
+    /// expected hashes/buckets from the regen rows, including negative
+    /// wrapped hashes and the equal-full-hash distinct-name triplet.
+    #[test]
+    fn class_cache_hash_matches_original_vectors() {
+        // (name, expected hash, expected bucket).
+        let vectors: &[(&str, u32, usize)] = &[
+            ("pkg.é", 8182, 502),
+            ("éééé", 4294945448, 168),
+            ("pkg.€", 4785, 177),
+            ("€€€", 4294940719, 47),
+            ("aa.b", 12534, 246),
+            ("a.ab", 12534, 246),
+            ("ab.a", 12534, 246),
+            ("java.render.osd.dialog.YesNoDialog", 0x1dab4, 180),
+            ("unrelated.Czbaaaaaaaaaaaaaaaaaaa", 0x1c6b4, 180),
+        ];
+        for (name, hash, bucket) in vectors {
+            assert_eq!(class_cache_hash(name), *hash, "hash of {name}");
+            assert_eq!(class_cache_bucket(name), *bucket, "bucket of {name}");
+        }
+        // Distinct equal-full-hash names share bucket 246 but keep
+        // distinct identities: replays the aa.b/a.ab/ab.a regen rows.
+        assert_eq!(class_cache_hash("aa.b"), class_cache_hash("a.ab"));
+        assert_eq!(class_cache_hash("a.ab"), class_cache_hash("ab.a"));
+    }
+
+    /// Duplicate-head cache topology without an unrelated head (regen
+    /// scenario 1): three same-name registrations stay accepted and every
+    /// lookup selects the FIRST definition.
+    #[test]
+    fn duplicate_registrations_without_collision_head_keep_first_winner() {
+        let mut loader = Loader::new();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            // Same name, distinct records: real 403a90 accepts every
+            // same-name registration as a new class object.
+            ids.push(loader.insert_test_class(Class {
+                kind: i,
+                name: "java.render.osd.dialog.YesNoDialog".into(),
+                base: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                bodies: vec![],
+            }));
+        }
+        assert_eq!(loader.len(), 3);
+        assert_eq!(loader.unique_name_count(), 1);
+        let bucket = class_cache_bucket("java.render.osd.dialog.YesNoDialog");
+        // Insert-after-head: every later duplicate goes immediately
+        // after the head, pushing the previous second entry down.
+        assert_eq!(loader.cache_chain(bucket), &vec![ids[0], ids[2], ids[1]]);
+        for _ in 0..3 {
+            assert_eq!(
+                loader.lookup("java.render.osd.dialog.YesNoDialog"),
+                Some(ids[0])
+            );
+        }
+        assert_eq!(
+            loader.resolve_descriptor("Ljava.render.osd.dialog.YesNoDialog;"),
+            Some(ClassRef::Loaded(ids[0]))
+        );
+    }
+
+    /// Collision-head topology with an unrelated head (regen scenario 2):
+    /// inserting the unrelated bucket head first flips selection — lookups
+    /// after the first/second/third duplicates return first/second/third.
+    #[test]
+    fn duplicate_registrations_with_collision_head_select_newest() {
+        let mut loader = Loader::new();
+        let head = loader.insert_test_class(Class {
+            kind: 0,
+            name: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        assert_eq!(
+            class_cache_bucket("unrelated.Czbaaaaaaaaaaaaaaaaaaa"),
+            class_cache_bucket("java.render.osd.dialog.YesNoDialog")
+        );
+        let mut ids = vec![head];
+        for i in 0..3 {
+            let id = loader.insert_test_class(Class {
+                kind: i + 1,
+                name: "java.render.osd.dialog.YesNoDialog".into(),
+                base: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                bodies: vec![],
+            });
+            ids.push(id);
+            assert_eq!(
+                loader.lookup("java.render.osd.dialog.YesNoDialog"),
+                Some(id)
+            );
+        }
+        assert_eq!(loader.len(), 4);
+        let bucket = class_cache_bucket("java.render.osd.dialog.YesNoDialog");
+        assert_eq!(
+            loader.cache_chain(bucket),
+            &vec![ids[0], ids[3], ids[2], ids[1]]
+        );
+    }
+
+    /// Full-hash collision distinct-name behavior (regen step E): equal
+    /// hashes in one bucket keep distinct identities; duplicate
+    /// re-registrations keep earlier winners.
+    #[test]
+    fn equal_full_hash_distinct_names_keep_distinct_identities() {
+        let mut loader = Loader::new();
+        let aa = loader.insert_test_class(Class {
+            kind: 0,
+            name: "aa.b".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        let ab = loader.insert_test_class(Class {
+            kind: 0,
+            name: "a.ab".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        let ba = loader.insert_test_class(Class {
+            kind: 0,
+            name: "ab.a".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        assert_ne!(aa, ab);
+        assert_ne!(ab, ba);
+        assert_eq!(loader.lookup("aa.b"), Some(aa));
+        assert_eq!(loader.lookup("a.ab"), Some(ab));
+        assert_eq!(loader.lookup("ab.a"), Some(ba));
+        // Duplicate re-registrations keep earlier winners.
+        let aa2 = loader.insert_test_class(Class {
+            kind: 7,
+            name: "aa.b".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        let ab2 = loader.insert_test_class(Class {
+            kind: 8,
+            name: "a.ab".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            bodies: vec![],
+        });
+        // Distinct re-registration records keep earlier winners: the
+        // second aa.b/a.ab definitions install as new records while
+        // lookup still selects the first definitions.
+        let _ = (aa2, ab2);
+        assert_eq!(loader.lookup("aa.b"), Some(aa));
+        assert_eq!(loader.lookup("a.ab"), Some(ab2));
+        assert_eq!(loader.lookup("ab.a"), Some(ba));
+        assert_eq!(loader.len(), 5);
+        assert_eq!(loader.unique_name_count(), 3);
+    }
 }

@@ -504,6 +504,17 @@ pub struct VmHost {
     pub initializer_depth_limit: usize,
     initializer_depth: usize,
     static_cells: HashMap<u32, Vec<Value>>,
+    /// Retained dependency IDs per installed owner (context word ->
+    /// (base, interfaces)), resolved through the current cache selection
+    /// at install time and kept across later duplicate registrations.
+    /// Reentry after install returns without re-resolving (403e80).
+    initialized_dependencies: HashMap<
+        u32,
+        (
+            Option<crate::vmclass::ClassId>,
+            Vec<crate::vmclass::ClassId>,
+        ),
+    >,
     initializing_classes: HashSet<u32>,
     array_cells: HashMap<u32, Vec<Value>>,
     variable_names: Vec<String>,
@@ -575,6 +586,7 @@ impl VmHost {
             initializer_depth_limit: 32,
             initializer_depth: 0,
             static_cells: HashMap::new(),
+            initialized_dependencies: HashMap::new(),
             initializing_classes: HashSet::new(),
             array_cells: HashMap::new(),
             variable_names: Vec::new(),
@@ -842,23 +854,16 @@ impl VmHost {
     /// immediately before its initializer. The installed owner is the reentry
     /// sentinel; a malformed dependency cycle before installation fails closed.
     /// This does not model machine fatal-handler unwind or class poisoning.
-    /// Entry spellings resolve once; dependencies and statics below carry IDs.
-    /// exe: FUN_00403e80
-    fn initialize_class(&mut self, class: &str) -> Result<(), HostError> {
-        let id = self.loader.lookup(class).ok_or(HostError::MissingMember)?;
-        self.initialize_class_id(id)
-    }
-
-    /// ID-carrying initialization: the sentinel key and static container are
-    /// the frame-context word (the [`ClassId`] encoding), retained across
-    /// later registrations so old statics stay pinned to their record.
-    /// Declared base/interface spellings resolve through current selection
-    /// at each step (the pre-installation dynamic point); the installed
-    /// owner keeps its own dependency IDs afterwards.
+    /// Entry IDs are retained record identities; declared base/interface
+    /// spellings resolve through the current selection until the owner
+    /// installs, then the owner retains its resolved dependency IDs.
     /// exe: FUN_00403e80
     fn initialize_class_id(&mut self, class: crate::vmclass::ClassId) -> Result<(), HostError> {
         let context = class.get();
         if self.static_cells.contains_key(&context) {
+            // The owner already installed: reentry retains the stored
+            // dependency IDs (403e80 binding-time policy) and never
+            // re-resolves spellings through the current selection.
             return Ok(());
         }
         if !self.initializing_classes.insert(context) {
@@ -872,13 +877,20 @@ impl VmHost {
                 .find_by_id(class)
                 .ok_or(HostError::MissingMember)?
                 .clone();
-            // Resolve the entire declared dependency list before recursion.
+            // Resolve the entire declared dependency list through the
+            // CURRENT cache selection, then recurse. A failure before the
+            // owner's own owner installs leaves nothing retained, so a
+            // retry after a duplicate registration selects the new
+            // records; after the owner installs, reentry above returns
+            // without replacing the stored IDs.
             // Original interface-kind diagnostics continue, and the base kind
             // does not impose a corresponding hard-rejection check.
             let base = metadata.base.as_deref().filter(|base| *base != "V");
-            if let Some(base) = base {
-                self.loader.lookup(base).ok_or(HostError::MissingMember)?;
-            }
+            let base_id = match base {
+                Some(base) => Some(self.loader.lookup(base).ok_or(HostError::MissingMember)?),
+                None => None,
+            };
+            let mut interface_ids = Vec::with_capacity(metadata.interfaces.len());
             for interface in &metadata.interfaces {
                 let dependency = self
                     .loader
@@ -894,13 +906,20 @@ impl VmHost {
                         },
                     );
                 }
+                interface_ids.push(
+                    self.loader
+                        .lookup(interface)
+                        .ok_or(HostError::MissingMember)?,
+                );
             }
-            if let Some(base) = base {
-                self.initialize_class(base)?;
+            if let Some(base_id) = base_id {
+                self.initialize_class_id(base_id)?;
             }
-            for interface in metadata.interfaces.clone() {
-                self.initialize_class(&interface)?;
+            for interface_id in interface_ids.clone() {
+                self.initialize_class_id(interface_id)?;
             }
+            self.initialized_dependencies
+                .insert(context, (base_id, interface_ids));
             self.static_cells.insert(context, Vec::new());
             for (static_index, field) in metadata
                 .fields
