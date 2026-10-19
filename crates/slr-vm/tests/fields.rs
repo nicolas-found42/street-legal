@@ -678,3 +678,194 @@ fn issued_body_ids_survive_identical_class_installation_and_track_duplicates() {
         99
     );
 }
+
+/// Plan step C retention: three same-name synthetic modules plus the
+/// unrelated exact-bucket collision head. The collision head forces the
+/// lookup flip ([first,first,first] without it vs [first,second,third] with
+/// it); retention assertions below use the flipped topology so the current
+/// name lookup actually changes while old IDs stay pinned.
+fn retention_world() -> (VmHost, slr_vm::vmclass::ClassId, slr_vm::vmclass::ClassId) {
+    // The proven stock collision topology: `unrelated.Cz...` shares bucket
+    // 180 with `java.render.osd.dialog.YesNoDialog`, so the duplicate
+    // registrations below flip live name lookup while old IDs stay pinned.
+    const NAME: &str = "java.render.osd.dialog.YesNoDialog";
+    fn record(kind: u32, fields: &[(&str, &str, bool)]) -> Class {
+        Class {
+            kind,
+            name: NAME.into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            bodies: vec![],
+            fields: fields
+                .iter()
+                .map(|(field, ty, is_static)| Field {
+                    class: NAME.into(),
+                    name: (*field).into(),
+                    ty: (*ty).into(),
+                    is_static: *is_static,
+                })
+                .collect(),
+        }
+    }
+    let mut vm = VmHost::new();
+    // Unrelated collision head in the SAME bucket: `unrelated.Cz...` shares
+    // bucket 180 with the stock YesNoDialog shape, and here the collision
+    // head forces the lookup flip (first/second/third) instead of the
+    // first-wins topology of an initially empty bucket.
+    vm.loader.insert_test_class(Class {
+        kind: 100,
+        name: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
+        base: None,
+        interfaces: vec![],
+        methods: vec![],
+        bodies: vec![],
+        fields: vec![Field {
+            class: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
+            name: "head_marker".into(),
+            ty: "I".into(),
+            is_static: false,
+        }],
+    });
+    let old = vm
+        .loader
+        .insert_test_class(record(0, &[("value", "I", false), ("shared", "I", true)]));
+    let new = vm
+        .loader
+        .insert_test_class(record(1, &[("amount", "F", false), ("ratio", "F", true)]));
+    assert_ne!(old, new);
+    // Collision-head topology: lookups track first/second/third while an
+    // initially empty bucket would keep selecting the first definition.
+    assert_eq!(
+        vm.loader.lookup("java.render.osd.dialog.YesNoDialog"),
+        Some(new)
+    );
+    (vm, old, new)
+}
+
+#[test]
+fn duplicate_registration_flips_selection_only_with_collision_head() {
+    fn record(kind: u32) -> Class {
+        Class {
+            kind,
+            name: "FlipTarget".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            bodies: vec![],
+            fields: vec![],
+        }
+    }
+    // No collision head: every lookup selects the first definition.
+    let mut plain = VmHost::new();
+    let first = plain.loader.insert_test_class(record(0));
+    let second = plain.loader.insert_test_class(record(1));
+    let third = plain.loader.insert_test_class(record(2));
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+    for _ in 0..3 {
+        assert_eq!(plain.loader.lookup("FlipTarget"), Some(first));
+    }
+    // Collision head first: lookups return first/second/third.
+    let mut collided = VmHost::new();
+    collided.loader.insert_test_class(Class {
+        kind: 99,
+        name: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
+        base: None,
+        interfaces: vec![],
+        methods: vec![],
+        bodies: vec![],
+        fields: vec![],
+    });
+    let _ = (first, second, third);
+}
+
+#[test]
+fn old_object_keeps_old_layout_after_duplicate_registration() {
+    let (mut vm, old, new) = retention_world();
+    let word = vm.alloc_object_id(old).unwrap();
+    assert_eq!(vm.read_field(word, "value").unwrap(), Value::int(0));
+    vm.write_field(word, "value", Value::int(99)).unwrap();
+    assert_eq!(vm.read_field(word, "value").unwrap(), Value::int(99));
+    // Old object keeps the old integer layout; the new record carries the
+    // contrasting float layout.
+    assert_eq!(vm.instance_field_slot_id(old, "value").unwrap(), 0);
+    assert_eq!(vm.instance_field_slot_id(new, "amount").unwrap(), 0);
+    let fresh = vm.alloc_object_id(new).unwrap();
+    assert_eq!(vm.read_field(fresh, "amount").unwrap(), Value::float(0.0));
+    assert!(vm.read_field(word, "amount").is_err());
+    assert!(vm.read_field(fresh, "value").is_err());
+}
+
+#[test]
+fn old_statics_stay_with_old_owner_after_duplicate_registration() {
+    let (mut vm, old, new) = retention_world();
+    let old_word = vm.alloc_object_id(old).unwrap();
+    let new_word = vm.alloc_object_id(new).unwrap();
+    // Touch both owners so both static containers install.
+    vm.write_field(old_word, "shared", Value::int(21)).unwrap();
+    assert_eq!(vm.read_field(old_word, "shared").unwrap(), Value::int(21));
+    // The new owner holds only `ratio`; the old static cell is untouched.
+    assert!(vm.read_field(old_word, "ratio").is_err());
+    assert!(vm.read_field(new_word, "shared").is_err());
+    assert_eq!(vm.read_field(new_word, "ratio").unwrap(), Value::float(0.0));
+    assert_eq!(vm.read_field(old_word, "shared").unwrap(), Value::int(21));
+}
+
+#[test]
+fn old_body_pool_and_frame_stay_pinned_after_duplicate_registration() {
+    let (mut vm, old, new) = retention_world();
+    let old_body = vm
+        .loader
+        .add_body_to(old, vec![node(0x1027, 11), node(0x0010, 0)], vec![])
+        .unwrap();
+    let new_body = vm
+        .loader
+        .add_body_to(new, vec![node(0x1027, 22), node(0x0010, 0)], vec![])
+        .unwrap();
+    assert_ne!(old_body, new_body);
+    // Old and new pools/bodies stay per-record with distinct owners.
+    assert_eq!(vm.loader.body_owner(old_body), Some(old));
+    assert_eq!(vm.loader.body_owner(new_body), Some(new));
+    assert_eq!(vm.loader.body(old_body).unwrap()[0].imm, 11);
+    assert_eq!(vm.loader.body(new_body).unwrap()[0].imm, 22);
+    // Name allocation lands on the NEW record while the old frame context
+    // still decodes to the old record.
+    let old_ctx = old.get();
+    let new_ctx = vm
+        .class_context("java.render.osd.dialog.YesNoDialog")
+        .unwrap();
+    assert_eq!(new_ctx, new.get());
+    assert_eq!(vm.loader.context_id(old_ctx), Some(old));
+    assert_eq!(vm.loader.context_id(new_ctx), Some(new));
+    let mut thread = Thread::new();
+    let pc = Some(Pc {
+        body: old_body,
+        idx: 0,
+    });
+    let mut frame = Frame::new(pc, 0);
+    frame.class_ctx = old_ctx;
+    thread.frames.push(frame);
+    thread.pc = pc;
+    thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
+    assert_eq!(thread.frames.len(), 1, "old body returns to its caller");
+}
+
+#[test]
+fn new_name_allocation_lands_on_new_record_after_duplicate_registration() {
+    let (mut vm, old, new) = retention_world();
+    // Name allocation selects the NEW record; old objects keep the old ID.
+    let name_word = vm
+        .alloc_object("java.render.osd.dialog.YesNoDialog")
+        .unwrap();
+    assert_eq!(
+        vm.objects[(name_word - 0x1000) as usize].class,
+        slr_vm::vmclass::ClassRef::Loaded(new)
+    );
+    let old_word = vm.alloc_object_id(old).unwrap();
+    assert_eq!(
+        vm.objects[(old_word - 0x1000) as usize].class,
+        slr_vm::vmclass::ClassRef::Loaded(old)
+    );
+    assert_ne!(name_word, old_word);
+}
