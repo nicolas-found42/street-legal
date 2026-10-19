@@ -91,9 +91,11 @@ implementation.
   normalization remain boot/replay work. Parent manual review found no further
   concrete defects after the Jev gate requested stronger review.
 - **#12 / M0-11:** whole-game Wine oracle. Static fixes are integrated, but
-  boot-to-main-menu replay acceptance has not run. The prior explicit user
-  restriction in `../slr-notes/decision-m0-11-static-only.md` still forbids Wine
-  launches without authorization. Preserve its gate. #13 / M0-12 is the
+  boot-to-main-menu replay acceptance has not run. Wine launches stay forbidden
+  without explicit per-invocation authorization (user directive; the
+  `re/hook/run.sh` gate enforces it). The cited note
+  `../slr-notes/decision-m0-11-static-only.md` no longer exists on disk; the
+  gate it recorded is preserved here and in the hook script. #13 / M0-12 is the
   documented Unicorn fallback.
 - **#13 / M0-12:** strict startup infrastructure remains an incomplete oracle
   prefix. The default C-only scenario reaches real WinMain and requests the
