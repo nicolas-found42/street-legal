@@ -273,6 +273,9 @@ fn collect_suites() -> Vec<Suite> {
             ("fatal_initializer_stops_before_assignment_and_retains_current_side_effect", vec!["FUN_00403e80", "FUN_00407da0"]),
             ("self_descriptor_skip_is_static_and_matches_only_the_defining_owner", vec!["FUN_00403e80", "FUN_00407da0"]),
             ("fatal_initializer_retains_prior_cell_writes_like_original", vec!["FUN_00403e80", "FUN_00407da0"]),
+            ("uninitialized_leaf_binds_new_dependencies_at_install", vec!["FUN_00403e80", "FUN_00407da0"]),
+            ("initialized_leaf_retains_old_dependencies_on_reentry", vec!["FUN_00403e80", "FUN_00407da0"]),
+            ("failed_dependency_retry_selects_new_records", vec!["FUN_00403e80", "FUN_00407da0"]),
         ]),
         // Bounded execution observations. Recording/allocation seams are
         // documented by vmexec_vectors.py; no full call resolver, object
@@ -309,6 +312,30 @@ fn collect_suites() -> Vec<Suite> {
                 (
                     "unchanged_stock_vector_add_matches_original_field_chains",
                     vec!["FUN_00420ff0", "FUN_00420d20"],
+                ),
+                (
+                    "duplicate_registration_flips_selection_only_with_collision_head",
+                    vec!["FUN_00411610", "FUN_00403a90"],
+                ),
+                (
+                    "old_object_keeps_old_layout_after_duplicate_registration",
+                    vec!["FUN_00420ff0"],
+                ),
+                (
+                    "old_statics_stay_with_old_owner_after_duplicate_registration",
+                    vec!["FUN_00403e80"],
+                ),
+                (
+                    "old_body_pool_and_frame_stay_pinned_after_duplicate_registration",
+                    vec!["FUN_00420ff0"],
+                ),
+                (
+                    "new_name_allocation_lands_on_new_record_after_duplicate_registration",
+                    vec!["FUN_00407da0"],
+                ),
+                (
+                    "stock_dialog_and_standalone_yesno_registers_twelve_distinct_records",
+                    vec!["FUN_00411b20", "FUN_00410430"],
                 ),
             ],
         ),
