@@ -231,6 +231,18 @@ implementation.
   qualifier now distinguishes the optional continuation from the earlier stop.
   No automatic approval, completed window, physical notification sequence,
   device/caps model or MainMenu acceptance is claimed.
+  The recovered unpublished window-transcript slice (declared finite
+  WM_SHOWWINDOW/notification transcript plus a one-shot owned CreateWindowExA
+  return) was rebuilt from the frozen recovery archive and integrated at merge
+  `1497cac` after a fresh native-prefix replay: 109 tests with no skips, all 13
+  prior matching-input prefixes byte-identical, and all 5 new CLI outputs equal
+  to native outputs. Seven files match the frozen manifest hashes; the merged
+  diff equals the frozen 52,537-byte patch. The integration gate verified all
+  three claims (none contradicted) but escalated on review confidence
+  (composite 0.75475; safe-to-apply 0.30); parent hash/byte checks provide
+  manual disposition. Inputs remain declared hypothetical platform data, every
+  trace stays incomplete with MainMenu false, and the read-only next frontier
+  is ShowWindow/SW_HIDE before its API result.
 
 - **#109:** typed persistent field and array lvalues now share authoritative VM
   host storage with vector and resource natives. The loader retains class pools,
