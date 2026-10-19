@@ -521,6 +521,24 @@ pub struct VmHost {
 }
 
 impl VmHost {
+    /// Retained hierarchy IDs installed by the last successful
+    /// initialization of one record (403e80 binding-time policy): the base
+    /// and interface IDs as selected at install time. `None` while the
+    /// owner has no installed owner; reentry after install returns the
+    /// stored IDs without re-resolving through the current selection.
+    #[must_use]
+    pub fn initialized_dependencies(
+        &self,
+        class: crate::vmclass::ClassId,
+    ) -> Option<(
+        Option<crate::vmclass::ClassId>,
+        Vec<crate::vmclass::ClassId>,
+    )> {
+        self.initialized_dependencies.get(&class.get()).cloned()
+    }
+}
+
+impl VmHost {
     /// Intern a nullable C string as a real loaded String object. Content hits
     /// reuse the object associated with the intern record; String.ptr contains
     /// that record's stable buffer word. GC-list revival is not implemented.

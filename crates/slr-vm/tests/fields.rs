@@ -869,3 +869,76 @@ fn new_name_allocation_lands_on_new_record_after_duplicate_registration() {
     );
     assert_ne!(name_word, old_word);
 }
+
+/// Plan step D: real stock nested Dialog (11 modules) + standalone YesNo
+/// (1 module) in both orders. Replays the file-order regen rows: 12 issued
+/// identities, distinct duplicate records, cache-selected registration,
+/// retained old pool/body bytes, first-file-class return, module order.
+#[test]
+fn stock_dialog_and_standalone_yesno_registers_twelve_distinct_records() {
+    use std::path::Path;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
+    let dialog = std::fs::read(root.join("system/Scripts/render/osd/dialog/Dialog.class"));
+    let yesno = std::fs::read(root.join("system/Scripts/render/osd/dialog/YesNoDialog.class"));
+    let (Ok(dialog), Ok(yesno)) = (dialog, yesno) else {
+        eprintln!("SLR_ORACLE_SKIPPED: stock_dialog_and_standalone_yesno_registers_twelve_distinct_records");
+        return;
+    };
+    for (first, second, yesno_first) in [(&dialog, &yesno, false), (&yesno, &dialog, true)] {
+        let mut loader = slr_vm::vmclass::Loader::new();
+        let first_ids = loader.load_file(first).unwrap();
+        let second_ids = loader.load_file(second).unwrap();
+        // 11 nested + 1 standalone = 12 issued identities, all distinct.
+        assert_eq!(first_ids.len() + second_ids.len(), 12);
+        let mut seen = std::collections::HashSet::new();
+        for (id, _) in first_ids.iter().chain(second_ids.iter()) {
+            assert!(seen.insert(id.get()), "every issued identity is distinct");
+        }
+        assert_eq!(loader.len(), 12);
+        // Name lookup selects the first-loaded YesNo definition while the
+        // duplicate record stays distinct (both file orders exercise the
+        // first-wins bucket topology per the file-order regen rows).
+        let selected = loader.lookup("java.render.osd.dialog.YesNoDialog").unwrap();
+        let first_yesno = first_ids
+            .iter()
+            .find(|(_, name)| name == "java.render.osd.dialog.YesNoDialog")
+            .map(|(id, _)| *id);
+        assert_eq!(Some(selected), first_yesno);
+        let _ = yesno_first;
+        // The new duplicate parses as its own record with its own pool/body:
+        // both YesNo records resolve, with distinct backing bytes.
+        let all_yesno: Vec<_> = first_ids
+            .iter()
+            .chain(second_ids.iter())
+            .filter(|(_, name)| name == "java.render.osd.dialog.YesNoDialog")
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(all_yesno.len(), 2);
+        assert_ne!(all_yesno[0], all_yesno[1]);
+        let pool0 = loader.pool_of(all_yesno[0]).unwrap().len();
+        let pool1 = loader.pool_of(all_yesno[1]).unwrap().len();
+        assert!(pool0 > 0 && pool1 > 0, "both records keep their own pools");
+        // Each file's returned class is ITS OWN first class (the caller's
+        // modules[0] selection), not the cache winner: Dialog for the
+        // nested bundle first, YesNo for the standalone first.
+        let (dialog_head, yesno_head) = if yesno_first {
+            (&second_ids[0].1, &first_ids[0].1)
+        } else {
+            (&first_ids[0].1, &second_ids[0].1)
+        };
+        assert_eq!(dialog_head, "java.render.osd.dialog.Dialog");
+        assert_eq!(yesno_head, "java.render.osd.dialog.YesNoDialog");
+        // Module order is preserved in registration order.
+        let names = loader.record_names();
+        if yesno_first {
+            assert_eq!(names[0], "java.render.osd.dialog.YesNoDialog");
+            assert_eq!(names[1], "java.render.osd.dialog.Dialog");
+        } else {
+            assert_eq!(names[0], "java.render.osd.dialog.Dialog");
+            assert_eq!(names[11], "java.render.osd.dialog.YesNoDialog");
+        }
+        // 11 distinct names across 12 records: the YesNo duplicate shares
+        // its name while keeping its own record.
+        assert_eq!(loader.unique_name_count(), 11);
+    }
+}
