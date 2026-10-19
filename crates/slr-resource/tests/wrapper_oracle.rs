@@ -170,7 +170,6 @@ fn wrapper_getters_reject_missing_class_or_obj_metadata() {
                         kind: 0,
                         name: class.into(),
                         base: base.map(str::to_owned),
-                        base_id: None,
                         interfaces: vec![],
                         methods: vec![],
                         fields: vec![],

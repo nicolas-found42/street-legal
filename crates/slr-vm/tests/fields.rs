@@ -18,7 +18,6 @@ fn class(name: &str, base: Option<&str>, fields: &[(&str, &str, bool)]) -> Class
         kind: 0,
         name: name.into(),
         base: base.map(str::to_owned),
-        base_id: None,
         interfaces: vec![],
         methods: vec![],
         bodies: vec![],
@@ -650,18 +649,32 @@ fn embedding_bodies_preserve_their_class_pool_and_reject_conflicts_atomically() 
 }
 
 #[test]
-fn issued_body_ids_survive_identical_class_installation_and_reject_replacement() {
+fn issued_body_ids_survive_identical_class_installation_and_track_duplicates() {
     let mut vm = VmHost::new();
     let mut original = class("C", None, &[]);
     original.bodies = vec![vec![node(0x1027, 11)]];
-    vm.loader.insert_test_class(original.clone());
-    let body = vm.loader.body_id("C", 0).unwrap();
-    vm.loader.insert_test_class(original.clone());
+    let first = vm.loader.insert_test_class(original.clone());
+    let body = vm.loader.body_id_of(first, 0).unwrap();
+    assert_eq!(vm.loader.body_id("C", 0), Some(body));
+    // Identical synthetic installation is idempotent, like a cache hit.
+    let again = vm.loader.insert_test_class(original.clone());
+    assert_eq!(again, first);
+    assert_eq!(vm.loader.len(), 1);
+    // A distinct same-name record registers as a duplicate: the old body
+    // keeps its bytes while the new record carries the new body, and the
+    // cache still selects the first definition in an empty bucket.
     let mut replacement = original;
     replacement.bodies[0][0].imm = 99;
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm
-        .loader
-        .insert_test_class(replacement)))
-    .is_err());
+    let dup = vm.loader.insert_test_class(replacement);
+    assert_ne!(dup, first);
+    assert_eq!(vm.loader.len(), 2);
     assert_eq!(vm.loader.body(body).unwrap()[0].imm, 11);
+    assert_eq!(vm.loader.lookup("C"), Some(first));
+    assert_eq!(
+        vm.loader
+            .body(vm.loader.body_id_of(dup, 0).unwrap())
+            .unwrap()[0]
+            .imm,
+        99
+    );
 }

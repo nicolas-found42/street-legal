@@ -1775,11 +1775,19 @@ impl VmHost {
                 receiver,
             )
         } else {
+            // Super dispatch resolves the owner's declared base through the
+            // current cache selection (the 403e80 binding-time policy:
+            // dependencies resolve dynamically until the owner's own owner
+            // installs). The retained owner ID never re-resolves itself.
+            let base = self
+                .loader
+                .find_by_id(owner)
+                .ok_or(HostError::MissingMethod)?
+                .base
+                .clone()
+                .ok_or(HostError::MissingMethod)?;
             (
-                self.loader
-                    .find_by_id(owner)
-                    .and_then(|class| class.base_id)
-                    .ok_or(HostError::MissingMethod)?,
+                self.loader.lookup(&base).ok_or(HostError::MissingMethod)?,
                 frame.receiver,
             )
         };
@@ -1809,15 +1817,18 @@ impl VmHost {
                 .context_id(frame.class_ctx)
                 .ok_or(HostError::MissingMethod)?;
             let class = if op.kind == ExternKind::CallSuperInit {
-                let Some(parent) = self
+                let base = self
                     .loader
                     .find_by_id(id)
                     .ok_or(HostError::MissingMethod)?
-                    .base_id
-                else {
-                    return Ok(Flow::Advance);
-                };
-                parent
+                    .base
+                    .clone();
+                match base {
+                    // java.lang.Object (no declared base) has no super
+                    // constructor to enter; the original advances silently.
+                    None => return Ok(Flow::Advance),
+                    Some(base) => self.loader.lookup(&base).ok_or(HostError::MissingMethod)?,
+                }
             } else {
                 id
             };
@@ -2302,7 +2313,6 @@ mod tests {
             kind: 0,
             name: "java.lang.Object".into(),
             base: None,
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![],
@@ -2399,7 +2409,6 @@ mod tests {
             kind: 0,
             name: "java.lang.String".into(),
             base: Some("java.lang.Object".into()),
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![crate::vmclass::Field {
@@ -2432,7 +2441,6 @@ mod tests {
             kind: 0,
             name: "game.Widget".into(),
             base: Some("java.lang.Object".into()),
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![crate::vmclass::Field {

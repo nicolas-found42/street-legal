@@ -12,7 +12,6 @@ pub fn vm() -> slr_vm::host::VmHost {
             kind: 0,
             name: name.into(),
             base: base.map(str::to_owned),
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             bodies: vec![],

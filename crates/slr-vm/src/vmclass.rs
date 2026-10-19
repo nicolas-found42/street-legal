@@ -22,21 +22,21 @@
 //! type pointer ([`crate::values::TypeTag`]) is the full descriptor
 //! (`I`, `F`, `V`, `L;`, `Ljava.lang.String;`, `[I`, ...).
 //!
-//! Class identity model (#110 steps 1-5): every loaded class owns one
+//! Class identity model (#110 steps 1-6): every loaded class owns one
 //! append-only arena record addressed by a stable [`ClassId`] (nonzero
 //! `u32`, separate from descriptor/name text). Bodies, pools, field
 //! initializer indices and frame contexts dereference the record by ID;
 //! a class name remains diagnostic metadata and is never enough to
 //! dereference an already-issued identity. Name-to-ID resolution
-//! ([`Loader::lookup`]) is a boundary operation. Production duplicate-name
-//! registration stays rejected in this slice (step 6); the arena layout
-//! already keeps each record's own metadata so a later slice can express
-//! the original head/insert-after-head cache topology without redirecting
-//! issued identities. Base/interface spellings still resolve through the
-//! selection map on each hierarchy walk; no parse-time binding policy is
-//! claimed here (binding-time probes are a later slice).
+//! ([`Loader::lookup`]) is the original 403a90/411610 512-bucket cache
+//! with head retention, insert-after-head placement and full hash + name
+//! compare. Production duplicate-name registration creates a new record
+//! per parsed module (real 403a90 semantics); identical synthetic
+//! installation stays idempotent like a cache hit. Base/interface
+//! spellings resolve through the current selection on each hierarchy walk
+//! until the class's own owner installs, then the owner retains its
+//! resolved dependencies on reentry (403e80 binding-time policy).
 
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use slr_fmt_tufa::{ClassRec, FieldRec, MethodRec, Module, PoolEntry};
@@ -173,11 +173,10 @@ pub struct Class {
     pub name: String,
     /// Direct superclass from CLSS head3 (`UINT_MAX` means no superclass).
     pub base: Option<String>,
-    /// Retained superclass identity, resolved once at link time (`None`
-    /// for `java.lang.Object`/root and for descriptors with no superclass).
-    /// The original dependency-before-owner reselection policy (4117a0 /
-    /// 403e80) is a later slice; this slice pins the already-loaded base.
-    pub base_id: Option<ClassId>,
+    /// No parse-time superclass binding is stored: before the class's own
+    /// owner installs, dependencies resolve through the current cache
+    /// selection on every attempt (4117a0/403e80 binding-time policy);
+    /// after the owner installs, the owner retains its dependencies.
     /// Interface names (pool `Class` entries past the base).
     pub interfaces: Vec<String>,
     /// Declared methods (both `MTHD` arrays concatenated, file order).
@@ -188,11 +187,15 @@ pub struct Class {
     pub bodies: Vec<Vec<slr_fmt_tufa::Node>>,
 }
 /// One append-only arena record: the class's own metadata plus its owned
-/// pool, initializer indices and local bodies. Never reused or unloaded in
-/// this slice (no GC/unloading recovered).
+/// pool, initializer indices and local bodies, with the 403a90 cache hash
+/// stored alongside so 411610's full hash + name compare never recomputes
+/// or confuses entries. Never reused or unloaded in this slice (no
+/// GC/unloading recovered).
 #[derive(Clone, Debug)]
 struct ClassRecord {
     class: Class,
+    /// Original 403a90 cache hash over the class name's raw UTF-8 bytes.
+    hash: u32,
     pool: Vec<PoolEntry>,
     field_initializers: Vec<Option<usize>>,
     /// Global [`crate::interp::BodyId`] slots owned by this record, in
@@ -273,37 +276,134 @@ pub enum LoadError {
     StaleId(u32),
 }
 
-/// The class loader: an append-only arena of loaded records with a
-/// name-to-ID selection map, plus package roots and boot state from
-/// `FUN_0040fe70`.
+/// The class loader: an append-only arena of loaded records with the
+/// original 512-bucket selection cache, plus package roots and boot state
+/// from `FUN_0040fe70`.
 ///
 /// Records own their immutable metadata, pool, field-initializer indices
-/// and local TREE bodies. Selection (currently one record per name; the
-/// duplicate-cache topology of step 6 plugs in here) maps a name or
-/// descriptor to the selected [`ClassId`]; execution dereferences IDs and
-/// never falls back to a name lookup when an ID dereference fails.
+/// and local TREE bodies. Selection maps a name or descriptor to the
+/// selected [`ClassId`] through the original 403a90/411610 cache topology
+/// (byte-length hash, head retention, insert-after-head, full hash + name
+/// compare); execution dereferences IDs and never falls back to a name
+/// lookup when an ID dereference fails.
 ///
 /// exe: FUN_0040fe70 (boot) + FUN_00411b20 (chunk loop)
 #[derive(Clone, Debug, Default)]
 pub struct Loader {
     records: Vec<ClassRecord>,
-    /// Boundary selection map: name -> selected record. Callers resolve
-    /// once at the interface and retain the ID.
-    selected: HashMap<String, ClassId>,
+    /// Original class cache (403a90/411610): 512 buckets of stable record
+    /// IDs. A later slice enables the production duplicate path through
+    /// [`Loader::register_duplicate`]; execution dereferences IDs.
+    cache: ClassCache,
     packages: Vec<(String, String)>,
     booted: bool,
     body_owners: Vec<ClassId>,
 }
 
+/// The original 403a90/411610 class cache: 512 buckets holding stable
+/// arena record IDs in registration-chain order. Head retention and
+/// insert-after-head placement live here, so selection reproduces the
+/// observed duplicate-winner topology without redirecting issued IDs.
+///
+/// exe: FUN_00403a90
+#[derive(Clone, Debug)]
+struct ClassCache {
+    buckets: Vec<Vec<ClassId>>,
+}
+
+/// Number of class-cache buckets in the original registrar (403a90).
+///
+/// exe: FUN_00403a90
+pub const CLASS_CACHE_BUCKETS: usize = 512;
+
+/// Original 403a90 name hash: byte length * 7 plus the signed-byte sum *
+/// 37, with 32-bit wrapping arithmetic over raw UTF-8 bytes. Rust `char`
+/// counts or unsigned byte sums give different buckets for high-byte names;
+/// the regression vectors pin the signed form (including negative wrapped
+/// hashes).
+///
+/// exe: FUN_00403a90
+#[must_use]
+pub fn class_cache_hash(name: &str) -> u32 {
+    let bytes = name.as_bytes();
+    let len = bytes.len() as u32;
+    let signed_sum = bytes.iter().fold(0u32, |acc, &byte| {
+        acc.wrapping_add(byte as i8 as i32 as u32)
+    });
+    len.wrapping_mul(7)
+        .wrapping_add(signed_sum.wrapping_mul(37))
+}
+
+/// Original 403a90 bucket index: the cache hash masked to 512 buckets.
+///
+/// exe: FUN_00403a90
+#[must_use]
+pub fn class_cache_bucket(name: &str) -> usize {
+    (class_cache_hash(name) % CLASS_CACHE_BUCKETS as u32) as usize
+}
+
+impl Default for ClassCache {
+    fn default() -> Self {
+        Self {
+            buckets: vec![Vec::new(); CLASS_CACHE_BUCKETS],
+        }
+    }
+}
+
+impl ClassCache {
+    /// Original 403a90 insert path: append the new record to the bucket
+    /// chain. Single-entry buckets grow at the tail (the head stays the
+    /// head); every later insert goes immediately after the head, pushing
+    /// the previous second entry down the chain.
+    ///
+    /// exe: FUN_00403a90
+    fn insert(&mut self, name: &str, id: ClassId) {
+        let chain = &mut self.buckets[class_cache_bucket(name)];
+        if chain.len() <= 1 {
+            chain.push(id);
+        } else {
+            chain.insert(1, id);
+        }
+    }
+
+    /// Bucket chain for an exact bucket index (diagnostics, collision
+    /// topology tests). Entries are arena IDs in chain order, head first.
+    #[must_use]
+    fn chain(&self, bucket: usize) -> &[ClassId] {
+        &self.buckets[bucket]
+    }
+}
+
 impl Loader {
     /// Boundary selection (`FUN_00411610` hit path): resolve a dotted name
-    /// to its selected record identity. Callers retain the ID; execution
-    /// never re-resolves a name when an ID dereference fails.
+    /// to its selected record identity through the original 512-bucket
+    /// cache. The winning entry is the first chain node whose stored full
+    /// hash and name both match, so duplicate registrations keep the
+    /// observed head/insert-after-head winner instead of a universal
+    /// first/last rule. Callers retain the ID; execution never re-resolves
+    /// a name when an ID dereference fails.
     ///
     /// exe: FUN_00411610
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<ClassId> {
-        self.selected.get(name).copied()
+        let want = class_cache_hash(name);
+        self.cache
+            .chain(class_cache_bucket(name))
+            .iter()
+            .copied()
+            .find(|id| {
+                self.records
+                    .get(id.index())
+                    .is_some_and(|record| record.hash == want && record.class.name == name)
+            })
+    }
+
+    /// Bucket chain behind one cache bucket, head first (diagnostics and
+    /// collision-topology tests). Entries are arena IDs in raw chain order,
+    /// without the hash/name match that [`Loader::lookup`] applies.
+    #[must_use]
+    pub fn cache_chain(&self, bucket: usize) -> &[ClassId] {
+        self.cache.chain(bucket)
     }
 
     /// Boundary descriptor resolution (`FUN_00410890`): `[...` keeps its
@@ -776,11 +876,16 @@ impl Loader {
         self.records.len()
     }
 
-    /// Number of distinct names with a selected record. Equal to [`Loader::len`]
-    /// while production duplicate registration stays rejected.
+    /// Number of distinct names with a selected record. Stays below
+    /// [`Loader::len`] once duplicate registrations share a name; the
+    /// loader never equates descriptor-name identity with record identity.
     #[must_use]
     pub fn unique_name_count(&self) -> usize {
-        self.selected.len()
+        let mut names = std::collections::HashSet::new();
+        for record in &self.records {
+            names.insert(record.class.name.as_str());
+        }
+        names.len()
     }
 
     /// `true` when no class is loaded.
@@ -795,7 +900,7 @@ impl Loader {
     /// exe: FUN_00411610
     #[must_use]
     pub fn find(&self, name: &str) -> Option<&Class> {
-        let id = self.selected.get(name)?;
+        let id = self.lookup(name)?;
         self.records.get(id.index()).map(|record| &record.class)
     }
 
@@ -815,48 +920,20 @@ impl Loader {
 
     /// Insert a linked class directly (test seam for synthetic classes;
     /// production code uses [`Loader::load_module`]). Identical installation
-    /// is idempotent; conflicting replacement panics before changing live IDs.
+    /// is idempotent, like a cache hit performing no registration; any
+    /// distinct same-name record registers as a real duplicate through the
+    /// 403a90 insert path so lookup flips to the observed winner while old
+    /// IDs stay pinned to their own records.
     /// Returns the issued record identity.
-    pub fn insert_test_class(&mut self, mut class: Class) -> ClassId {
-        if let Some(existing) = self.selected.get(&class.name) {
-            let record = &self.records[existing.index()];
-            assert_eq!(&record.class, &class, "cannot replace an installed class");
-            assert!(
-                record.field_initializers.is_empty() && record.body_slots.is_empty()
-                    || !class.bodies.is_empty()
-                    || record.class.bodies == class.bodies,
-                "cannot replace an installed class"
-            );
-            return *existing;
-        }
-        if class.base_id.is_none() {
-            class.base_id = class
-                .base
-                .as_deref()
-                .and_then(|base| self.selected.get(base))
-                .copied();
-        }
-        let id = ClassId::from_index(self.records.len());
-        let mut slots = Vec::with_capacity(class.bodies.len());
-        for _ in 0..class.bodies.len() {
-            slots.push(self.body_owners.len() as u32);
-            self.body_owners.push(id);
-        }
-        self.records.push(ClassRecord {
-            class: class.clone(),
-            pool: Vec::new(),
-            field_initializers: Vec::new(),
-            body_slots: slots,
-        });
-        self.selected.insert(class.name, id);
-        id
+    pub fn insert_test_class(&mut self, class: Class) -> ClassId {
+        self.install_duplicate(class)
     }
 
     /// Stable loaded-class context used by interpreter activation frames.
     /// The word is the [`ClassId`] encoding; decoding must go through
     /// [`Loader::context_id`], never through a name re-lookup.
     pub fn context_word(&self, class: &str) -> Option<u32> {
-        self.selected.get(class).map(|id| id.get())
+        self.lookup(class).map(|id| id.get())
     }
 
     /// Identity behind an activation-frame context word (0 is not a class).
@@ -878,8 +955,8 @@ impl Loader {
     /// Map a class-local TREE index to its executable body identity. The
     /// name form resolves once at the boundary; execution retains the ID.
     pub fn body_id(&self, class: &str, index: usize) -> Option<crate::interp::BodyId> {
-        let id = self.selected.get(class)?;
-        self.body_id_of(*id, index)
+        let id = self.lookup(class)?;
+        self.body_id_of(id, index)
     }
 
     /// ID-owned form of [`Loader::body_id`]: identity comes from the caller,
@@ -917,8 +994,8 @@ impl Loader {
     /// Constant pool retained from the owning TUFA module. The name form
     /// resolves once at the boundary; execution retains the ID.
     pub fn pool(&self, class: &str) -> Option<&[PoolEntry]> {
-        let id = self.selected.get(class)?;
-        self.pool_of(*id)
+        let id = self.lookup(class)?;
+        self.pool_of(id)
     }
 
     /// ID-owned pool access: no name lookup is consulted.
@@ -1165,48 +1242,72 @@ impl Loader {
             })
             .transpose()?
             .unwrap_or_default();
-        let base_id = base
-            .as_deref()
-            .and_then(|base| self.selected.get(base))
-            .copied();
         let linked = Class {
             kind: class_rec.head[1],
             name: name.clone(),
             base,
-            base_id,
             interfaces,
             methods,
             fields,
             bodies,
         };
-        // Production duplicate-name registration stays rejected in this
-        // slice: an identical repeat hits the selected record (idempotent),
-        // anything else fails before any record, selection or body identity
-        // is created. The duplicate-cache topology of step 6 plugs in here.
-        if let Some(existing) = self.selected.get(&name).copied() {
-            let record = &self.records[existing.index()];
-            if record.class == linked
-                && same_pool(&record.pool, &pool)
-                && record.field_initializers == initializers
-            {
-                return Ok((existing, name));
-            }
-            return Err(LoadError::Malformed(format!("conflicting class {name}")));
-        }
+        // Original 403a90 registration: every parsed module creates a NEW
+        // class record, even for an already-used name. An identical repeat
+        // is not an error and not a cache hit either — the later parser
+        // result is the new class object, while cache lookup still returns
+        // the older definition until the insert flips selection. The
+        // duplicate-cache topology of step 6 plugs in here.
+        let id = self.install_record(linked, class_cache_hash(&name), pool, initializers);
+        Ok((id, name))
+    }
+
+    /// Original 403a90 insert path shared by parsed modules and the
+    /// synthetic test seam: store one new arena record and chain it into
+    /// its name bucket (head retention, insert-after-head). Distinct
+    /// same-name records keep distinct pools/bodies/statics; selection
+    /// flips to the observed winner while old IDs stay pinned.
+    ///
+    /// exe: FUN_00403a90
+    fn install_record(
+        &mut self,
+        class: Class,
+        hash: u32,
+        pool: Vec<PoolEntry>,
+        field_initializers: Vec<Option<usize>>,
+    ) -> ClassId {
         let id = ClassId::from_index(self.records.len());
-        let mut slots = Vec::with_capacity(linked.bodies.len());
-        for _ in 0..linked.bodies.len() {
+        let mut slots = Vec::with_capacity(class.bodies.len());
+        for _ in 0..class.bodies.len() {
             slots.push(self.body_owners.len() as u32);
             self.body_owners.push(id);
         }
+        let name = class.name.clone();
         self.records.push(ClassRecord {
-            class: linked,
+            class,
+            hash,
             pool,
-            field_initializers: initializers,
+            field_initializers,
             body_slots: slots,
         });
-        self.selected.insert(name.clone(), id);
-        Ok((id, name))
+        self.cache.insert(&name, id);
+        id
+    }
+
+    /// Synthetic-seam duplicate path: an identical same-name record is
+    /// idempotent (a cache hit performs no registration); any distinct
+    /// record installs as a real duplicate through the 403a90 insert path.
+    /// The idempotence check compares like-for-like synthetic shapes only:
+    /// parsed records own pools/initializers/bodies while synthetic ones
+    /// arrive bodyless, so a parsed record never compares equal here.
+    fn install_duplicate(&mut self, class: Class) -> ClassId {
+        let hash = class_cache_hash(&class.name);
+        if let Some(existing) = self.lookup(&class.name) {
+            let record = &self.records[existing.index()];
+            if record.class == class && record.pool.is_empty() {
+                return existing;
+            }
+        }
+        self.install_record(class, hash, Vec::new(), Vec::new())
     }
 
     /// Load every module of one `.class` file (`FUN_00410430` over the
@@ -1706,10 +1807,17 @@ mod tests {
         // Context words round-trip per record.
         assert_eq!(loader.context_id(id_a.get()), Some(id_a));
         assert_eq!(loader.context_id(id_b.get()), Some(id_b));
-        // Identical reloads keep identities (no duplicate records).
+        // An identical parsed repeat is a NEW record (real 403a90: the
+        // later parser result is the new class object), even though cache
+        // lookup still selects the first definition in an initially empty
+        // bucket. The old ID stays pinned to its own pool/body.
         let (again_a, _) = loader.load_module(&module_a, &data_a).unwrap();
-        assert_eq!(again_a, id_a);
-        assert_eq!(loader.len(), 2);
+        assert_ne!(again_a, id_a);
+        assert_eq!(loader.len(), 3);
+        assert_eq!(loader.lookup("game.Alpha"), Some(id_a));
+        assert_eq!(loader.pool_text_of(id_a, 3).unwrap(), "alpha_count");
+        assert_eq!(loader.pool_text_of(again_a, 3).unwrap(), "alpha_count");
+        assert_eq!(loader.unique_name_count(), 2);
     }
 
     #[test]
@@ -1727,28 +1835,37 @@ mod tests {
     }
 
     #[test]
-    fn class_reload_is_idempotent_and_conflicts_leave_existing_metadata_unchanged() {
+    fn repeated_identical_file_parse_registers_a_fresh_record_each_time() {
         let (module, data) = tiny_module(sample_pool(), vec![], vec![[0, 3, 2, u32::MAX]]);
         let mut loader = Loader::new();
         let (id, _) = loader.load_module(&module, &data).unwrap();
         let context = loader.context_word("game.Widget").unwrap();
         assert_eq!(context, id.get());
         let body = loader.body_id("game.Widget", 0).unwrap();
+        // A repeated identical parse registers a FRESH record (real 403a90:
+        // the later parser result is the new class object); the lookup in
+        // an initially empty bucket still selects the first definition.
         let (again, _) = loader.load_module(&module, &data).unwrap();
-        assert_eq!(again, id);
+        assert_ne!(again, id);
         assert_eq!(loader.lookup("game.Widget"), Some(id));
-        assert_eq!(loader.len(), 1);
+        assert_eq!(loader.len(), 2);
         assert_eq!(loader.unique_name_count(), 1);
         assert_eq!(loader.context_word("game.Widget"), Some(context));
         assert_eq!(loader.body_id("game.Widget", 0), Some(body));
         assert_eq!(loader.body_owner(body), Some(id));
+        // A conflicting redefinition registers as a duplicate too: the
+        // old record keeps its pool while the new one carries the new
+        // field, and lookup still selects the first definition.
         let mut pool = sample_pool();
         pool[3] = PoolEntry::Str("different".into());
         let (replacement, replacement_data) = tiny_module(pool, vec![], vec![[0, 3, 2, u32::MAX]]);
-        assert!(loader.load_module(&replacement, &replacement_data).is_err());
-        assert_eq!(loader.len(), 1);
+        let (dup, _) = loader.load_module(&replacement, &replacement_data).unwrap();
+        assert_ne!(dup, id);
+        assert_ne!(dup, again);
+        assert_eq!(loader.len(), 3);
         assert_eq!(loader.pool_text("game.Widget", 3).unwrap(), "count");
         assert_eq!(loader.pool_text_of(id, 3).unwrap(), "count");
+        assert_eq!(loader.pool_text_of(dup, 3).unwrap(), "different");
         assert_eq!(loader.find("game.Widget").unwrap().fields[0].name, "count");
         assert_eq!(loader.body_id("game.Widget", 0), Some(body));
         assert!(loader.body(body).is_some());
@@ -1765,7 +1882,6 @@ mod tests {
             kind: 0,
             name: "java.lang.Object".into(),
             base: None,
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![],

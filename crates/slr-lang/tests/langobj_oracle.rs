@@ -100,7 +100,6 @@ fn host_with(class: &str) -> (VmHost, u32) {
             kind: 0,
             name: class.into(),
             base: None,
-            base_id: None,
             interfaces: vec![],
             methods: vec![],
             fields: vec![],
