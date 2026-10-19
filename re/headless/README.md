@@ -399,8 +399,9 @@ explicitly. Microsoft's [WM_SHOWWINDOW](https://learn.microsoft.com/en-us/window
 reference documents a notification after creation and before display for
 WS_VISIBLE windows. This adapter's exact delivery parameters remain declared
 scenario inputs; a full Windows message sequence is unproven. Default processing
-of that notification remains unknown and stops before supplying a result. An
-application-handled return also stops before further creation processing.
+of that notification remains unknown and stops before supplying a result unless
+the optional SHOW scenario below is configured. Without that optional scenario,
+an application-handled return also stops before further creation processing.
 
 The local original-code scenarios record actual CREATE zero/refusal returns at
 startup counter **3,849,584**. The explicit visible notification executes the
@@ -413,3 +414,63 @@ raw callback inputs, profiles and receipts remain ignored under
 `re/out/headless/window-visible/`. No window creation completion, physical
 desktop, full notification sequence, device/caps or MainMenu acceptance is
 established.
+
+## Optional SHOW result and finite declared transcript
+
+The creation object may additionally contain:
+
+```json
+"wm_showwindow": {
+  "default_result":0, "expected_callback_result":0, "after":"transcript",
+  "transcript":{"messages":[],"api_return":"owned_provisional_handle"}
+}
+```
+
+The parent `wm_create.after` must be `wm_showwindow`. All displayed fields are
+required. `after:"stop"` instead forbids the transcript object and stops after
+the actual SHOW callback return, before any CreateWindowExA result. Both
+results must be integer zero. One is the explicit platform default assumption;
+the other is the expected actual application result. The trace records whether
+the original WndProc consumed the default. An application-handled result still
+runs through the original callback; a mismatched result stops before advancing.
+Actual CREATE refusal stops before SHOW or transcript delivery, regardless of
+unused continuation inputs. The actual CREATE result also remains authoritative
+when application handling does not consume its configured default.
+
+The optional transcript is a finite supplied scenario with at most eight extra
+messages. Each requires `message`, raw 32-bit `wparam`, `default_result:0`,
+`expected_callback_result:0`, and raw 32-bit `lparam`. Only recovered WM_MOVE,
+WM_SIZE, WM_ACTIVATEAPP, WM_ACTIVATE, WM_SETFOCUS and WM_KILLFOCUS are supported
+with that scalar shape. WM_WINDOWPOSCHANGING and WM_WINDOWPOSCHANGED instead
+require `wparam:0`, `windowpos:["topmost",x,y,cx,cy,flags]` (or `"top"`), and
+`default_memory:"identity"`. Coordinates/dimensions are bounded signed words;
+flags are bounded 16-bit inputs. The adapter materializes and records the exact
+seven-word WINDOWPOS, including the same owned HWND. Changed structure words
+stop before another result. Unsupported fields, IDs, pointer shapes, repeated
+default calls, and unknown later imports stop explicitly. No generic default
+zero or additional notification is supplied.
+
+Every configured notification executes the registered original WndProc. Its
+known viewport/activation stores run as original instructions; the adapter does
+not inject game-state writes. This order and each default result are hypothetical
+inputs. Default processing that would generate other messages is not modeled,
+and messages without direct game writes are not proven safe to omit from a
+physical Windows sequence. Metadata records those limits, immutable configuration
+and its canonical hash. Omitting the option preserves all earlier diagnostic
+profiles and their complete outputs.
+
+The transcript must end with explicit `api_return:"stop"` or
+`"owned_provisional_handle"`. The latter supplies a declared platform result
+only for the exact suspended CreateWindowExA call: same owner, thunk, stack,
+return site, twelve arguments, CREATESTRUCT and active callback context.
+Every expected actual callback result must match before that one-shot return.
+The temporary stdcall adapter is removed immediately. The trace records the raw
+supplied result and `declared_api_return_supplied` state; it does not establish
+a completed physical HWND. Original code then executes until the next unknown
+boundary, currently ShowWindow with the supplied handle and SW_HIDE.
+
+Independent exploratory expectations and repeated original-executable captures
+stay ignored under `re/out/headless/window-transcript-native/`. All scenarios
+remain incomplete, with physical desktop observation and Windows notification
+sequence fidelity unestablished and MainMenu false. No ShowWindow success,
+later default processing, D3D device/caps model or boot acceptance is supplied.

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from window_transcript import TRANSCRIPT_NAMES, ShowMessageProfile, TranscriptExecution
+
 CREATION_MESSAGE_NAMES = {
     0x81: "WM_NCCREATE",
     0x83: "WM_NCCALCSIZE",
     1: "WM_CREATE",
     0x18: "WM_SHOWWINDOW",
 }
+CREATION_MESSAGE_NAMES.update(TRANSCRIPT_NAMES)
 
 
 @dataclass(frozen=True, init=False)
@@ -72,6 +75,7 @@ class CreationProfile:
     after_nccreate: str
     nccalcsize: CalculationProfile | None
     wm_create: CreateMessageProfile | None
+    wm_showwindow: ShowMessageProfile | None
 
     def __init__(self, data):
         required = {
@@ -81,7 +85,7 @@ class CreationProfile:
         if (
             not isinstance(data, dict)
             or not required <= set(data)
-            or set(data) - required - {"nccalcsize", "wm_create"}
+            or set(data) - required - {"nccalcsize", "wm_create", "wm_showwindow"}
         ):
             raise ValueError("explicit creation continuation fields required")
         result = data["default_nccreate_result"]
@@ -102,6 +106,14 @@ class CreationProfile:
         if create is not None and (calc is None or calc.after != "wm_create"):
             raise ValueError("CREATE delivery must be enabled")
         object.__setattr__(self, "wm_create", create)
+        show = (
+            ShowMessageProfile(data["wm_showwindow"])
+            if "wm_showwindow" in data
+            else None
+        )
+        if show is not None and (create is None or create.after != "wm_showwindow"):
+            raise ValueError("SHOW delivery must be enabled")
+        object.__setattr__(self, "wm_showwindow", show)
 
     @property
     def metadata(self):
@@ -113,6 +125,8 @@ class CreationProfile:
             result["nccalcsize"] = self.nccalcsize.metadata
         if self.wm_create is not None:
             result["wm_create"] = self.wm_create.metadata
+        if self.wm_showwindow is not None:
+            result["wm_showwindow"] = self.wm_showwindow.metadata
         return result
 
 
@@ -136,6 +150,11 @@ class CreationMessages:
             "message": 0x81,
             "args": (handle, 0x81, 0, parameters),
         }
+        if self.profile.wm_showwindow is not None:
+            record = self.records[handle]
+            record["transcript"] = TranscriptExecution(
+                self.profile.wm_showwindow, self.host, self.boundary, handle, record
+            )
 
     def default_proc(self, args):
         handle, message, _, parameters = args
@@ -157,7 +176,19 @@ class CreationMessages:
         ):
             raise self.boundary("unsupported_default_proc_context", args=args)
         if message != 0x81:
-            if message == 0x83:
+            if (
+                message == 0x18 or message in TRANSCRIPT_NAMES
+            ) and "transcript" in record:
+                transcript = record["transcript"]
+                value = transcript.default_proc(args)
+                self.last_call["declared_lresult"] = value
+                if transcript.windowpos_words is not None:
+                    self.last_call.update(
+                        windowpos_words=list(transcript.windowpos_words),
+                        declared_memory_policy="identity",
+                    )
+                return value
+            elif message == 0x83:
                 rectangle = self.host.read_u32s(parameters, 4)
                 if self.profile.nccalcsize is not None:
                     self.host.write_u32s(parameters, rectangle)
@@ -216,6 +247,10 @@ class CreationMessages:
                 "unsupported_creation_callback", args=list(request.args)
             )
         message = request.args[1]
+        if (message == 0x18 or message in TRANSCRIPT_NAMES) and "transcript" in record:
+            return record["transcript"].after_callback(
+                request, result, self.make_callback
+            )
         if (
             message == 0x81
             and result
@@ -252,6 +287,8 @@ class CreationMessages:
                     style=record["words"][8],
                 )
             record.update(message=0x18, args=(request.hwnd, 0x18, 1, 0))
+            if self.profile.wm_showwindow is not None:
+                record["transcript"].begin_show()
             self.host.windows[request.hwnd]["creation"] = "WM_SHOWWINDOW_pending"
             return self.make_callback(request.target, record["args"], request.hwnd)
         phase = (
