@@ -188,6 +188,7 @@ pub struct Replay {
     samples: Vec<Sample>,
     position: usize,
     after_game_init: usize,
+    segment_start: usize,
     accepted: usize,
     selected: bool,
     clock: Option<CounterClock>,
@@ -349,6 +350,7 @@ impl Replay {
             samples,
             position: 0,
             after_game_init,
+            segment_start: 0,
             accepted,
             selected: false,
             clock: None,
@@ -358,11 +360,19 @@ impl Replay {
             source_facts_sha256: text(&manifest, "source_facts_sha256")?.to_owned(),
         })
     }
+    /// Select the earliest captured external clock request. No request is skipped.
+    pub fn select_start(&mut self) -> Result<Selection> {
+        self.select(0)
+    }
     pub fn select_after_game_init(&mut self) -> Result<Selection> {
+        self.select(self.after_game_init)
+    }
+    fn select(&mut self, position: usize) -> Result<Selection> {
         if self.selected || self.failure.is_some() {
             return Err(err("replay already selected or failed"));
         }
-        self.position = self.after_game_init;
+        self.position = position;
+        self.segment_start = position;
         self.selected = true;
         let sample = &self.samples[self.position];
         self.clock = Some(CounterClock::from_state(CounterState {
@@ -376,6 +386,20 @@ impl Replay {
             frequency: sample.frequency,
             accepted_remaining: self.accepted - self.position,
         })
+    }
+    /// Validate that live execution reached the recorded phase boundary without
+    /// moving the tape or discarding any mismatching requests.
+    pub fn check_after_game_init(&self) -> Result<()> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if !self.selected || self.position != self.after_game_init {
+            return Err(err(format!(
+                "GameInit clock boundary incomplete: position {} expected {}",
+                self.position, self.after_game_init
+            )));
+        }
+        Ok(())
     }
     #[must_use]
     pub fn pending(&self) -> Option<Pending> {
@@ -394,7 +418,7 @@ impl Replay {
     }
     #[must_use]
     pub fn consumed(&self) -> usize {
-        self.position.saturating_sub(self.after_game_init)
+        self.position.saturating_sub(self.segment_start)
     }
     pub fn finish_accepted(&self) -> Result<()> {
         if let Some(e) = &self.failure {
@@ -423,6 +447,14 @@ impl Replay {
             self.failure = Some(e.clone());
         }
         result
+    }
+    /// Release an identity only when the embedding actually destroys that
+    /// interpreter thread. Original allocation addresses can then be reused by
+    /// a later lifetime without weakening request-context matching.
+    pub fn retire_thread(&mut self, runtime_id: u64) {
+        if let Some(address) = self.reverse.remove(&runtime_id) {
+            self.bindings.remove(&address);
+        }
     }
     fn match_thread(
         &mut self,
@@ -487,7 +519,10 @@ impl Replay {
             _ => return Err(err("reserved original precision")),
         };
         if precision != pc || rounding as u16 != (sample.cw >> 10) & 3 {
-            return Err(err("clock FPU control mismatch"));
+            return Err(err(format!(
+                "clock FPU control mismatch at request {}: expected {:?}/rounding {}, got {:?}/{:?}",
+                sample.ordinal, pc, (sample.cw >> 10) & 3, precision, rounding
+            )));
         }
         self.match_thread(&sample.thread, &context.thread)?;
         self.match_thread(&sample.cursor, &context.driver_cursor)?;
@@ -560,6 +595,7 @@ mod tests {
             samples,
             position: 0,
             after_game_init: 0,
+            segment_start: 0,
             accepted,
             selected: false,
             clock: None,
@@ -712,6 +748,85 @@ mod tests {
         replay.finish_accepted().unwrap();
     }
     #[test]
+    fn explicit_thread_destruction_releases_address_lifetime_binding() {
+        let mut replay = replay(vec![]);
+        let expected = Some(CapturedThread {
+            address: 42,
+            terminal_initializer: false,
+            context: ThreadContext {
+                id: 0,
+                name: Some("THRD-RUNVMI Config.getInfo".into()),
+                class: None,
+                method: None,
+                node_index: None,
+            },
+        });
+        let actual = |id| {
+            Some(ThreadContext {
+                id,
+                name: Some("THRD-RUNVMI Config.getInfo".into()),
+                class: None,
+                method: None,
+                node_index: None,
+            })
+        };
+        replay.match_thread(&expected, &actual(1)).unwrap();
+        assert!(replay.match_thread(&expected, &actual(2)).is_err());
+        replay.retire_thread(1);
+        replay.match_thread(&expected, &actual(2)).unwrap();
+    }
+    #[test]
+    fn driver_destruction_releases_address_for_next_run_in_the_same_drive() {
+        use slr_vm::{interp::flags, sched::Scheduler, threads::ThreadQueues};
+        use std::cell::RefCell;
+        let replay = RefCell::new(replay(vec![]));
+        let expected = Some(CapturedThread {
+            address: 42,
+            terminal_initializer: false,
+            context: ThreadContext {
+                id: 0,
+                name: Some("worker".into()),
+                class: None,
+                method: None,
+                node_index: None,
+            },
+        });
+        let mut queues = ThreadQueues::new();
+        let first = queues.spawn(10, 0, "worker");
+        let second = queues.spawn(10, 0, "worker");
+        let mut run = |queues: &mut ThreadQueues, id, _, _: &mut dyn FnMut() -> X87| {
+            let actual = Some(ThreadContext {
+                id: id as u64 + 1,
+                name: Some("worker".into()),
+                class: None,
+                method: None,
+                node_index: None,
+            });
+            replay
+                .borrow_mut()
+                .match_thread(&expected, &actual)
+                .unwrap();
+            queues.get_mut(id).flags = flags::STOPPED;
+        };
+        let mut reap = |queues: &mut ThreadQueues, id| {
+            replay.borrow_mut().retire_thread(id as u64 + 1);
+            queues.remove(id);
+        };
+        let mut scheduler = Scheduler::new();
+        scheduler.drive_with_reaper(
+            &mut queues,
+            0.0,
+            0,
+            &mut || X87::from_i64(0),
+            &mut run,
+            &mut reap,
+        );
+        assert_eq!(scheduler.reaped(), &[first, second]);
+        assert!(replay.borrow().bindings.is_empty());
+        assert!(replay.borrow().reverse.is_empty());
+    }
+
+    #[test]
     fn names_only_normalize_address_suffixes() {
         assert_eq!(
             normalize_name("Ljava.render.LoadingScreen;<202acf80>"),
@@ -741,6 +856,61 @@ mod tests {
         let result = Replay::load(temp.join("clock-inputs.jsonl"));
         fs::remove_dir_all(&temp).unwrap();
         assert!(result.err().unwrap().0.contains("SHA256"));
+    }
+    #[test]
+    fn earliest_capture_boundary_recomputes_all_original_clock_inputs() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/headless/clock-investigation/menu1800M");
+        let mut replay = Replay::load(base.join("clock-inputs.jsonl"))
+            .expect("local original replay capture required");
+        let selected = replay.select_start().unwrap();
+        assert_eq!(selected.next_request_ordinal, 1);
+        assert_eq!(selected.baseline, 26566);
+        assert_eq!(selected.accepted_remaining, 18926);
+        assert!(replay.check_after_game_init().is_err());
+        let references = fs::read_to_string(base.join("clock-reference-results.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect::<Vec<_>>();
+        while replay.position < replay.accepted {
+            let sample = replay.samples[replay.position].clone();
+            let convert = |t: &CapturedThread| {
+                let mut c = t.context.clone();
+                c.id = t.address;
+                c
+            };
+            let context = RequestContext {
+                thread: sample.thread.as_ref().map(convert),
+                driver_cursor: sample.cursor.as_ref().map(convert),
+            };
+            if replay.position == replay.after_game_init {
+                replay.check_after_game_init().unwrap();
+            }
+            // This arithmetic replay test supplies the recorded FPU controls;
+            // live callers must independently provide their actual controls.
+            let precision = match (sample.cw >> 8) & 3 {
+                0 => Precision::F32,
+                2 => Precision::F64,
+                3 => Precision::Ext,
+                _ => panic!("invalid recorded precision"),
+            };
+            let output = replay
+                .read(sample.site, &context, precision, Rounding::NearestEven)
+                .unwrap();
+            let hex = output
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            assert_eq!(
+                json!(hex),
+                references[sample.ordinal as usize - 1]["return_st0_le"],
+                "request {}",
+                sample.ordinal
+            );
+        }
+        replay.finish_accepted().unwrap();
     }
     #[test]
     fn original_capture_loads_and_counter_arithmetic_matches_reference_through_menu() {

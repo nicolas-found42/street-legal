@@ -286,7 +286,10 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
     // The render/sound/input capture hosts record their own calls; natives the
     // driver overrides in those classes are recorded here instead.
     let driver_owned = (info.class == "java.render.Viewport"
-        && !matches!(info.name, "activate" | "deactivate"))
+        && matches!(
+            info.name,
+            "create" | "resize" | "getAspect" | "getWidth" | "getHeight" | "getTop" | "getLeft"
+        ))
         || (matches!(info.class, "java.render.Camera" | "java.render.Text")
             && info.name == "create")
         || (info.class == "java.io.Input" && info.name == "getDeviceName")
@@ -736,7 +739,8 @@ fn run(
     println!("CONTROLLED Config created resource ID={created:#010x}; original startup allocation history not replayed");
     let link = slr_resource::node::link_created_script(vm, object, created)
         .map_err(|e| format!("ConfigNativeLinkBoundary: {e}"))?;
-    factory::attach_created(link).map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
+    factory::attach_created(link, config)
+        .map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
     println!("BOOT Config native link {link:?}");
     sched::run_created(
         vm,
@@ -752,6 +756,7 @@ fn run(
     if retained != link {
         return Err("Config constructor replaced native link".into());
     }
+    engine::register_created(vm, link.container, object)?;
     slr_resource::node::finish_created_script(link)
         .map_err(|e| format!("Config retained link release: {e}"))?;
     println!("BOOT Config constructor retained native resource link");
@@ -761,6 +766,9 @@ fn run(
         settings.globals.len()
     );
     settings.finish_refresh(false)?;
+    // The original graphics activation creates its D3D9 device without
+    // FPU_PRESERVE. This phase transition is independent of replay tape data.
+    vm.runtime_precision = slr_x87::Precision::F32;
     println!("CONTROLLED original refresh absent-backend branch: no handle writes or engine calls");
     let init = vm
         .read_field(object, "init")
@@ -780,7 +788,8 @@ fn run(
         .map_err(|e| format!("GameInit allocation: {e:?}"))?;
     let link = slr_resource::node::link_created_script(vm, object, created)
         .map_err(|e| format!("GameInitNativeLinkBoundary: {e}"))?;
-    factory::attach_created(link).map_err(|e| format!("GameInitChildRegistrationBoundary: {e}"))?;
+    factory::attach_created(link, init)
+        .map_err(|e| format!("GameInitChildRegistrationBoundary: {e}"))?;
     println!("CONTROLLED GameInit created ID={created:#010x}; native link {link:?}");
     telemetry::anchor("GameInit", object);
     sched::run_created(
@@ -792,6 +801,7 @@ fn run(
         &[Value::int(created as i32)],
     )
     .map_err(|(thread, e)| script_stop(vm, &thread, "GameInit constructor", e))?;
+    engine::register_created(vm, link.container, object)?;
     slr_resource::node::finish_created_script(link)
         .map_err(|e| format!("GameInit retained link release: {e}"))?;
     println!("BOOT GameInit constructor returned; pumping scheduler for {frames} frames");
@@ -840,6 +850,8 @@ fn run(
             engine::sample_replayed_animation_time();
         }
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        engine::notify_render_waiters(vm)
+            .map_err(|e| format!("render notify frame {frame}: {e}"))?;
         if let Some(seconds) = sched::replayed_frame_dt(frame + 1)? {
             engine::set_frame_dt(seconds);
         }
@@ -1043,6 +1055,13 @@ fn execute() -> Result<(), String> {
     engine::configure(engine::FrameConfig::default());
     viewport::configure_display();
     let mut vm = VmHost::new();
+    // Original Config/field initialization runs before D3D9 device creation
+    // under CRT 53-bit precision (ADR 0007); the settings activation below
+    // changes this same OS-thread state to 24-bit precision.
+    vm.runtime_precision = slr_x87::Precision::F64;
+    if sched::replaying() {
+        vm.runtime_clock = Some(sched::clock_ms);
+    }
     vm.native_diagnostics = Some(telemetry::native_snapshot);
     vm.call_trace = std::env::var_os("SLR_TRACE_CALLS").is_some();
     slr_vm::interp::set_step_trace(std::env::var_os("SLR_TRACE_STEPS").is_some());
@@ -1117,6 +1136,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewport_backend_and_driver_overrides_each_record_exactly_once() {
+        slr_calllog::headless::configure_stream(None, true);
+        slr_calllog::headless::reset();
+        slr_render_natives::reset_render();
+        let mut vm = VmHost::new();
+        slr_render_natives::install_headless(&mut vm);
+        viewport::install(&mut vm);
+        let args = [Value::reference(0x1000)];
+        for (address, name, sig) in [
+            (0x0048_1600, "destroy", "()V"),
+            (viewport::GET_WIDTH, "getWidth", "()F"),
+        ] {
+            let info = CallInfo {
+                jvm: 0,
+                thread: 0,
+                args: &args,
+                class: "java.render.Viewport",
+                name,
+                sig,
+            };
+            let native = vm.native_impls[&address];
+            let result = native(&mut vm, &info);
+            observe(&info, result);
+            let records = slr_calllog::headless::take_records();
+            assert_eq!(records.len(), 1, "{name} backend plus observer");
+            assert!(
+                matches!(&records[0], slr_calllog::LogRecord::NativeCall { class, name: recorded, .. } if class == info.class && recorded == name)
+            );
+        }
+    }
     #[test]
     fn open_lib_missing_local_one_loads_headers_before_original_fast_path() {
         use slr_vm::vmclass::{Class, Field};

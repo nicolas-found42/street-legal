@@ -470,3 +470,55 @@ The port currently starts every interpreter at24-bit. The diagnostic bundle is
 `re/out/boot/runs/20261020T184427.970981Z-a32ecd9a60ef/`. Model the startup/device
 precision boundary from execution evidence before consuming those early inputs;
 never take precision or results from the tape to bypass a mismatch.
+
+### Startup and frame replay checkpoint (2026-10-20)
+
+Strict raw replay now starts at request1. The port consumes the first6,986
+original requests, including Config, GameInit and frames0–30, with matching
+clock roles, live thread/script locations and FPU precision. GameInit's end
+asserts consumption of6,207 earlier requests without moving the tape. The
+latest retained run is `re/out/boot/runs/20261020T190539.042320Z-2673fa4539fc/`.
+It stops at request6,987 during frame31; this is not boot parity acceptance.
+
+Creation now executes original427210's getInfo queries8,9,28 before registering
+the returned callback capabilities. THRD-RUNVMI uses the original return-request
+flags and lifetime branches. Its label comes from the embedded template
+reference, including the original30-byte default template-name limit. Scoped
+destruction and scheduler reaping retire actual interpreter identities, clear
+script handles and unlink queues at the original destructor point. Initializer
+native hooks retain their own thread identity; resolved native calls expose the
+actual advanced PC. Frame completion drains the real Frontend.render monitor
+after animation, without adding a script-native call or a clock read.
+
+Nativeplayer control/animation implement the observed empty branches, including
+the raw animation-dt store. A passive353-frame original capture observes1,685
+entries with all relevant target/focus/render-link fields zero; its entire9,319
+unfiltered native records are byte-identical to the retained original. Constructor
+probes distinguish explicit zeroing from fields supplied by the declared zero
+allocator scenario. Nonempty paths stop explicitly. Source and receipts are
+`re/headless/player_frame_{history,probe}.py` and
+`re/out/headless/player-frame-investigation/verification.json`; frame state is
+also emitted on the shared diagnostic timeline.
+
+The first317 GC sweep identities and all112 completed finalizers in the latest
+strict run match the original prefix. Its earliest unfiltered difference at
+one-based684 was a duplicate Viewport.destroy record: the backend and boot
+observer both recorded it. Recording ownership now includes only the seven
+Viewport methods actually overridden by boot, with a real backend/observer
+regression. The subsequent video-open branch is under investigation; the
+headless original reports a DirectShow class-registration failure where the
+capture-only port currently returns zero. No oracle result has been substituted.
+
+Validation: `re/out/boot/parity-continuation-workspace-tests.txt` records984 Rust
+tests, zero failed/ignored; workspace clippy and formatting pass. The independent
+Viewport recording regression also passes. The headless suite passes192 tests
+with no skips, and the diagnostic runner suite passes20. Original callback,
+constructor, empty-frame and render-monitor probes repeat exactly; their
+boundaries and receipts remain under `re/out/boot/`.
+
+The checkpoint Jev gate verifies all three bounded claims with no contradictions
+or unsupported claims; it still escalates patch quality and two claim confidence
+scores (safe-to-apply0.33). Independent source reviews and literal executable
+checks support the measured prefixes and empty-branch projection. The advisory
+gate is retained as `re/out/boot/parity-continuation-gate.json`; it does not
+certify full parity or automatically approve the remaining implementation.

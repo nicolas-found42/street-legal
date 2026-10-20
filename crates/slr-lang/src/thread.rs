@@ -593,6 +593,19 @@ impl ThreadHost {
         self.queues.remove(id);
     }
 
+    /// Original41f4d0 destructor after the driver has already marked a thread
+    /// dead. Do not call die again: destruction clears the script back pointer
+    /// and handle and unlinks the thread, preserving its final flag word.
+    /// The returned script word lets the VM clear its physical Native.ptr cell.
+    pub fn destroy_thread(&mut self, id: ThreadId) -> Option<u32> {
+        let script = self.scripts.remove(&id);
+        if let Some(script) = script {
+            self.objects.insert(script, ThreadObject { handle: None });
+        }
+        self.queues.remove(id);
+        script
+    }
+
     /// The calling thread (`[CallInfo+4]`), when one is installed.
     #[must_use]
     pub fn current(&self) -> Option<ThreadId> {
@@ -1308,6 +1321,20 @@ mod tests {
     /// from the parameter, links it at the run-queue tail, and stores the
     /// two words: the script object in `+0x18`, the thread in the receiver's
     /// handle field.
+    #[test]
+    fn destructor_clears_script_and_handle_without_calling_die_again() {
+        let receiver = 0x2000_0007;
+        let mut host = fresh();
+        let id = host.init(receiver, 0x2000_0001);
+        host.queues_mut().get_mut(id).flags = slr_vm::interp::flags::DEAD;
+        assert_eq!(host.destroy_thread(id), Some(receiver));
+        assert_eq!(host.object(receiver).handle, None);
+        assert_eq!(host.script_object(id), None);
+        assert_eq!(host.queues().get(id).flags, slr_vm::interp::flags::DEAD);
+        assert!(host.queues().run_order().is_empty());
+        assert_eq!(host.destroy_thread(id), None);
+    }
+
     #[test]
     fn init_builds_and_links_the_thread() {
         let receiver = 0x2000_0007;

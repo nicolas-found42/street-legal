@@ -115,11 +115,13 @@ clock/frame inputs and source provenance; missing inputs or mismatched runtime
 requests stop replay. It never substitutes recorded native results or scans
 ahead to make an execution fit the tape.
 
-The current original-clock embedding selects the captured boundary after
-GameInit. Earlier boot calls still use the declared legacy timing scenario;
-strict clock comparison can therefore expose an earlier timing difference.
-The current LoadingScreen thread-name mismatch also stops replay. Both are
-reported failures with retained evidence, not successful boot parity claims.
+The original-clock embedding starts at the earliest captured request, including
+Config and field initialization. Startup uses the CRT's 53-bit x87 precision;
+graphics activation changes the live embedding to 24-bit precision before
+GameInit. The GameInit boundary asserts that all earlier requests were consumed;
+it does not seek the tape. Thread names, script locations, precision and thread
+lifetimes come from live execution and must match the original request context.
+Any remaining mismatch stops replay and retains the failing prefix.
 
 `regression.json` records the frozen case, earliest mismatch, comparison policy
 and reproduction/verification commands. `--check-regression` reports whether

@@ -81,6 +81,17 @@ impl Default for FrameConfig {
     }
 }
 
+/// Original436370 clears the render links. The captured zero-initialized
+/// allocator scenario supplies the initial target count, which its constructor
+/// leaves untouched. Nonempty player behavior remains a named boundary.
+#[derive(Default)]
+struct PlayerFrameState {
+    targets: u32,
+    focus: u32,
+    render_refs: [u32; 8],
+    unmodelled_command: Option<String>,
+}
+
 #[derive(Default)]
 struct State {
     masks: HashMap<u32, u32>,
@@ -93,6 +104,9 @@ struct State {
     control_acc: f32,
     config: FrameConfig,
     previous_animation_time: f32,
+    animation_dt: f32,
+    player_animation_dt: f32,
+    players: HashMap<u32, PlayerFrameState>,
     /// Event dispatches and callback passes, for inspection.
     pub trace: Vec<String>,
 }
@@ -109,6 +123,7 @@ pub fn configure(config: FrameConfig) {
     with(|s| {
         *s = State {
             config,
+            animation_dt: config.frame_dt,
             ..State::default()
         };
     });
@@ -160,6 +175,7 @@ pub fn sample_replayed_animation_time() {
             .to_f32(Precision::F32, Rounding::NearestEven);
         let elapsed = if elapsed > 0.1 { 0.1 } else { elapsed };
         state.previous_animation_time = seconds.to_f32(Precision::F32, Rounding::NearestEven);
+        state.animation_dt = elapsed;
         state.trace.push(format!("animation elapsed={elapsed:?}"));
     });
 }
@@ -171,7 +187,10 @@ pub fn set_frame_dt(seconds: f32) {
 /// The native player starts with EVENT_COMMAND subscribed. Observed at
 /// FUN_004265c0's loaded-data branch in the headless original (mask +0x70).
 pub fn player_created(container: u32) {
-    with(|s| *s.masks.entry(container).or_insert(0) |= 0x10);
+    with(|s| {
+        *s.masks.entry(container).or_insert(0) |= 0x10;
+        s.players.insert(container, PlayerFrameState::default());
+    });
 }
 
 /// Controller native bridge: resolve the same loaded native player resource
@@ -444,26 +463,77 @@ fn object_class(vm: &VmHost, word: u32) -> Option<slr_vm::vmclass::ClassId> {
 /// Call a script method on `script` synchronously on a fresh queued thread
 /// (`FUN_004255e0`: thread creation, argument push, call by name, then an
 /// unbudgeted run).
-fn call_script(
-    vm: &mut VmHost,
-    script: u32,
-    method: &str,
-    args: &[Value],
-    label: &str,
-) -> Result<(), String> {
+fn call_script(vm: &mut VmHost, script: u32, method: &str, args: &[Value]) -> Result<(), String> {
     let class = object_class(vm, script).ok_or("script instance has no loaded class")?;
-    sched::run_created(vm, label, class, script, method, args).map_err(|(thread, error)| {
-        let detail = crate::script_stop(
+    let container = with_res(|host| {
+        host.node(host.object_node(script))
+            .map(|node| node.container)
+    });
+    let name = container
+        .and_then(crate::factory::runtime_name)
+        .ok_or("callback resource name unavailable")?;
+    sched::run_callback(vm, &name, class, script, method, args, false)
+        .map(|_| ())
+        .map_err(|(thread, error)| {
+            let detail = crate::script_stop(
+                vm,
+                &thread,
+                &format!("script call {method} on {script:#x}"),
+                error,
+            );
+            match slr_vm::host::last_host_error() {
+                Some(host) => format!("{detail}; last host error: {host}"),
+                None => detail,
+            }
+        })
+}
+
+/// Original427210 queries getInfo8,9,28 in order after script construction.
+/// A nonzero scalar registers one callback record; these are real script calls.
+pub fn register_created(vm: &mut VmHost, container: u32, script: u32) -> Result<(), String> {
+    if crate::factory::native_class(container).as_deref() == Some("player") {
+        // Nativeplayer vtable5f12f0+3c→47b220: cases8/28 branch47b325
+        // returns1; case9 branches47b401 returning0. No script is dispatched.
+        with(|state| {
+            for kind in [8, 0x1c] {
+                state.callbacks.entry(kind).or_default().push(container);
+            }
+        });
+        return Ok(());
+    }
+    let class = object_class(vm, script).ok_or("postcreate script instance has no loaded class")?;
+    let name =
+        crate::factory::runtime_name(container).ok_or("postcreate resource name unavailable")?;
+    let mut registered = Vec::new();
+    for kind in [8, 9, 0x1c] {
+        let value = sched::run_callback(
             vm,
-            &thread,
-            &format!("script call {method} on {script:#x}"),
-            error,
-        );
-        match slr_vm::host::last_host_error() {
-            Some(host) => format!("{detail}; last host error: {host}"),
-            None => detail,
+            &name,
+            class,
+            script,
+            "getInfo",
+            &[Value::int(kind as i32)],
+            true,
+        )
+        .map_err(|(thread, error)| crate::script_stop(vm, &thread, "postcreate getInfo", error))?
+        .ok_or("postcreate getInfo returned no scalar")?;
+        if value.tag.name() != "I" {
+            return Err(format!(
+                "postcreate getInfo returned unexpected descriptor {}",
+                value.tag.name()
+            ));
         }
-    })
+        if value.payload != 0 {
+            registered.push(kind);
+        }
+    }
+    //427210 saves all three query results before appending any callback record.
+    with(|state| {
+        for kind in registered {
+            state.callbacks.entry(kind).or_default().push(container);
+        }
+    });
+    Ok(())
 }
 
 /// exe: FUN_004265c0 with FUN_00425c60 for the argument shapes modelled here.
@@ -491,11 +561,21 @@ pub fn dispatch(
         if let EventArg::Str(Some(text)) = arg {
             match text.split_whitespace().next() {
                 Some("setcontrol") if script != 0 => {
-                    call_script(vm, script, "setcontrol", &[], "EVENT")?;
+                    call_script(vm, script, "setcontrol", &[])?;
                 }
                 Some("device") => {
                     // The stock Controller has no addDeviceMapping body. Its native
                     // mapping is still a declared headless-input gap.
+                }
+                Some(
+                    command @ ("viewport" | "osd" | "renderinstance" | "camera" | "controllable"
+                    | "control" | "uncontrol"),
+                ) => {
+                    with(|state| {
+                        if let Some(player) = state.players.get_mut(&container) {
+                            player.unmodelled_command = Some(command.to_owned());
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -539,7 +619,7 @@ pub fn dispatch(
                 "dispatch container={container:#x} type={kind:#x} method={method} arg={arg:?}"
             ));
         });
-        call_script(vm, script, method, &args, "EVENT")?;
+        call_script(vm, script, method, &args)?;
     }
     let notifications = with(|s| s.notifications.get(&container).cloned().unwrap_or_default());
     let mut one_shot = Vec::new();
@@ -661,10 +741,125 @@ fn with_hook_flags<R>(container: u32, f: impl FnOnce() -> R) -> R {
     result
 }
 
+fn record_player_frame(container: u32, phase: &str, dt: Option<f32>, supported: bool) {
+    if !slr_vm::diagnostics::enabled() {
+        return;
+    }
+    let mut fields = with(|state| {
+        let mut fields = vec![
+            ("container".into(), format!("{container:#010x}")),
+            ("phase".into(), phase.into()),
+            ("supported_empty_branch".into(), supported.to_string()),
+        ];
+        if let Some(player) = state.players.get(&container) {
+            fields.extend([
+                ("target_count".into(), player.targets.to_string()),
+                ("focus".into(), format!("{:#010x}", player.focus)),
+                ("render_refs".into(), format!("{:?}", player.render_refs)),
+                (
+                    "unmodelled_command".into(),
+                    player.unmodelled_command.clone().unwrap_or_default(),
+                ),
+            ]);
+        }
+        fields
+    });
+    if let Some(dt) = dt {
+        fields.push((
+            "animation_dt_bits".into(),
+            format!("{:#010x}", dt.to_bits()),
+        ));
+    }
+    slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+        category: "native-player-frame".into(),
+        fields,
+    });
+}
+
+fn native_player_control(container: u32) -> Result<(), String> {
+    let result = with(|state| {
+        let player = state
+            .players
+            .get(&container)
+            .ok_or("NativeFrameBoundary: player state missing")?;
+        if player.targets != 0 || player.unmodelled_command.is_some() {
+            return Err("NativeFrameBoundary: nonempty player control target state".into());
+        }
+        //47a5f9..47a604: targetcount0 -> dec -> JS47a76b, without writes.
+        Ok(())
+    });
+    record_player_frame(container, "control", None, result.is_ok());
+    result
+}
+
+fn native_player_animate(container: u32, dt: f32) -> Result<(), String> {
+    let result = with(|state| {
+        //47a78c stores DAT0063c874 before reading the focus or render links.
+        state.player_animation_dt = dt;
+        let player = state
+            .players
+            .get(&container)
+            .ok_or("NativeFrameBoundary: player state missing")?;
+        if player.focus != 0
+            || player.render_refs.iter().any(|word| *word != 0)
+            || player.unmodelled_command.is_some()
+        {
+            return Err("NativeFrameBoundary: nonempty player animate state".into());
+        }
+        //47a8f7..47a91b only scans eight null refs; it does not execute
+        //the active-focus branch's write to DAT006439c0 or dispatch scripts.
+        state.trace.push(format!(
+            "nativeplayer animate dt_bits={:#010x}",
+            state.player_animation_dt.to_bits()
+        ));
+        Ok(())
+    });
+    record_player_frame(container, "animate", Some(dt), result.is_ok());
+    result
+}
+
+/// Original00428960 frame end, after rendering and before Timer7: look up
+/// Frontend.render and drain its actual object monitor (00408ce0). This is an
+/// engine wake-up, so it does not manufacture a script-to-native call record.
+pub fn notify_render_waiters(vm: &VmHost) -> Result<(), String> {
+    let Some(render) = vm.read_loaded_static_field("java.render.Frontend", "render") else {
+        return Ok(());
+    };
+    if render.payload == 0 {
+        return Ok(());
+    }
+    if render
+        .payload
+        .checked_sub(0x1000)
+        .and_then(|index| vm.objects.get(index as usize))
+        .is_none()
+    {
+        return Err(format!(
+            "RenderNotifyBoundary: Frontend.render {:#x} is not a live script object",
+            render.payload
+        ));
+    }
+    let woken = slr_lang::thread::with_threads(|host| host.notify_all(render.payload))
+        .map_err(|error| format!("RenderNotifyBoundary: {error:?}"))?;
+    slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+        category: "render-frame-notify".into(),
+        fields: vec![
+            ("monitor".into(), format!("{:#x}", render.payload)),
+            ("woken_threads".into(), format!("{woken:?}")),
+        ],
+    });
+    Ok(())
+}
+
 /// exe: FUN_004291e0 over the kind-8 list.
 fn control_pass(vm: &mut VmHost, dt: f32) -> Result<(), String> {
     let list = with(|s| s.callbacks.get(&8).cloned().unwrap_or_default());
     for container in list {
+        if crate::factory::native_class(container).as_deref() == Some("player") {
+            with_hook_flags(container, || native_player_control(container))?;
+            continue;
+        }
+
         let script = script_of(container);
         if script == 0 {
             continue;
@@ -674,7 +869,7 @@ fn control_pass(vm: &mut VmHost, dt: f32) -> Result<(), String> {
                 .push(format!("control container={container:#x} dt={dt}"))
         });
         with_hook_flags(container, || {
-            call_script(vm, script, "control", &[Value::float(dt)], "CONTROL")
+            call_script(vm, script, "control", &[Value::float(dt)])
         })?;
     }
     Ok(())
@@ -684,14 +879,18 @@ fn control_pass(vm: &mut VmHost, dt: f32) -> Result<(), String> {
 pub fn animate_pass(vm: &mut VmHost) -> Result<(), String> {
     let list = with(|s| s.callbacks.get(&0x1c).cloned().unwrap_or_default());
     for container in list {
+        if crate::factory::native_class(container).as_deref() == Some("player") {
+            let dt = with(|state| state.animation_dt);
+            with_hook_flags(container, || native_player_animate(container, dt))?;
+            continue;
+        }
+
         let script = script_of(container);
         if script == 0 {
             continue;
         }
         with(|s| s.trace.push(format!("animate container={container:#x}")));
-        with_hook_flags(container, || {
-            call_script(vm, script, "animate", &[], "ANIMATE")
-        })?;
+        with_hook_flags(container, || call_script(vm, script, "animate", &[]))?;
     }
     Ok(())
 }
@@ -798,6 +997,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_player_empty_frame_branch_stores_only_animation_dt_and_reports_bits() {
+        configure(FrameConfig::default());
+        player_created(123);
+        slr_vm::diagnostics::configure("player-frame-test".into(), 16, None);
+        with(|state| state.player_animation_dt = f32::from_bits(0x12345678));
+        native_player_control(123).unwrap();
+        assert_eq!(
+            with(|state| state.player_animation_dt.to_bits()),
+            0x12345678
+        );
+        native_player_animate(123, f32::from_bits(0x80000000)).unwrap();
+        assert_eq!(
+            with(|state| state.player_animation_dt.to_bits()),
+            0x80000000
+        );
+        let events = slr_vm::diagnostics::recent();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event|matches!(&event.kind,slr_vm::diagnostics::EventKind::External{category,fields} if category=="native-player-frame" && fields.contains(&("animation_dt_bits".into(),"0x80000000".into())))));
+        with(|state| state.players.get_mut(&123).unwrap().focus = 1);
+        assert!(native_player_animate(123, f32::from_bits(0x3dcccccd))
+            .unwrap_err()
+            .contains("nonempty"));
+        //47a78c precedes the focus test even when a later branch is unavailable.
+        assert_eq!(
+            with(|state| state.player_animation_dt.to_bits()),
+            0x3dcccccd
+        );
+        with(|state| {
+            let player = state.players.get_mut(&123).unwrap();
+            player.focus = 0;
+            player.render_refs[7] = 1;
+        });
+        assert!(native_player_animate(123, 0.0).is_err());
+        with(|state| state.players.get_mut(&123).unwrap().targets = 1);
+        assert!(native_player_control(123).is_err());
+        slr_vm::diagnostics::configure(String::new(), 0, None);
+    }
+
+    #[test]
     fn script_mask_changes_apply_to_native_player_subscription() {
         configure(FrameConfig::default());
         slr_resource::node::reset_res();
@@ -825,5 +1063,80 @@ mod tests {
         assert_eq!(with(|s| s.masks[&container]), 0);
         set_event_mask(&mut vm, &info);
         assert_eq!(with(|s| s.masks[&container]), 0x10);
+    }
+}
+
+#[cfg(test)]
+mod render_notify_tests {
+    use super::*;
+    use slr_vm::{
+        interp::{HeapSlot, Host},
+        values::TypeTag,
+        vmclass::{Class, Field},
+    };
+
+    #[test]
+    fn frame_end_drains_actual_frontend_render_monitor_in_lifo_order() {
+        slr_lang::thread::reset();
+        let mut vm = VmHost::new();
+        vm.loader.insert_test_class(Class {
+            kind: 0,
+            name: "java.render.Frontend".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            bodies: vec![],
+            fields: vec![Field {
+                class: "java.render.Frontend".into(),
+                name: "render".into(),
+                ty: "Ljava.render.GfxEngine;".into(),
+                is_static: true,
+            }],
+        });
+        vm.loader.insert_test_class(Class {
+            kind: 0,
+            name: "java.render.GfxEngine".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            bodies: vec![],
+            fields: vec![],
+        });
+        vm.alloc_object("java.render.Frontend").unwrap();
+        let render = vm.alloc_object("java.render.GfxEngine").unwrap();
+        let unrelated = vm.alloc_object("java.render.GfxEngine").unwrap();
+        let (first, second, other) = slr_lang::thread::with_threads(|host| {
+            let first = host.queues_mut().spawn(10, 0, "first");
+            let second = host.queues_mut().spawn(10, 0, "second");
+            let other = host.queues_mut().spawn(10, 0, "other");
+            for (thread, monitor) in [(first, render), (second, render), (other, unrelated)] {
+                host.set_current(Some(thread));
+                host.wait(monitor).unwrap();
+            }
+            host.set_current(None);
+            (first, second, other)
+        });
+        notify_render_waiters(&vm).unwrap(); // The actual static cell is still null.
+        slr_lang::thread::with_threads(|host| assert!(host.queues().run_order().is_empty()));
+        let context = vm.loader.context_word("java.render.Frontend").unwrap();
+        vm.write_cell(
+            HeapSlot::Static { context, slot: 0 },
+            Value {
+                tag: TypeTag::intern("Ljava.render.GfxEngine;"),
+                payload: render,
+            },
+        )
+        .unwrap();
+        let before = vm.objects.len();
+        notify_render_waiters(&vm).unwrap();
+        slr_lang::thread::with_threads(|host| {
+            assert_eq!(host.queues().run_order(), vec![second, first]);
+            assert_eq!(host.queues().notify_order(), vec![other]);
+            assert!(host.waiters(render).is_empty());
+            assert_eq!(host.waiters(unrelated), vec![other]);
+        });
+        assert_eq!(vm.objects.len(), before);
+        notify_render_waiters(&vm).unwrap(); // Empty drains are normal.
+        slr_lang::thread::reset();
     }
 }

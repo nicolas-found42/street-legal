@@ -492,6 +492,22 @@ impl Scheduler {
         clock: &mut dyn FnMut() -> X87,
         run: &mut Runner<'_>,
     ) -> SchedExit {
+        self.drive_with_reaper(queues, budget, min_priority, clock, run, &mut |_, _| {})
+    }
+
+    /// Run the original driver with an embedding destructor at the exact
+    /// `0x416aa4` reaping point. The cursor has advanced before the destructor;
+    /// the callback may unlink the old arena entry without changing traversal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn drive_with_reaper(
+        &mut self,
+        queues: &mut ThreadQueues,
+        budget: f32,
+        min_priority: i32,
+        clock: &mut dyn FnMut() -> X87,
+        run: &mut Runner<'_>,
+        reap: &mut dyn FnMut(&mut ThreadQueues, ThreadId),
+    ) -> SchedExit {
         let pc = SCRIPT_PRECISION;
         // 0x416943-0x416974: the entry flag is `budget == 0.0f`, and the
         // deadline is the f32 `clock() + budget`.
@@ -575,6 +591,7 @@ impl Scheduler {
             self.cursor = self.successor(queues, t);
             if f & flags::RUNNING == 0 && f & flags::DEAD != 0 {
                 self.reaped.push(t);
+                reap(queues, t);
             }
         }
     }
@@ -863,6 +880,49 @@ mod tests {
         assert_eq!(sched.cursor(), None);
         assert!(log.borrow().is_empty());
         assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn destructor_runs_between_threads_and_can_unlink_without_skipping_successor() {
+        let mut queues = ThreadQueues::new();
+        let first = queues.spawn(10, 0, "first");
+        let second = queues.spawn(10, 0, "second");
+        let mut sched = Scheduler::new();
+        let log = RefCell::new(Vec::new());
+        let mut run = |queues: &mut ThreadQueues, id, _, _: &mut dyn FnMut() -> X87| {
+            log.borrow_mut().push(("run", id));
+            if id == second {
+                assert!(!queues.run_order().contains(&first));
+            }
+            queues.get_mut(id).flags = flags::STOPPED;
+        };
+        let mut reap = |queues: &mut ThreadQueues, id| {
+            log.borrow_mut().push(("destroy", id));
+            assert_ne!(queues.get(id).flags & flags::DEAD, 0);
+            queues.remove(id);
+        };
+        assert_eq!(
+            sched.drive_with_reaper(
+                &mut queues,
+                0.0,
+                0,
+                &mut || X87::from_i64(0),
+                &mut run,
+                &mut reap
+            ),
+            SchedExit::ListEnd
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                ("run", first),
+                ("destroy", first),
+                ("run", second),
+                ("destroy", second)
+            ]
+        );
+        assert!(queues.run_order().is_empty());
+        assert_eq!(sched.reaped(), &[first, second]);
     }
 
     #[test]

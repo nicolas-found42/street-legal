@@ -51,20 +51,21 @@ thread_local! {
     static QUEUE_CONTEXTS: RefCell<HashMap<ThreadId,slr_vm::clock::ThreadContext>> = RefCell::new(HashMap::new());
 }
 
-/// Configure a validated raw-input tape without changing the pre-GameInit clock.
+/// Configure strict replay from the earliest captured external clock request.
 pub fn configure_replay(path: &Path) -> Result<(), String> {
-    let replay = Replay::load(path).map_err(|e| e.to_string())?;
+    let mut replay = Replay::load(path).map_err(|e| e.to_string())?;
+    replay.select_start().map_err(|e| e.to_string())?;
     let timer = slr_boot::frame_timer::FrameTimerReplay::load_companion(path)?;
     FRAME_TIMER.with(|v| *v.borrow_mut() = Some(timer));
     REPLAY.with(|v| *v.borrow_mut() = Some(replay));
-    REPLAYING.with(|v| v.set(false));
+    REPLAYING.with(|v| v.set(true));
     REPLAY_ERROR.with(|v| *v.borrow_mut() = None);
     Ok(())
 }
 pub fn begin_replay_after_game_init() -> Result<(), String> {
     REPLAY.with(|value| {
         if let Some(replay) = value.borrow_mut().as_mut() {
-            replay.select_after_game_init().map_err(|e| e.to_string())?;
+            replay.check_after_game_init().map_err(|e| e.to_string())?;
             REPLAYING.with(|v| v.set(true));
         }
         Ok(())
@@ -118,6 +119,19 @@ pub fn replayed_frame_dt(frame: u64) -> Result<Option<f32>, String> {
         REPLAY_ERROR.with(|v| *v.borrow_mut() = Some(error.clone()));
     }
     result.map(Some)
+}
+
+/// The caller has performed the actual scoped native thread destructor.
+/// This permits a later original allocation to reuse that thread's address.
+pub fn retire_clock_thread(id: ThreadId) {
+    REPLAY.with(|value| {
+        if let Some(replay) = value.borrow_mut().as_mut() {
+            replay.retire_thread(queue_identity(id));
+        }
+    });
+    QUEUE_CONTEXTS.with(|value| {
+        value.borrow_mut().remove(&id);
+    });
 }
 
 fn queue_identity(id: ThreadId) -> u64 {
@@ -389,6 +403,12 @@ fn mirror(thread: &mut Thread, before: bool) {
     let Some(id) = CURRENT.with(Cell::get) else {
         return;
     };
+    // Field initializers execute on a distinct transient interpreter thread.
+    // Its native calls must not overwrite the parked creation/callback queue
+    // entry, nor inherit that entry's flags/name when the native returns.
+    if thread.clock_identity != queue_identity(id) {
+        return;
+    }
     with_threads(|host| {
         if before {
             host.set_current(Some(id));
@@ -432,6 +452,7 @@ pub fn thread_start(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         return None;
     };
     let mut thread = Thread::new();
+    thread.alu.precision = vm.runtime_precision;
     let name = with_threads(|h| h.queues().get(id).name.clone());
     assign_clock_metadata(&mut thread, id, &name);
     match vm.enter_method(&mut thread, class, target, "run", &[]) {
@@ -465,6 +486,7 @@ pub fn run_created(
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|h| h.queues_mut().spawn(10, 0, name));
     let mut thread = Thread::new();
+    thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, name);
     let flow = match vm.enter_method(&mut thread, class, receiver, method, args) {
         Ok(flow) => flow,
@@ -493,6 +515,72 @@ pub fn run_created(
     }
 }
 
+/// Original425a90→4255e0 callback wrapper. The third stack argument requests
+/// a return value: it sets thread flag1 and makes destruction immediate. Void
+/// callbacks use flag0 and retain a blocked continuation in the run queue.
+#[allow(clippy::result_large_err)]
+pub fn run_callback(
+    vm: &mut VmHost,
+    resource_name: &str,
+    class: ClassId,
+    receiver: u32,
+    method: &str,
+    args: &[Value],
+    request_return: bool,
+) -> Result<Option<Value>, (Thread, slr_vm::interp::VmError)> {
+    // Original554900 appends into the wrapper's64-byte buffer, includingNUL.
+    let mut name = format!("THRD-RUNVMI {resource_name}.{method}");
+    let mut end = name.len().min(63);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    let flags = u32::from(request_return);
+    let id = with_threads(|host| host.queues_mut().spawn(10, flags, &name));
+    let mut thread = Thread::new();
+    thread.alu.precision = vm.runtime_precision;
+    thread.flags = flags;
+    assign_clock_metadata(&mut thread, id, &name);
+    let outer = CURRENT.with(|current| current.replace(Some(id)));
+    with_threads(|host| host.set_current(Some(id)));
+    let mut dispatched = None;
+    let result = (|| {
+        let flow = vm.enter_method(&mut thread, class, receiver, method, args)?;
+        dispatched = Some(flow);
+        if flow == Flow::Stay {
+            thread.run(vm, 0.0, &mut clock_ms)?;
+        }
+        if request_return || flow == Flow::Advance {
+            let value = thread.pop_deref_with(vm)?;
+            thread.release();
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    })();
+    let retained = result.is_ok() && !request_return && dispatched == Some(Flow::Stay);
+    if retained {
+        with_threads(|host| {
+            host.queues_mut().get_mut(id).flags = thread.flags;
+            host.set_current(outer);
+        });
+        if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
+            cache_clock_thread(vm, id, &thread);
+            INTERP.with(|threads| {
+                threads.borrow_mut().insert(id, thread.clone());
+            });
+        }
+    } else {
+        with_threads(|host| {
+            host.dispose_scoped(id);
+            host.set_current(outer);
+        });
+        retire_clock_thread(id);
+    }
+    CURRENT.with(|current| current.set(outer));
+    result.map_err(|error| (thread, error))
+}
+
 /// Original408560's scoped priority10,flags1 THRD-FIN. Its immediate
 /// destructor unlinks the temporary thread even if finalize blocked.
 #[allow(clippy::result_large_err)]
@@ -502,6 +590,7 @@ pub fn run_finalizer(
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|host| host.queues_mut().spawn(10, 1, "THRD-FIN"));
     let mut thread = Thread::new();
+    thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, "THRD-FIN");
     thread.flags = 1;
     let outer = CURRENT.with(|current| current.replace(Some(id)));
@@ -526,6 +615,7 @@ pub fn run_finalizer(
         host.dispose_scoped(id);
         host.set_current(outer);
     });
+    retire_clock_thread(id);
     result.map_err(|error| (thread, error))
 }
 
@@ -628,13 +718,19 @@ impl Pump {
         refresh_clock_queues(vm, &queues);
         let mut failure: Option<Box<RunFailure>> = None;
         let mut runs = 0;
+        let mut reap_error = None;
         let exit = {
+            // The driver invokes runner and destructor sequentially; both
+            // require exclusive access to the same VM at their actual points.
+            let vm = RefCell::new(vm);
             let mut clock = clock_ms;
             let mut run =
                 |q: &mut ThreadQueues, id: ThreadId, slice: f32, clock: &mut dyn FnMut() -> X87| {
                     if failure.is_some() {
                         return;
                     }
+                    let mut host = vm.borrow_mut();
+                    let vm = &mut **host;
                     let name = q.get(id).name.clone();
                     let Some(mut thread) = INTERP.with(|m| m.borrow_mut().remove(&id)) else {
                         failure = Some(Box::new(RunFailure {
@@ -653,6 +749,7 @@ impl Pump {
                         thread.flags = h.queues().get(id).flags;
                     });
                     CURRENT.with(|c| c.set(Some(id)));
+                    thread.alu.precision = vm.runtime_precision;
                     let result = thread.run(vm, slice, clock);
                     CURRENT.with(|c| c.set(None));
                     with_threads(|h| {
@@ -678,13 +775,34 @@ impl Pump {
                     }
                     refresh_clock_queues(vm, q);
                 };
+            let mut reap = |queues: &mut ThreadQueues, id: ThreadId| {
+                let script = with_threads(|host| {
+                    std::mem::swap(host.queues_mut(), queues);
+                    let script = host.destroy_thread(id);
+                    std::mem::swap(host.queues_mut(), queues);
+                    script
+                });
+                INTERP.with(|threads| {
+                    threads.borrow_mut().remove(&id);
+                });
+                retire_clock_thread(id);
+                if let Some(script) = script {
+                    let mut host = vm.borrow_mut();
+                    if let Err(error) = host.write_field(script, "ptr", Value::int(0)) {
+                        reap_error = Some(format!("Thread destructor Native.ptr: {error:?}"));
+                    }
+                }
+            };
             self.scheduler
-                .drive(&mut queues, 10.0, 0, &mut clock, &mut run)
+                .drive_with_reaper(&mut queues, 10.0, 0, &mut clock, &mut run, &mut reap)
         };
         self.runs += runs;
         LAST_DRIVER_CURSOR.with(|v| v.set(self.scheduler.cursor()));
         diagnostic_queues("scheduler-tick-return", self.ticks, &queues);
         with_threads(|h| *h.queues_mut() = queues);
+        if let Some(error) = reap_error {
+            return Err(gc_failure(error));
+        }
         if let Some(failure) = failure {
             return Err(failure);
         }
@@ -712,17 +830,13 @@ mod clock_provider_tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl");
         configure_replay(&path).unwrap();
-        assert!(!replaying());
-        begin_replay_after_game_init().unwrap();
         assert!(replaying());
-        let first = with_site(ClockSite::FramePhysicsEpoch, clock_ms);
-        let second = with_site(ClockSite::FramePreviousTime, clock_f32);
-        assert!(first.to_f32(slr_x87::Precision::F32, slr_x87::Rounding::NearestEven) > 0.0);
-        assert!(second > 0.0);
-        assert!(replay_error().is_none());
-        with_site(ClockSite::MathRandomize, clock_ms);
+        assert!(begin_replay_after_game_init()
+            .unwrap_err()
+            .contains("position 0 expected 6207"));
+        with_site(ClockSite::ThreadEnter, clock_ms);
         let error = replay_error().unwrap();
-        assert!(error.contains("expected TickEnter"));
+        assert!(error.contains("FPU control mismatch"));
         with_site(ClockSite::TickEnter, clock_ms);
         assert_eq!(replay_error(), Some(error));
         assert!(finish_accepted().is_err());
@@ -733,5 +847,183 @@ mod clock_provider_tests {
         configure_clock(0.0);
         assert!(!replaying());
         assert!(replay_error().is_none());
+    }
+}
+
+#[cfg(test)]
+mod callback_wrapper_tests {
+    use super::*;
+
+    fn stock_vm(leaf: &str) -> VmHost {
+        let mut vm = VmHost::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
+        for file in [
+            "system/Scripts/lang/Object.class",
+            "system/Scripts/lang/Native.class",
+            leaf,
+        ] {
+            vm.loader
+                .load_file_named(&std::fs::read(root.join(file)).unwrap())
+                .unwrap();
+        }
+        vm.native_thread_hook = Some(hook);
+        vm
+    }
+
+    #[test]
+    fn stock_script_returns_scalar_and_destroys_protected_callback_thread() {
+        slr_lang::thread::reset();
+        configure_clock(0.0);
+        slr_vm::diagnostics::configure("callback-scalar".into(), 128, None);
+        let mut vm = VmHost::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
+        vm.loader
+            .load_file_named(&std::fs::read(root.join("system/Scripts/lang/Object.class")).unwrap())
+            .unwrap();
+        let object = vm.alloc_object("java.lang.Object").unwrap();
+        let class = vm.loader.lookup("java.lang.Object").unwrap();
+        let original = with_threads(|host| host.queues().run_order());
+        let result = run_callback(
+            &mut vm,
+            "Config",
+            class,
+            object,
+            "equals",
+            &[Value::reference(object)],
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.tag.name(), "I");
+        with_threads(|host| {
+            assert_eq!(host.queues().run_order(), original);
+            assert!(host.queues().notify_order().is_empty());
+            assert_eq!(host.current(), None);
+        });
+        let events = slr_vm::diagnostics::recent();
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            slr_vm::diagnostics::EventKind::ThreadRun { .. }
+        ) && event.context.thread_name.as_deref()
+            == Some("THRD-RUNVMI Config.equals")));
+        let state = with_threads(|host| host.queues().threads().last().unwrap().clone());
+        assert_ne!(state.flags & 1, 0);
+        assert_ne!(state.flags & slr_vm::interp::flags::DEAD, 0);
+        slr_vm::diagnostics::configure(String::new(), 0, None);
+    }
+
+    #[test]
+    fn void_callback_that_waits_retains_real_continuation_and_unprotected_flags() {
+        fn close(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
+            with_threads(|host| host.wait(0x1234).unwrap());
+            None
+        }
+        slr_lang::thread::reset();
+        configure_clock(0.0);
+        let mut vm = stock_vm("system/Scripts/io/File.class");
+        slr_io::file::install(&mut vm);
+        vm.native_impls.insert(slr_io::file::FILE_CLOSE, close);
+        let object = vm.alloc_object("java.io.File").unwrap();
+        let class = vm.loader.lookup("java.io.File").unwrap();
+        assert!(
+            run_callback(&mut vm, "file", class, object, "finalize", &[], false)
+                .unwrap()
+                .is_none()
+        );
+        let id = with_threads(|host| {
+            let ids = host.queues().notify_order();
+            assert_eq!(ids.len(), 1);
+            let id = ids[0];
+            assert_eq!(host.queues().get(id).flags & 1, 0);
+            assert_eq!(host.queues().get(id).name, "THRD-RUNVMI file.finalize");
+            assert_eq!(host.waiters(0x1234), vec![id]);
+            id
+        });
+        assert!(INTERP.with(|threads| threads.borrow().contains_key(&id)));
+        INTERP.with(|threads| threads.borrow_mut().remove(&id));
+        with_threads(|host| host.dispose_scoped(id));
+    }
+}
+
+#[cfg(test)]
+mod mirror_identity_tests {
+    use super::*;
+
+    #[test]
+    fn nested_initializer_native_hook_preserves_both_threads_flags_and_names() {
+        slr_lang::thread::reset();
+        let id = with_threads(|host| host.queues_mut().spawn(10, 0x10, "THRD-CREATE"));
+        let mut initializer = Thread::new();
+        initializer.clock_name = Some("THRD-CLASSVAR-INI".into());
+        initializer.flags = 1;
+        CURRENT.with(|current| current.set(Some(id)));
+        hook(&mut initializer, true);
+        hook(&mut initializer, false);
+        assert_eq!(initializer.flags, 1);
+        assert_eq!(initializer.clock_name.as_deref(), Some("THRD-CLASSVAR-INI"));
+        with_threads(|host| {
+            assert_eq!(host.queues().get(id).flags, 0x10);
+            assert_eq!(host.queues().get(id).name, "THRD-CREATE");
+        });
+        let mut queued = Thread::new();
+        assign_clock_metadata(&mut queued, id, "old name");
+        hook(&mut queued, false);
+        assert_eq!(queued.flags, 0x10);
+        assert_eq!(queued.clock_name.as_deref(), Some("THRD-CREATE"));
+        CURRENT.with(|current| current.set(None));
+        slr_lang::thread::reset();
+    }
+}
+
+#[cfg(test)]
+mod driver_destructor_tests {
+    use super::*;
+
+    #[test]
+    fn pump_destruction_clears_vm_handle_roots_stacks_and_clock_cache() {
+        slr_lang::thread::reset();
+        configure_clock(0.01);
+        let mut vm = VmHost::new();
+        vm.loader.insert_test_class(slr_vm::vmclass::Class {
+            kind: 0,
+            name: "java.lang.Thread".into(),
+            base: None,
+            interfaces: vec![],
+            methods: vec![],
+            bodies: vec![],
+            fields: vec![slr_vm::vmclass::Field {
+                class: "java.lang.Thread".into(),
+                name: "ptr".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+        });
+        let object = vm.alloc_object("java.lang.Thread").unwrap();
+        vm.write_field(object, "ptr", Value::int(0x1234)).unwrap();
+        let id = with_threads(|host| {
+            let id = host.init(object, 0);
+            host.queues_mut().get_mut(id).flags = slr_vm::interp::flags::DEAD;
+            id
+        });
+        let mut thread = Thread::new();
+        assign_clock_metadata(&mut thread, id, "done");
+        cache_clock_thread(&vm, id, &thread);
+        INTERP.with(|threads| threads.borrow_mut().insert(id, thread));
+        crate::gc_runtime::configure_roots(object, object, None).unwrap();
+        let mut pump = Pump::new();
+        match pump.tick(&mut vm) {
+            Ok(exit) => assert_eq!(exit, SchedExit::TimeUp),
+            Err(failure) => panic!("{}: {:?}", failure.name, failure.error),
+        }
+        assert_eq!(pump.scheduler.reaped(), &[id]);
+        assert_eq!(vm.read_field(object, "ptr").unwrap().payload, 0);
+        with_threads(|host| {
+            assert_eq!(host.object(object).handle, None);
+            assert_eq!(host.script_object(id), None);
+            assert!(host.queues().run_order().is_empty());
+        });
+        assert!(!INTERP.with(|threads| threads.borrow().contains_key(&id)));
+        assert!(!QUEUE_CONTEXTS.with(|contexts| contexts.borrow().contains_key(&id)));
+        slr_lang::thread::reset();
     }
 }

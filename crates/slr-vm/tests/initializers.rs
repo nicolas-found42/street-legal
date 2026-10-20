@@ -1879,3 +1879,34 @@ fn initializer_constructor_runs_script_body_with_integer_argument_and_retains_ob
         );
     }
 }
+
+#[test]
+fn transient_initializers_use_current_embedding_thread_precision() {
+    use slr_x87::{Precision, X87};
+    use std::cell::RefCell;
+    thread_local! {
+        static OBSERVED: RefCell<Vec<Precision>> = const { RefCell::new(Vec::new()) };
+    }
+    fn clock() -> X87 {
+        OBSERVED.with(|values| {
+            values
+                .borrow_mut()
+                .push(slr_vm::clock::current_controls().0)
+        });
+        X87::from_i64(0)
+    }
+    for precision in [Precision::F64, Precision::F32] {
+        let mut vm = VmHost::new();
+        vm.runtime_precision = precision;
+        vm.runtime_clock = Some(clock);
+        vm.loader.load_file(&visibility_file(0, false)).unwrap();
+        OBSERVED.with(|values| values.borrow_mut().clear());
+        let object = vm.alloc_object("ReadClass").unwrap();
+        assert_eq!(vm.objects[(object - 0x1000) as usize].fields[0].payload, 11);
+        OBSERVED.with(|values| {
+            let values = values.borrow();
+            assert!(!values.is_empty());
+            assert!(values.iter().all(|value| *value == precision));
+        });
+    }
+}

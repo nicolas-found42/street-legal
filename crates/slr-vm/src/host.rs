@@ -542,6 +542,10 @@ pub struct VmHost {
     pub gc: crate::gc::Collector,
     /// Embedding clock for transient field-initializer interpreter threads.
     pub runtime_clock: Option<fn() -> slr_x87::X87>,
+    /// Current embedding OS thread's x87 precision. Startup remains at CRT
+    /// double precision until device creation changes it; script threads share
+    /// that control state rather than each choosing their own precision.
+    pub runtime_precision: slr_x87::Precision,
     /// Ported native implementations by exe address (`record+8`): the
     /// registry maps `(class, name, sig)` to the address, this maps the
     /// address to the port. Empty until the native slices land; an address
@@ -858,6 +862,7 @@ impl VmHost {
             objects: Vec::new(),
             gc: crate::gc::Collector::new(),
             runtime_clock: None,
+            runtime_precision: crate::interp::SCRIPT_PRECISION,
             native_impls: HashMap::new(),
             resource_resolver: None,
             method_diagnostics: vec![],
@@ -1345,6 +1350,7 @@ impl VmHost {
         mut destination: Value,
     ) -> Result<Value, HostError> {
         let mut thread = Thread::new();
+        thread.alu.precision = self.runtime_precision;
         thread.clock_name = Some(
             if receiver == 0 {
                 "THRD-CLASSVAR-INI"
@@ -1393,6 +1399,22 @@ impl VmHost {
                 .map(InitializationDiagnostic::Body),
         );
         Ok(destination)
+    }
+
+    /// Read an existing loaded class's own static cell without requesting or
+    /// initializing a class. Engine observers such as the frame-end render
+    /// notification use the same cached class/field storage as bytecode.
+    #[must_use]
+    pub fn read_loaded_static_field(&self, class: &str, name: &str) -> Option<Value> {
+        let class = self.loader.lookup(class)?;
+        let slot = self
+            .loader
+            .find_by_id(class)?
+            .fields
+            .iter()
+            .filter(|field| field.is_static)
+            .position(|field| field.name == name)?;
+        self.static_cells.get(&class.get())?.get(slot).copied()
     }
 
     /// Read a named field using the same authoritative cells as bytecode.
@@ -2687,54 +2709,65 @@ impl VmHost {
             }
             Ok(Flow::Advance)
         };
-        if crate::diagnostics::enabled() {
-            let identity = crate::diagnostics::NativeIdentity {
-                call_id: crate::diagnostics::next_call_id(),
-                class: method.class.clone(),
-                name: method.name.clone(),
-                signature: method.sig.clone(),
-                implementation: Some(implementation),
-            };
-            crate::diagnostics::with_context(
-                crate::diagnostics::Context {
-                    native: Some(identity),
-                    ..Default::default()
-                },
-                || {
-                    let parent_sequence =
-                        crate::diagnostics::emit(crate::diagnostics::EventKind::NativeEnter {
-                            args: args.iter().copied().map(Into::into).collect(),
-                        });
+        // Inline call-name resolution advances the real PC before invoking
+        // the native. Refresh the scopes from that actual state rather than
+        // retaining the outer opcode's pre-resolution location.
+        let clock_context = thread.clock_context(self);
+        let precision = thread.alu.precision;
+        let diagnostic_context = crate::diagnostics::thread_context(thread, self);
+        crate::clock::with_interpreter_context(clock_context, precision, || {
+            crate::diagnostics::with_context(diagnostic_context, || {
+                if crate::diagnostics::enabled() {
+                    let identity = crate::diagnostics::NativeIdentity {
+                        call_id: crate::diagnostics::next_call_id(),
+                        class: method.class.clone(),
+                        name: method.name.clone(),
+                        signature: method.sig.clone(),
+                        implementation: Some(implementation),
+                    };
                     crate::diagnostics::with_context(
                         crate::diagnostics::Context {
-                            parent_sequence,
+                            native: Some(identity),
                             ..Default::default()
                         },
                         || {
-                            let result = invoke(self, thread);
-                            match &result {
-                                Err(error) if !native_return_emitted.get() => {
-                                    crate::diagnostics::emit(
-                                        crate::diagnostics::EventKind::NativeReturn {
-                                            result: None,
-                                            error: Some(
-                                                self.native_failure
-                                                    .clone()
-                                                    .unwrap_or_else(|| format!("{error:?}")),
-                                            ),
-                                        },
-                                    );
-                                }
-                                _ => {}
-                            }
-                            result
+                            let parent_sequence = crate::diagnostics::emit(
+                                crate::diagnostics::EventKind::NativeEnter {
+                                    args: args.iter().copied().map(Into::into).collect(),
+                                },
+                            );
+                            crate::diagnostics::with_context(
+                                crate::diagnostics::Context {
+                                    parent_sequence,
+                                    ..Default::default()
+                                },
+                                || {
+                                    let result = invoke(self, thread);
+                                    match &result {
+                                        Err(error) if !native_return_emitted.get() => {
+                                            crate::diagnostics::emit(
+                                                crate::diagnostics::EventKind::NativeReturn {
+                                                    result: None,
+                                                    error: Some(
+                                                        self.native_failure.clone().unwrap_or_else(
+                                                            || format!("{error:?}"),
+                                                        ),
+                                                    ),
+                                                },
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                    result
+                                },
+                            )
                         },
                     )
-                },
-            )
-        } else {
-            invoke(self, thread)
-        }
+                } else {
+                    invoke(self, thread)
+                }
+            })
+        })
     }
 
     fn new_object(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
@@ -3167,6 +3200,51 @@ mod tests {
             "failed return must not enter script stack"
         );
         diagnostics::configure(String::new(), 0, None);
+    }
+
+    #[test]
+    fn native_clock_context_uses_resolved_pc_and_restores_outer_scope() {
+        fn native(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
+            assert_eq!(
+                crate::clock::current_thread_context().unwrap().node_index,
+                Some(44)
+            );
+            assert_eq!(crate::clock::current_controls().0, slr_x87::Precision::F64);
+            assert_eq!(
+                crate::diagnostics::current_context().location.unwrap().node,
+                44
+            );
+            Some(0)
+        }
+        let mut host = host_with_class();
+        let defining = host.loader.lookup("java.lang.Object").unwrap();
+        host.natives
+            .register("java.lang.Object", "observed", "()I", 0x12345678);
+        host.native_impls.insert(0x12345678, native);
+        let method = crate::vmclass::Method {
+            class: "java.lang.Object".into(),
+            name: "observed".into(),
+            sig: "()I".into(),
+            flags: 0x49,
+            static_vector: true,
+            is_native: true,
+            body: 0,
+            is_abstract: false,
+            extra: 0,
+        };
+        let (mut thread, _) = thread_with_frame(vec![]);
+        let outer = thread.clock_context(&host);
+        thread.pc.as_mut().unwrap().idx = 44;
+        thread.alu.precision = slr_x87::Precision::F64;
+        crate::diagnostics::configure("resolved-native-context".into(), 16, None);
+        crate::clock::with_interpreter_context(outer.clone(), slr_x87::Precision::F32, || {
+            host.invoke_method_native_id(&mut thread, &method, defining, 0)
+                .unwrap();
+            assert_eq!(crate::clock::current_thread_context(), Some(outer));
+            assert_eq!(crate::clock::current_controls().0, slr_x87::Precision::F32);
+        });
+        assert!(crate::clock::current_thread_context().is_none());
+        crate::diagnostics::configure(String::new(), 0, None);
     }
 
     #[test]

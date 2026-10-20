@@ -8,7 +8,7 @@ use slr_vm::{
     values::Value,
     vmclass::ClassRef,
 };
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashMap};
 
 struct World {
     factory: Factory,
@@ -17,6 +17,8 @@ struct World {
     game: Root,
     materialisation: Vec<(u32, String)>,
     resources: Vec<RuntimeResource>,
+    attached_names: HashMap<u32, String>,
+    template_names: HashMap<u32, String>,
 }
 
 /// Identity/ownership projection of a headless engine resource. The retained
@@ -71,6 +73,8 @@ pub fn configure(config: Option<u32>, init: Option<u32>) {
             factory,
             materialisation: vec![],
             resources: vec![],
+            attached_names: HashMap::new(),
+            template_names: HashMap::new(),
             ids,
             library: Root {
                 resource_id: 1,
@@ -174,6 +178,9 @@ fn create(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), String> {
         Some(&class_name),
         Some(class),
     )?;
+    // 53a2a0 registers callback capabilities before its native wrapper
+    // replaces the script's Native.ptr with the newly returned resource link.
+    crate::engine::register_created(vm, instance.container, receiver)?;
     let link = node::bind_existing_script(vm, receiver, instance.container)?;
     println!(
         "BOOT native factory class={class_name} template={:#010x} instance={:#010x} ptr={:#x}",
@@ -228,9 +235,18 @@ pub fn instantiate(
         let requested = if requested == 0 {
             let class_name = default_class_name.ok_or("default template needs a class name")?;
             let class = default_class.ok_or("default template needs a class")?;
-            w.factory
-                .default_for_class(w.library, class, class_name, &mut || w.ids.allocate())?
-                .id
+            let descriptor = format!("L{class_name};");
+            let template =
+                w.factory
+                    .default_for_class(w.library, class, &descriptor, &mut || w.ids.allocate())?;
+            // 53a1a0 passes31 to551120/5548c0, whose bound includesNUL.
+            let mut end = descriptor.len().min(30);
+            while !descriptor.is_char_boundary(end) {
+                end -= 1;
+            }
+            w.template_names
+                .insert(template.container, descriptor[..end].to_owned());
+            template.id
         } else {
             if !w.factory.templates.contains_key(&requested) {
                 let phases = super::RES.with(|r| r.borrow().template_phases(requested))?;
@@ -329,12 +345,55 @@ pub fn create_resource(descriptor: ResourceDescriptor<'_>) -> Result<u32, String
 }
 
 /// Original creation uses the same game-root owner for Config and GameInit.
-pub fn attach_created(link: node::ScriptLink) -> Result<(), String> {
+pub fn attach_created(link: node::ScriptLink, template: u32) -> Result<(), String> {
+    let name = package_name(template).ok_or("created template has no package name")?;
     WORLD.with(|w| {
-        let w = w.borrow();
-        let w = w.as_ref().ok_or("factory world not installed")?;
+        let mut w = w.borrow_mut();
+        let w = w.as_mut().ok_or("factory world not installed")?;
         let parent = w.game.container.ok_or("game root missing")?;
-        node::with_res(|h| h.append_child(parent, link.container))
+        node::with_res(|h| h.append_child(parent, link.container))?;
+        w.attached_names.insert(link.container, name);
+        Ok(())
+    })
+}
+
+fn package_name(id: u32) -> Option<String> {
+    crate::RES.with(|resources| {
+        let resources = resources.borrow();
+        let package = resources.packages.get((id >> 16) as usize)?.1.as_ref()?;
+        package
+            .entries
+            .iter()
+            .find(|entry| entry.type_id == id & 0xffff)
+            .map(|entry| entry.alias.trim_end_matches('\0').to_owned())
+    })
+}
+
+/// Callback4255e0 uses the data's embedded template reference (+0x38), not
+/// the instance name. At42568b ECX is data+0x38;48adb0 reads its container's
+/// name at+0x60. Thus a "dummy" instance is labeled "Dummy.getInfo".
+pub fn runtime_name(container: u32) -> Option<String> {
+    WORLD.with(|world| {
+        let world = world.borrow();
+        let world = world.as_ref()?;
+        world.attached_names.get(&container).cloned().or_else(|| {
+            let instance = world
+                .factory
+                .instances
+                .values()
+                .find(|instance| instance.container == container)?;
+            let template = node::with_res(|host| {
+                host.node(instance.template_link).map(|node| node.container)
+            })?;
+            world.template_names.get(&template).cloned().or_else(|| {
+                let template = world
+                    .factory
+                    .templates
+                    .values()
+                    .find(|entry| entry.container == template)?;
+                package_name(template.id)
+            })
+        })
     })
 }
 
@@ -421,6 +480,7 @@ fn game_ref_create_inner(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), Str
         .map_err(|(thread, e)| {
             crate::script_stop(vm, &thread, "created instance constructor", e)
         })?;
+        crate::engine::register_created(vm, created.container, script)?;
     }
     println!(
         "BOOT created instance template={template_id:#010x} id={:#010x} script={script:#x} native_only={native_only}",
@@ -439,4 +499,38 @@ pub fn game_ref_create(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         return None;
     }
     node::bridge(vm, info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_label_uses_bounded_template_descriptor_instead_of_instance_name() {
+        configure(None, None);
+        let mut vm = VmHost::new();
+        let created = instantiate(
+            &mut vm,
+            None,
+            0,
+            7,
+            "arbitrary instance",
+            Some("java.render.SimpleLoadingDialog"),
+            slr_vm::vmclass::ClassId::from_raw(17),
+        )
+        .unwrap();
+        // Original53a1a0→551120(copy limit31)→5548c0 stores30 bytes+NUL.
+        // Original42568b then reads that template name through data+0x38.
+        assert_eq!(
+            runtime_name(created.container).as_deref(),
+            Some("Ljava.render.SimpleLoadingDial")
+        );
+        WORLD.with(|world| {
+            let world = world.borrow();
+            assert_eq!(
+                world.as_ref().unwrap().factory.instances[&created.id].name,
+                "arbitrary instance"
+            );
+        });
+    }
 }
