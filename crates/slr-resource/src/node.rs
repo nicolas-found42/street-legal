@@ -403,6 +403,9 @@ pub fn link_created_script(
         }
         let mut container = Container::new(1, resource_id);
         container.flags = 0x21;
+        // The creation bridge's own load call (vtable +0xc with 1.0f) leaves
+        // the instance loaded, so it can parent later native instances.
+        container.load_state |= 1;
         container.instance = Some(GameInstance {
             script: object,
             ..GameInstance::default()

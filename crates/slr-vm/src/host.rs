@@ -70,8 +70,35 @@ pub enum HostError {
     NoBody,
 }
 
+thread_local! {
+    static LAST_HOST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Attach a diagnostic detail to the next [`HostError`] conversion.
+pub(crate) fn note(detail: String) {
+    LAST_HOST_NOTE.with(|slot| *slot.borrow_mut() = Some(detail));
+}
+
+thread_local! {
+    static LAST_HOST_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The detail of the most recent [`HostError`] folded into a [`VmError`]
+/// (the opword code alone cannot say which lookup failed). Diagnostic only.
+#[must_use]
+pub fn last_host_error() -> Option<String> {
+    LAST_HOST_ERROR.with(|e| e.borrow().clone())
+}
+
 impl From<HostError> for VmError {
     fn from(e: HostError) -> Self {
+        let detail = LAST_HOST_NOTE.with(|slot| slot.borrow_mut().take());
+        LAST_HOST_ERROR.with(|slot| {
+            *slot.borrow_mut() = Some(match detail {
+                Some(detail) => format!("{e:?}: {detail}"),
+                None => format!("{e:?}"),
+            });
+        });
         match e {
             HostError::UnresolvedName => Self::Unsupported(0x1011),
             HostError::MissingMember => Self::Unsupported(0x401c),
@@ -519,6 +546,12 @@ pub struct VmHost {
     pub missing_native: Option<String>,
     /// Optional observer of actual native calls in dispatch order.
     pub native_observer: Option<fn(&CallInfo<'_>, Option<u32>)>,
+    /// Embedding hook around every native call, with the calling script
+    /// thread (`CallInfo+4` in the exe). Called with `true` just before the
+    /// native runs and `false` right after it returns, so a runtime can
+    /// install the caller and fold flag changes the native made (sleep, wait)
+    /// back into the interpreter thread before its loop-tail check.
+    pub native_thread_hook: Option<fn(&mut Thread, bool)>,
     /// Embedding boundary for implementations whose required engine/runtime is
     /// unavailable. Checked before invoking a native, preserving named stops.
     pub native_boundary: Option<NativeBoundary>,
@@ -631,6 +664,7 @@ impl VmHost {
             constructor_calls: vec![],
             missing_native: None,
             native_observer: None,
+            native_thread_hook: None,
             native_boundary: None,
             native_failure: None,
             initializer_failure: None,
@@ -699,6 +733,11 @@ impl VmHost {
         }
         self.variable_names.push(name.to_owned());
         self.variable_names.len() as u32
+    }
+
+    /// The element cells of an array object, for natives that copy payloads.
+    pub fn array_cells_mut(&mut self, word: u32) -> Option<&mut Vec<Value>> {
+        self.array_cells.get_mut(&word)
     }
 
     /// Allocate initialized storage for one typed array. This does not
@@ -1076,35 +1115,6 @@ impl VmHost {
         Ok(HeapSlot::Static { context, slot })
     }
 
-    fn initializer_supported(&self, body: BodyId) -> bool {
-        self.loader.body(body).is_some_and(|nodes| {
-            nodes.iter().enumerate().all(|(index, node)| {
-                if node.opword == 0x21 {
-                    // Original initializer vectors establish new+constructor
-                    // with no arguments or one primitive integer literal. Keep
-                    // other constructor argument families as named boundaries.
-                    let Some(count) = index.checked_sub(1).and_then(|i| nodes.get(i)) else {
-                        return false;
-                    };
-                    if count.opword != 0x1027 {
-                        return false;
-                    }
-                    return match count.imm {
-                        0 => true,
-                        1 => index.checked_sub(3).is_some_and(|i| {
-                            nodes[i].opword == 0x1007
-                                && nodes[i].imm == 0x1c
-                                && matches!(nodes[i + 1].opword, 0x100b | 0x100e)
-                        }),
-                        _ => false,
-                    };
-                }
-                !matches!(node.opword, 0x101e | 0x0022..=0x0023 | 0x4025 | 0x4026)
-                    && !(matches!(node.opword, 0x1007 | 0x1008) && matches!(node.imm, 0x1f..=0x20))
-            })
-        })
-    }
-
     fn initialize_field(
         &mut self,
         body: BodyId,
@@ -1130,12 +1140,6 @@ impl VmHost {
         receiver: u32,
         mut destination: Value,
     ) -> Result<Value, HostError> {
-        if !self.initializer_supported(body) {
-            return Err(HostError::UnsupportedInitializer(format!(
-                "body {} requires #110 execution",
-                body.0
-            )));
-        }
         let mut thread = Thread::new();
         let pc = Some(crate::interp::Pc { body, idx: 0 });
         let mut frame = crate::interp::Frame::new(pc, receiver);
@@ -1379,7 +1383,15 @@ impl VmHost {
     /// then the loaded record identity carries execution.
     /// exe: FUN_00410890
     fn load_class_ref(&mut self, descriptor: &str) -> Option<crate::vmclass::ClassRef> {
-        <Self as LoaderConvert>::load_class(self, descriptor)
+        if let Some(array) = crate::vmclass::ArrayDescriptor::new(descriptor) {
+            return Some(crate::vmclass::ClassRef::Array(array));
+        }
+        // Load-or-get: a miss reads the class file like any other request
+        // (`FUN_00410890`), instead of answering from the loaded set only.
+        match self.loader.request(descriptor) {
+            Ok(Some(id)) => Some(crate::vmclass::ClassRef::Loaded(id)),
+            _ => None,
+        }
     }
 }
 
@@ -1495,9 +1507,18 @@ impl Host for VmHost {
     /// logs, since concatenation needs booted string objects).
     ///
     /// exe: FUN_00417a70
+    fn concatenate_strings(
+        &mut self,
+        left: &mut Value,
+        right: &mut Value,
+    ) -> Option<Result<(), VmError>> {
+        (left.tag.name() == TypeTag::STRING && right.tag.name() == TypeTag::STRING)
+            .then(|| self.join_strings(left, right))
+    }
+
     fn operator_on_refs(
         &mut self,
-        op: RefOperator,
+        _op: RefOperator,
         left: &mut Value,
         right: &mut Value,
     ) -> Option<Result<(), VmError>> {
@@ -1506,14 +1527,9 @@ impl Host for VmHost {
         let l_str = left.tag.name() == TypeTag::STRING;
         let r_str = right.tag.name() == TypeTag::STRING;
         match (l_str, r_str) {
-            (true, true) => {
-                // Concatenation needs the char bytes (open: string objects
-                // hold only lengths here); report unhandled so the plain
-                // helper logs `unsupported class type` like the exe does
-                // for a missing pool.
-                let _ = op;
-                None
-            }
+            // Both Strings: the gate leaves them alone; `FUN_0041b4d0` then
+            // concatenates ([`Host::concatenate_strings`]).
+            (true, true) => None,
             (false, false) => None,
             _ => {
                 // Convert the non-String side toward String.
@@ -1531,6 +1547,30 @@ impl Host for VmHost {
 }
 
 impl VmHost {
+    /// The `L` arm of `FUN_0041b4d0` for two String cells: a null side
+    /// contributes nothing, the joined bytes are interned (`FUN_004174a0`) and
+    /// stored into the left cell.
+    fn join_strings(&mut self, left: &mut Value, right: &Value) -> Result<(), VmError> {
+        let bytes = |host: &Self, word: u32| {
+            (word != 0)
+                .then(|| host.string_bytes(word).map(<[u8]>::to_vec))
+                .flatten()
+        };
+        let joined = match (bytes(self, left.payload), bytes(self, right.payload)) {
+            (None, None) => None,
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            (Some(mut l), Some(r)) => {
+                l.extend_from_slice(&r);
+                Some(l)
+            }
+        };
+        left.payload = self
+            .intern_string(joined.as_deref())
+            .map_err(|_| VmError::Unsupported(0x1007))?;
+        Ok(())
+    }
+
     /// The declaration immediate is a local index; its following node
     /// carries the type-pool index, optionally preceded by a 402e name.
     /// exe: FUN_00408d60
@@ -1597,6 +1637,70 @@ impl VmHost {
         Ok(Flow::Advance)
     }
 
+    /// The storage a `0x101b` field-reference component names: the receiver's
+    /// class (or the qualified class for a static start) is searched by name,
+    /// and a static field resolves to its class slot.
+    /// exe: FUN_00420d20, FUN_004208e0 (0x101b branch)
+    fn field_component_slot(
+        &mut self,
+        owner: crate::vmclass::ClassId,
+        imm: u32,
+        receiver: u32,
+        qualified: Option<crate::vmclass::ClassId>,
+    ) -> Result<HeapSlot, VmError> {
+        let dynamic = if receiver != 0 {
+            let object = self
+                .objects
+                .get(
+                    receiver
+                        .checked_sub(0x1000)
+                        .ok_or(HostError::MissingMember)? as usize,
+                )
+                .ok_or(HostError::MissingMember)?;
+            let crate::vmclass::ClassRef::Loaded(id) = object.class.clone() else {
+                // An array object's only field is `length`, stored in slot 0
+                // (`alloc_array` writes the length as the sole field).
+                let is_length = self
+                    .loader
+                    .field_reference_of(owner, imm)
+                    .is_ok_and(|(_, name, ty)| name == "length" && ty == "I");
+                return if is_length {
+                    Ok(HeapSlot::Object {
+                        word: receiver,
+                        slot: 0,
+                    })
+                } else {
+                    Err(HostError::MissingMember.into())
+                };
+            };
+            Some(id)
+        } else {
+            qualified
+        };
+        let (encoded, name, ty) = self
+            .loader
+            .field_reference_of(owner, imm)
+            .map_err(|_| HostError::MissingMember)?;
+        if ty.starts_with('(') {
+            return Err(HostError::MissingMember.into());
+        }
+        let encoded = self
+            .loader
+            .lookup(encoded)
+            .ok_or(HostError::MissingMember)?;
+        let (slot, is_static) = self.field_index_id(dynamic.unwrap_or(encoded), name)?;
+        Ok(if is_static {
+            self.static_slot_id(encoded, slot)?
+        } else if receiver != 0 {
+            HeapSlot::Object {
+                word: receiver,
+                slot,
+            }
+        } else {
+            return Err(HostError::MissingMember.into());
+        })
+    }
+
     /// Evaluate the inline field-name chain and borrow its final variable.
     /// Method-name/call record evaluation belongs to the separate 4208e0 path.
     /// exe: FUN_00420d20
@@ -1655,46 +1759,12 @@ impl VmHost {
                     if current.is_some() && receiver == 0 {
                         return Err(HostError::MissingMember.into());
                     }
-                    let dynamic = if receiver != 0 {
-                        let object = self
-                            .objects
-                            .get(
-                                receiver
-                                    .checked_sub(0x1000)
-                                    .ok_or(HostError::MissingMember)?
-                                    as usize,
-                            )
-                            .ok_or(HostError::MissingMember)?;
-                        let crate::vmclass::ClassRef::Loaded(id) = object.class.clone() else {
-                            return Err(HostError::MissingMember.into());
-                        };
-                        Some(id)
-                    } else {
-                        qualified
-                    };
-                    let (encoded, name, ty) = self
-                        .loader
-                        .field_reference_of(owner, component.imm)
-                        .map_err(|_| HostError::MissingMember)?;
-                    if ty.starts_with('(') {
-                        return Err(HostError::MissingMember.into());
-                    }
-                    let encoded = self
-                        .loader
-                        .lookup(encoded)
-                        .ok_or(HostError::MissingMember)?;
-                    let (slot, is_static) =
-                        self.field_index_id(dynamic.unwrap_or(encoded), name)?;
-                    current = Some(Slot::Heap(if is_static {
-                        self.static_slot_id(encoded, slot)?
-                    } else if receiver != 0 {
-                        HeapSlot::Object {
-                            word: receiver,
-                            slot,
-                        }
-                    } else {
-                        return Err(HostError::MissingMember.into());
-                    }));
+                    current = Some(Slot::Heap(self.field_component_slot(
+                        owner,
+                        component.imm,
+                        receiver,
+                        qualified,
+                    )?));
                     qualified = None;
                 }
                 0x101a | 0x001d if current.is_some() => {
@@ -1906,7 +1976,12 @@ impl VmHost {
             thread.release();
             (
                 self.reference_class_id(Value::reference(receiver))
-                    .ok_or(HostError::BadCast)?,
+                    .ok_or_else(|| {
+                        note(format!(
+                            "instance call {name:?} on receiver word {receiver:#x}, which is not a loaded heap object (0 is the original's illegal methodcall)"
+                        ));
+                        HostError::BadCast
+                    })?,
                 receiver,
             )
         } else {
@@ -1998,6 +2073,9 @@ impl VmHost {
             self.reference_class_id(Value::reference(receiver))
                 .ok_or(HostError::BadCast)?
         };
+        // A static context (no `this`) or a qualified class name starts field
+        // lookup from a class rather than an object.
+        let mut static_class = (receiver == 0).then_some(owner);
         for (offset, component) in components.iter().enumerate() {
             match component.opword {
                 0x1019 if offset == 0 => {
@@ -2013,6 +2091,7 @@ impl VmHost {
                         .ok_or(HostError::UnresolvedName)?;
                     self.initialize_class_id(class)?;
                     receiver = 0;
+                    static_class = Some(class);
                 }
                 0x1001 => {
                     let id = *thread
@@ -2026,6 +2105,27 @@ impl VmHost {
                     class = self
                         .reference_class_id(Value::reference(receiver))
                         .ok_or(HostError::BadCast)?;
+                }
+                0x101b if offset + 1 < components.len() => {
+                    // A field reference feeding the next component. The first
+                    // component starts from `this` (or the qualified class),
+                    // later ones from the previous value (`FUN_004208e0`).
+                    let qualified = static_class.take();
+                    if qualified.is_none() && receiver == 0 {
+                        return Err(HostError::MissingMember.into());
+                    }
+                    let slot = self.field_component_slot(
+                        owner,
+                        component.imm,
+                        if qualified.is_some() { 0 } else { receiver },
+                        qualified,
+                    )?;
+                    receiver = self.borrow_slot(thread, Slot::Heap(slot))?.payload;
+                    if receiver != 0 {
+                        class = self
+                            .reference_class_id(Value::reference(receiver))
+                            .ok_or(HostError::BadCast)?;
+                    }
                 }
                 0x101a if offset + 1 == components.len() => {
                     // The argument-count temporary is consumed by evalName before
@@ -2258,7 +2358,13 @@ impl VmHost {
             }
         }
         self.native_failure = None;
+        if let Some(hook) = self.native_thread_hook {
+            hook(thread, true);
+        }
         let result = native(self, &info);
+        if let Some(hook) = self.native_thread_hook {
+            hook(thread, false);
+        }
         if self.native_failure.is_some() {
             return Err(VmError::Unsupported(0x0024));
         }
@@ -2377,11 +2483,23 @@ impl VmHost {
                 .pool_text_of(owner, token.imm)
                 .map_err(|_| HostError::BadCast)?
                 .to_owned();
-            let actual = self.reference_class(value).ok_or(HostError::BadCast)?;
-            let target = self.load_class_ref(&target).ok_or(HostError::BadCast)?;
+            let actual = self.reference_class(value).ok_or_else(|| {
+                note(format!(
+                    "instanceof: value {:#x} (tag {:?}) is not a heap object",
+                    value.payload, value.tag
+                ));
+                HostError::BadCast
+            })?;
+            let target_ref = self.load_class_ref(&target).ok_or_else(|| {
+                note(format!("instanceof: target class {target:?} did not load"));
+                HostError::BadCast
+            })?;
             self.loader
-                .is_inherited_from_ref(&actual, &target)
-                .map_err(|_| HostError::BadCast)?
+                .is_inherited_from_ref(&actual, &target_ref)
+                .map_err(|e| {
+                    note(format!("instanceof: hierarchy walk {e:?}"));
+                    HostError::BadCast
+                })?
         };
         thread.push_new(Value::int(i32::from(matched)))?;
         Ok(Flow::Advance)

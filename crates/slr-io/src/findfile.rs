@@ -436,6 +436,9 @@ impl FindHost {
     /// exe: 0x54cf50
     pub fn open_search(&mut self, pattern: &str) -> i32 {
         let dos = dos_path(pattern);
+        if std::env::var_os("SLR_TRACE_FIND").is_some() {
+            eprintln!("FIND open_search pattern={pattern:?} dos={dos:?}");
+        }
         self.events.push(FindEvent::FindFirst {
             pattern: dos.clone(),
         });
@@ -782,15 +785,37 @@ pub fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         FIND_FIRST => {
             let pattern = if written > 1 { out[1] } else { 0 };
             let flags = (if written > 2 { out[2] } else { 0 }) as i32;
-            Some(with_finds(|finds| finds.first(out[0], pattern, flags)))
+            // A real VM String owns its bytes; native-only fixtures register
+            // the word with the find host instead.
+            if let Some(bytes) = vm.string_bytes(pattern).map(<[u8]>::to_vec) {
+                with_finds(|finds| finds.set_string(pattern, &bytes));
+            }
+            let word = with_finds(|finds| finds.first(out[0], pattern, flags));
+            Some(vm_string(vm, word))
         }
-        FIND_NEXT => Some(with_finds(|finds| finds.next(out[0]))),
+        FIND_NEXT => {
+            let word = with_finds(|finds| finds.next(out[0]));
+            Some(vm_string(vm, word))
+        }
         FIND_CLOSE => {
             with_finds(|finds| finds.close(out[0]));
             None
         }
         _ => None,
     }
+}
+
+/// Re-intern a find-host name word as a real VM `String` object. A zero word
+/// (nothing found) stays zero; a word with no bytes (a native-only fixture
+/// that never registered text) is returned unchanged.
+fn vm_string(vm: &mut VmHost, word: u32) -> u32 {
+    if word == 0 {
+        return 0;
+    }
+    let Some(bytes) = with_finds(|finds| finds.string(word).map(<[u8]>::to_vec)) else {
+        return word;
+    };
+    vm.intern_string(Some(&bytes)).unwrap_or(word)
 }
 
 /// Register the rows and install [`bridge`] at every address.

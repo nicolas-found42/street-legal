@@ -53,7 +53,7 @@ fn template_original_rows() {
             row["node_quality_bits"].as_u64().unwrap() as u32
         );
         assert_eq!(
-            t.as_ref().is_some_and(|t| t.class == class()),
+            t.as_ref().is_some_and(|t| t.class == Some(class())),
             row["data_class_matches_argument2"]
         );
         if let Some(t) = t {
@@ -256,7 +256,7 @@ fn materialise_stock_text_original_row() {
         for phase in row["phases"].as_array().unwrap() {
             data.apply(phase["descriptor"].as_str().unwrap(), &mut |name| {
                 requested.push(name.to_owned());
-                Ok(class())
+                Ok(Some(class()))
             })
             .unwrap();
         }
@@ -274,7 +274,7 @@ fn materialise_stock_text_original_row() {
                 &data,
             )
             .unwrap();
-        assert_eq!(template.class, class());
+        assert_eq!(template.class, Some(class()));
         assert_eq!(
             n::with_res(|h| h.container(template.container).unwrap().flags),
             row["template_flags"].as_u64().unwrap() as u32
@@ -290,8 +290,18 @@ fn materialise_stock_text_original_row() {
                 "unknown descriptor requested class"
             ))
             .is_err());
+        // A class that fails to load is a logged "Missing class": the line
+        // is accepted and leaves the class null, as the original does.
+        let mut missing = slr_resource::factory::ScriptData::default();
+        missing
+            .apply("script missing.Class", &mut |_| Ok(None))
+            .unwrap();
+        assert_eq!(missing.class, None);
         assert!(data
-            .apply("script missing.Class", &mut |_| Err("missing class".into()))
+            .apply(
+                "script missing.Class",
+                &mut |_| Err("loader failure".into())
+            )
             .is_err());
     }
 }

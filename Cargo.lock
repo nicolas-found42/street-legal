@@ -568,6 +568,7 @@ dependencies = [
  "serde_json",
  "slr-calllog",
  "slr-fmt-rpak",
+ "slr-fmt-tufa",
  "slr-input",
  "slr-io",
  "slr-lang",

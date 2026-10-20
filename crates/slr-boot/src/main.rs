@@ -1,5 +1,9 @@
 //! Headless stock bootstrap. All script bodies come from the read-only install.
+mod engine;
 mod factory;
+mod materialise;
+mod missing_rows;
+mod sched;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{
@@ -8,7 +12,6 @@ use slr_vm::{
     values::Value,
     vmclass::FileReader,
 };
-use slr_x87::X87;
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -16,9 +19,9 @@ use std::{
 
 #[derive(Default)]
 struct Resources {
-    root: PathBuf,
-    packages: Vec<(String, Package)>,
-    frontend: Option<slr_resource::package::Installed>,
+    pub(crate) root: PathBuf,
+    pub(crate) packages: Vec<(String, Package)>,
+    registered: std::collections::HashMap<usize, slr_resource::package::Installed>,
 }
 impl Resources {
     fn package(&mut self, name: &str) -> Result<usize, String> {
@@ -56,6 +59,7 @@ impl Resources {
         };
         Ok(((i as u32) << 16) | (id & 0xffff))
     }
+    /// Register the package named by a mapped resource ID, if not yet done.
     fn request_metadata(&mut self, id: u32) -> Result<(), String> {
         let index = (id >> 16) as usize;
         let (name, package) = self
@@ -65,64 +69,73 @@ impl Resources {
         if !package.entries.iter().any(|e| e.type_id == id & 0xffff) {
             return Err("mapped resource is outside the known package; original absence behavior is not asserted".into());
         }
-        if name != "frontend.rpk" {
-            return Err(format!(
-                "package {name} metadata registration is not measured"
-            ));
+        if index == 0 {
+            return Err("the system package is registered by the boot driver".into());
         }
-        if self.frontend.is_none() {
-            let system = &self
-                .packages
-                .iter()
-                .find(|(n, _)| n == "system.rpk")
-                .ok_or("system roots not available")?
-                .1;
-            self.frontend = Some(slr_resource::node::with_res(|host| {
-                slr_resource::package::install_frontend(host, package, system, index as u16)
-            })?);
-            println!("BOOT resource metadata frontend.rpk entries=279; declared empty foreign system roots; no descriptor materialization");
+        if self.registered.contains_key(&index) {
+            return Ok(());
         }
+        let name = name.clone();
+        let links: Vec<String> = package.links.iter().map(|l| l.name.clone()).collect();
+        for link in links {
+            // A missing linked file is tolerated: its entries stay absent.
+            let _ = self.package(&link);
+        }
+        let installed = slr_resource::node::with_res(|host| {
+            slr_resource::package::install_package(host, &self.packages, index)
+        })?;
+        println!(
+            "BOOT resource metadata {name} entries={}; declared foreign roots {}; no descriptor materialization",
+            installed.ids.len(),
+            installed.declared_foreign_roots.len()
+        );
+        self.registered.insert(index, installed);
         Ok(())
     }
     fn write_trace(&self, output: &Path) -> Result<(), String> {
         let snapshot = slr_resource::node::with_res(|host| {
-            let entries: Vec<_> = self
-                .frontend
-                .iter()
-                .flat_map(|p| &p.ids)
-                .map(|id| {
-                    (
-                        *id,
-                        host.container_for_id(*id)
-                            .and_then(|word| host.container(word))
-                            .cloned(),
-                    )
-                })
-                .collect();
-            format!("CONTROLLED complete pinned frontend headers; declared empty foreign system-root identities, their own hierarchy/other children unmodeled; no descriptor parsing/materialization\nprofile={:#?}\nentries={entries:#?}\nevents={:#?}\n", self.frontend, host.events())
+            let mut text = String::from("CONTROLLED package header registration; foreign roots declared empty, their own hierarchy and other children unmodeled; no descriptor parsing/materialization\n");
+            let mut indices: Vec<_> = self.registered.keys().copied().collect();
+            indices.sort_unstable();
+            for index in indices {
+                let installed = &self.registered[&index];
+                text.push_str(&format!(
+                    "package {index} {}: entries={} declared_foreign_roots={:?}\n",
+                    self.packages[index].0,
+                    installed.ids.len(),
+                    installed.declared_foreign_roots
+                ));
+                for id in &installed.ids {
+                    let container = host
+                        .container_for_id(*id)
+                        .and_then(|word| host.container(word));
+                    text.push_str(&format!("  {id:#010x} {container:?}\n"));
+                }
+            }
+            text.push_str(&format!("events={:#?}\n", host.events()));
+            text
         });
         std::fs::write(output.join("resource-registration.txt"), snapshot)
             .map_err(|e| format!("ResourceTraceBoundary: {e}"))
     }
+    /// The descriptor chain of a type-8 template, root first, following
+    /// `super_id` across package links (`id` is `package << 16 | local`).
     fn template_phases(&self, id: u32) -> Result<Vec<(u32, String)>, String> {
-        if id >> 16 != 0 {
-            return Err(format!(
-                "external template package {:#x} is not installed",
-                id >> 16
-            ));
-        }
-        let p = &self.packages.first().ok_or("system.rpk not installed")?.1;
         let mut next = id;
         let mut visited = std::collections::HashSet::new();
         let mut phases = vec![];
-        while next != 0 {
+        while next & 0xffff != 0 {
             if !visited.insert(next) {
                 return Err("type8 inheritance cycle".into());
             }
+            let (_, p) = self
+                .packages
+                .get((next >> 16) as usize)
+                .ok_or_else(|| format!("template package of {next:#x} is not installed"))?;
             let e = p
                 .entries
                 .iter()
-                .find(|e| e.type_id == next)
+                .find(|e| e.type_id == next & 0xffff)
                 .ok_or_else(|| format!("missing type8 resource {next:#x}"))?;
             if e.typeof_ != 8 || e.flags != 0 {
                 return Err(format!(
@@ -131,11 +144,30 @@ impl Resources {
                 ));
             }
             phases.push((next, p.descriptor(e)));
-            next = e.super_id;
+            let parent = e.super_id;
+            next = if parent >> 16 == 0 {
+                (next & 0xffff_0000) | parent
+            } else {
+                let link = p
+                    .links
+                    .iter()
+                    .find(|l| l.package_id_shifted == (parent >> 16) << 16)
+                    .ok_or_else(|| format!("unknown RPK link {} for {next:#x}", parent >> 16))?
+                    .name
+                    .trim_end_matches('\0')
+                    .replace('\\', "/")
+                    .to_ascii_lowercase();
+                let index = self
+                    .packages
+                    .iter()
+                    .position(|(n, _)| *n == link)
+                    .ok_or_else(|| format!("linked package {link} is not installed"))?;
+                ((index as u32) << 16) | (parent & 0xffff)
+            };
         }
         phases.reverse();
-        if phases.len() != 2 || phases[0].0 != 1 {
-            return Err(format!("unsupported external template hierarchy for {id:#x}: only a direct child of system.rpk library root1 is installed"));
+        if phases.is_empty() {
+            return Err(format!("template {id:#x} has no descriptor chain"));
         }
         Ok(phases)
     }
@@ -160,7 +192,7 @@ impl Resources {
             .ok_or_else(|| format!("resource {id:#x} has no script: {d:?}"))
     }
 }
-thread_local! {static RES: RefCell<Resources> = RefCell::new(Resources::default());}
+thread_local! {pub(crate) static RES: RefCell<Resources> = RefCell::new(Resources::default());}
 fn resolve(_: &mut VmHost, package: Option<&str>, id: u32) -> Result<u32, VmError> {
     RES.with(|r| r.borrow_mut().resolve(package, id))
         .map_err(|e| {
@@ -169,6 +201,12 @@ fn resolve(_: &mut VmHost, package: Option<&str>, id: u32) -> Result<u32, VmErro
         })
 }
 fn observe(info: &CallInfo<'_>, result: Option<u32>) {
+    if std::env::var_os("SLR_TRACE_NATIVES").is_some() {
+        eprintln!(
+            "NATIVE {}.{}{} -> {result:?}",
+            info.class, info.name, info.sig
+        );
+    }
     if info.class.starts_with("java.render.")
         || info.class.starts_with("java.sound.")
         || ["java.io.Input", "java.io.MouseCursor", "java.io.Controller"].contains(&info.class)
@@ -201,7 +239,7 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
         }),
     });
 }
-fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> String {
+pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> String {
     let mut frames = Vec::new();
     for (index, frame) in thread.frames.iter().enumerate() {
         let pc = if index + 1 == thread.frames.len() {
@@ -235,24 +273,22 @@ fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> Str
 }
 
 fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
-    if info.class == "java.lang.GameType" && info.name != "createNativeInstance" {
-        return Err("GameType engine collaborator is not installed".into());
-    }
-    if info.class == slr_resource::node::RESOURCE_REF_CLASS
-        && [
-            "load",
-            "cache",
-            "precache",
-            "makeTexture",
-            "makeSound",
-            "duplicate",
-        ]
-        .contains(&info.name)
+    if info.class == "java.lang.GameType"
+        && !matches!(
+            info.name,
+            "createNativeInstance"
+                | "setEventMask"
+                | "clearEventMask"
+                | "addNotification"
+                | "remNotification"
+                | "addTimer"
+                | "removeAllTimers"
+                | "registerCallback"
+                | "unregisterCallback"
+                | "unregisterCallbacks"
+        )
     {
-        return Err("ResourceMaterializationBoundary: original descriptor/device/cache backend is not installed".into());
-    }
-    if info.class == "java.lang.Thread" && info.name == "start" {
-        return Err("Thread.start target/frame/scheduler bridge is not installed".into());
+        return Err("GameType engine collaborator is not installed".into());
     }
     Ok(())
 }
@@ -275,6 +311,12 @@ fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             ptr.and_then(|ptr| h.node(ptr))
                 .is_some_and(|node| node.id != words[1] && h.container_for_id(words[1]).is_none())
         });
+    if std::env::var_os("SLR_TRACE_RES").is_some() {
+        eprintln!(
+            "RES set receiver={:#x} id={:#010x} requires_load={requires_load}",
+            words[0], words[1]
+        );
+    }
     if requires_load {
         if let Err(error) = RES.with(|r| r.borrow_mut().request_metadata(words[1])) {
             vm.native_failure = Some(format!(
@@ -285,6 +327,108 @@ fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         }
     }
     slr_resource::node::bridge(vm, info)
+}
+/// `java.lang.System.openLib(String)I` (`LAB_00487be0`): register the package
+/// by name with the package manager (`FUN_00538380`, index = first-use order)
+/// and force its header load by resolving local resource 1 (`FUN_00545fc0`).
+/// The answer is the package index, or -1 when that resolution fails.
+fn open_lib(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let mut words = [0; 2];
+    if let Err(error) = slr_vm::host::marshal_args(info, &mut words) {
+        vm.native_failure = Some(format!("System.openLib: {error:?}"));
+        return None;
+    }
+    let Some(name) = vm
+        .string_bytes(words[1])
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+    else {
+        vm.native_failure = Some("System.openLib: null or invalid package name".into());
+        return None;
+    };
+    let result = RES.with(|r| {
+        let mut r = r.borrow_mut();
+        let index = match r.package(&name) {
+            Ok(index) => index,
+            Err(_) => return Ok(u32::MAX),
+        };
+        let has_entry_one = r.packages[index].1.entries.iter().any(|e| e.type_id == 1);
+        if !has_entry_one {
+            return Ok(u32::MAX);
+        }
+        if index != 0 {
+            r.request_metadata(((index as u32) << 16) | 1)?;
+        }
+        Ok::<u32, String>(index as u32)
+    });
+    match result {
+        Ok(index) => Some(index),
+        Err(error) => {
+            vm.native_failure = Some(format!("System.openLib {name:?}: {error}"));
+            None
+        }
+    }
+}
+/// `java.lang.System.arraycopy(Object,int,Object,int,int)V` (`LAB_00487660`) over
+/// the VM's array cells: payload words only, destination cell types retained,
+/// a same-array copy staged through a temporary buffer. An out-of-range request
+/// is the original's logged no-op; negative indices fault in the original.
+fn array_copy(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let mut w = [0u32; 6];
+    if let Err(error) = slr_vm::host::marshal_args(info, &mut w) {
+        vm.native_failure = Some(format!("System.arraycopy: {error:?}"));
+        return None;
+    }
+    let (src, src_pos, dst, dst_pos, count) = (w[1], w[2] as i32, w[3], w[4] as i32, w[5] as i32);
+    let src_len = vm.array_cells_mut(src).map(|c| c.len() as i32);
+    let dst_len = vm.array_cells_mut(dst).map(|c| c.len() as i32);
+    let (Some(src_len), Some(dst_len)) = (src_len, dst_len) else {
+        vm.native_failure = Some("System.arraycopy: source or destination is not an array".into());
+        return None;
+    };
+    if src_pos.wrapping_add(count) > src_len || dst_pos.wrapping_add(count) > dst_len {
+        vm.method_diagnostics.push("System.arraycopy: out of range");
+        return None;
+    }
+    if count == 0 {
+        return None;
+    }
+    if src_pos < 0 || dst_pos < 0 || count < 0 {
+        vm.native_failure =
+            Some("System.arraycopy: negative index faults in the executable".into());
+        return None;
+    }
+    let words: Vec<u32> = vm.array_cells_mut(src)?[src_pos as usize..(src_pos + count) as usize]
+        .iter()
+        .map(|v| v.payload)
+        .collect();
+    let cells = vm.array_cells_mut(dst)?;
+    for (i, word) in words.into_iter().enumerate() {
+        cells[dst_pos as usize + i].payload = word;
+    }
+    None
+}
+/// Declared scenario: the DirectInput devices the headless machine reports,
+/// keyboard and mouse only (the oracle's platform profile). Names are the
+/// scenario's, not observed instance names.
+const INPUT_DEVICES: [&str; 2] = ["Keyboard", "Mouse"];
+
+/// `java.io.Input.getDeviceName(I)String` (`LAB_0047c9c0`): the declared
+/// device's name, or null past the last device (the loop terminator scripts
+/// rely on; the device-less port interns the empty string forever instead).
+fn input_device_name(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let mut words = [0; 2];
+    slr_vm::host::marshal_args(info, &mut words).ok()?;
+    let name = INPUT_DEVICES.get(words[1] as usize);
+    let result = match name {
+        Some(name) => vm.intern_string(Some(name.as_bytes())).ok()?,
+        None => 0,
+    };
+    Some(result)
+}
+/// Capture-only body for a registered row nothing implements yet: the call is
+/// logged by the native observer and the row answers the zero word.
+fn capture_only(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    (!info.sig.ends_with('V')).then_some(0)
 }
 fn install(vm: &mut VmHost) {
     let mut table = slr_lang::NativeTable::new();
@@ -308,6 +452,35 @@ fn install(vm: &mut VmHost) {
         .insert(0x00481a70, factory::create_native_instance);
     vm.native_impls
         .insert(slr_resource::node::SET_ID, resource_set);
+    engine::install(vm);
+    vm.native_impls
+        .insert(slr_io::input::INPUT_GET_DEVICE_NAME, input_device_name);
+    vm.native_impls
+        .insert(slr_lang::langobj::system::OPEN_LIB, open_lib);
+    vm.native_impls
+        .insert(slr_lang::langobj::system::ARRAYCOPY, array_copy);
+    vm.native_impls
+        .insert(slr_resource::node::CREATE, factory::game_ref_create);
+    vm.native_impls
+        .insert(slr_resource::node::CREATE_NATIVE, factory::game_ref_create);
+    for &(class, name, sig, address) in missing_rows::MISSING {
+        if vm.natives.resolve(class, name, sig).is_none() && !vm.native_impls.contains_key(&address)
+        {
+            vm.natives.register(class, name, sig, address);
+            vm.native_impls.insert(address, capture_only);
+        }
+    }
+    for address in [
+        slr_resource::node::LOAD,
+        slr_resource::node::CACHE,
+        slr_resource::node::PRECACHE,
+    ] {
+        vm.native_impls.insert(address, materialise::load_like);
+    }
+    slr_lang::seam::with_lang_host(|h| h.clock_source = Some(sched::clock_f32));
+    vm.native_impls
+        .insert(slr_lang::thread::THREAD_START, sched::thread_start);
+    vm.native_thread_hook = Some(sched::hook);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
 }
@@ -361,6 +534,7 @@ fn run(
     config_instance_id: Option<u32>,
     output: &Path,
     game_init_instance_id: Option<u32>,
+    frames: u64,
 ) -> Result<(), String> {
     RES.with(|r| {
         let mut r = r.borrow_mut();
@@ -413,18 +587,15 @@ fn run(
         .map_err(|e| format!("ConfigNativeLinkBoundary: {e}"))?;
     factory::attach_created(link).map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
     println!("BOOT Config native link {link:?}");
-    let mut thread = Thread::new();
-    vm.enter_method(
-        &mut thread,
+    sched::run_created(
+        vm,
+        "THRD-CREATE",
         config_class,
         object,
         "<init>",
         &[Value::int(created as i32)],
     )
-    .map_err(|e| format!("Config constructor dispatch: {e:?}"))?;
-    thread
-        .run(vm, 0.0, &mut || X87::from_f64(0.0))
-        .map_err(|e| script_stop(vm, &thread, "Config constructor", e))?;
+    .map_err(|(thread, e)| script_stop(vm, &thread, "Config constructor", e))?;
     let retained = slr_resource::node::link_created_script(vm, object, created)
         .map_err(|e| format!("Config constructor changed native link: {e}"))?;
     if retained != link {
@@ -460,21 +631,39 @@ fn run(
         .map_err(|e| format!("GameInitNativeLinkBoundary: {e}"))?;
     factory::attach_created(link).map_err(|e| format!("GameInitChildRegistrationBoundary: {e}"))?;
     println!("CONTROLLED GameInit created ID={created:#010x}; native link {link:?}");
-    let mut thread = Thread::new();
-    vm.enter_method(
-        &mut thread,
+    sched::run_created(
+        vm,
+        "THRD-CREATE",
         class,
         object,
         "<init>",
         &[Value::int(created as i32)],
     )
-    .map_err(|e| format!("GameInit constructor dispatch: {e:?}"))?;
-    thread
-        .run(vm, 0.0, &mut || X87::from_f64(0.0))
-        .map_err(|e| script_stop(vm, &thread, "GameInit constructor", e))?;
+    .map_err(|(thread, e)| script_stop(vm, &thread, "GameInit constructor", e))?;
     slr_resource::node::finish_created_script(link)
         .map_err(|e| format!("GameInit retained link release: {e}"))?;
-    Err("SchedulerBoundary: GameInit constructor returned; frame/native thread scheduling is not installed".into())
+    println!("BOOT GameInit constructor returned; pumping scheduler for {frames} frames");
+    let mut pump = sched::Pump::new();
+    for frame in 0..frames {
+        engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
+        pump.tick(vm).map_err(|f| {
+            script_stop(
+                vm,
+                &f.thread,
+                &format!("scheduler frame {frame} thread {} {:?}", f.id, f.name),
+                f.error,
+            )
+        })?;
+        sched::advance_ms(1000.0 / 60.0);
+        engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+    }
+    println!(
+        "BOOT scheduler frames={frames} ticks={} thread runs={} simulated ms={:.3}",
+        pump.ticks,
+        pump.runs,
+        sched::now_ms()
+    );
+    Err("MainMenuBoundary: frame budget exhausted before MainMenu was observed".into())
 }
 /// Fresh writable filesystem projection. No script I/O points at stock.
 fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -522,6 +711,8 @@ fn execute() -> Result<(), String> {
     }
     let mut config_instance_id = None;
     let mut game_init_instance_id = None;
+    let mut frames = 600u64;
+    let mut clock_step = 0.01f64;
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
         if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
@@ -539,6 +730,19 @@ fn execute() -> Result<(), String> {
             } else {
                 game_init_instance_id = Some(value);
             }
+        } else if arg == "--frames" || arg == "--clock-step" {
+            let text = args
+                .next()
+                .ok_or_else(|| format!("ArgumentBoundary: {arg} needs a value"))?;
+            if arg == "--frames" {
+                frames = text
+                    .parse()
+                    .map_err(|e| format!("ArgumentBoundary: invalid frame count: {e}"))?;
+            } else {
+                clock_step = text
+                    .parse()
+                    .map_err(|e| format!("ArgumentBoundary: invalid clock step: {e}"))?;
+            }
         } else {
             return Err(format!("ArgumentBoundary: unknown argument {arg}"));
         }
@@ -552,6 +756,8 @@ fn execute() -> Result<(), String> {
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
     factory::configure(config_instance_id, game_init_instance_id);
+    sched::configure_clock(clock_step);
+    engine::configure(engine::FrameConfig::default());
     let mut vm = VmHost::new();
     let outcome = run(
         &root,
@@ -559,9 +765,20 @@ fn execute() -> Result<(), String> {
         config_instance_id,
         &output,
         game_init_instance_id,
+        frames,
     );
     factory::write_trace(&output)?;
     RES.with(|r| r.borrow().write_trace(&output))?;
+    std::fs::write(
+        output.join("engine-events.txt"),
+        engine::take_trace().join("\n"),
+    )
+    .map_err(|e| format!("EngineTraceBoundary: {e}"))?;
+    std::fs::write(
+        output.join("materialisation.txt"),
+        materialise::take_trace().join("\n"),
+    )
+    .map_err(|e| format!("MaterialiseTraceBoundary: {e}"))?;
     std::fs::write(
         output.join("initializer-constructors.txt"),
         format!("{:#?}", vm.constructor_calls),
@@ -588,6 +805,8 @@ fn execute() -> Result<(), String> {
         }
         if let Some(native) = vm.missing_native {
             format!("{error}; NoBody: {native}")
+        } else if let Some(detail) = slr_vm::host::last_host_error() {
+            format!("{error}; last host error: {detail}")
         } else {
             error
         }
@@ -605,7 +824,7 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
-    fn external_template_hierarchy_scope_fails_closed() {
+    fn template_chains_follow_super_ids_and_missing_packages_fail_closed() {
         let mut bytes = b"RPAK".to_vec();
         for word in [0x200u32, 0, 0, 0, 0, 0, 0] {
             bytes.extend(word.to_le_bytes());
@@ -627,7 +846,7 @@ mod tests {
         let resources = Resources {
             root: PathBuf::new(),
             packages: vec![("system.rpk".into(), package)],
-            frontend: None,
+            registered: Default::default(),
         };
         assert_eq!(
             resources
@@ -638,9 +857,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 27]
         );
-        for id in [28, 3, 1, 0x1001b] {
-            assert!(resources.template_phases(id).is_err(), "{id:#x}");
-        }
+        let chain = |id| {
+            resources
+                .template_phases(id)
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chain(28), vec![1, 27, 28]);
+        assert_eq!(chain(3), vec![2, 3]);
+        assert_eq!(chain(1), vec![1]);
+        // A package that is not installed fails closed.
+        assert!(resources.template_phases(0x1001b).is_err());
     }
     #[test]
     fn resource_set_stops_on_unpopulated_id_without_clearing_existing_link() {

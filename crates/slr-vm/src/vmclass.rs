@@ -393,7 +393,8 @@ impl FileReader {
         }
         let root = self.stock_root.as_ref()?;
         let mut current = root.clone();
-        let mut components = logical.split('\\').peekable();
+        // Win32 collapses repeated separators (`dir\\` + `\\` + `name`).
+        let mut components = logical.split('\\').filter(|c| !c.is_empty()).peekable();
         while let Some(component) = components.next() {
             let is_last = components.peek().is_none();
             let fallback = !is_last && component.eq_ignore_ascii_case("scripts");
@@ -572,6 +573,37 @@ impl Loader {
             return Ok(Some(id));
         }
         self.load_on_miss(name)
+    }
+
+    /// Load a class file by explicit directory and basename, as the type-8
+    /// descriptor parser does for a `script dir\name.class` line
+    /// (`FUN_00410750`): the class registry is searched for a record already
+    /// registered from that path; otherwise `FUN_00410430` reads
+    /// `dir` + `\` + `basename` + `.class` directly and registers every module.
+    /// The result is the file's first class.
+    ///
+    /// The registry search compares the converted dotted name against the
+    /// records' recorded names; this port registers classes by their own
+    /// declared name, so a hit needs the file's own class name to equal the
+    /// converted path, which it never does for stock car scripts. The search is
+    /// therefore not modelled and every request reads the file.
+    ///
+    /// exe: FUN_00410750, FUN_00410430
+    pub fn request_path(
+        &mut self,
+        directory: &str,
+        basename: &str,
+    ) -> Result<Option<ClassId>, LoadError> {
+        let logical = format!("{directory}\\{basename}.class");
+        self.request_events
+            .push(RequestEvent::ReadRequest(logical.clone()));
+        let Some(bytes) = self.reader.read(&logical) else {
+            self.diagnostics
+                .push(format!("!JavaMachine::loadClass: failed to load {logical}"));
+            return Ok(None);
+        };
+        let ids = self.load_file(&bytes)?;
+        Ok(ids.first().map(|(id, _)| *id))
     }
 
     /// `FUN_00410630`: directory selection + basename construction + file

@@ -1149,8 +1149,9 @@ fn fatal_initializer_stops_before_assignment_and_retains_current_side_effect() {
 
 #[test]
 fn unsupported_later_initializer_preserves_the_already_installed_prefix() {
-    // ArgArray initialization is an explicit remaining boundary in this slice;
-    // it must fail where reached rather than preflight away earlier writes.
+    // A fatal opcode in a later initializer must fail where reached rather
+    // than preflight away earlier writes (the former #110 guard is gone: the
+    // interpreter's own fatal-opcode stop is what remains).
     let pool = vec![
         PoolEntry::Str("Partial".into()),
         PoolEntry::Class(0),
@@ -1161,7 +1162,7 @@ fn unsupported_later_initializer_preserves_the_already_installed_prefix() {
     ];
     let bodies = vec![
         vec![n(0x1007, 0x1c), n(0x100b, 11), n(0x10, 0)],
-        vec![n(0x101e, 0), n(0x10, 0)],
+        vec![n(0x0000, 0), n(0x10, 0)],
     ];
     let mut vm = VmHost::new();
     vm.loader
@@ -1717,13 +1718,13 @@ fn static_initializer_failure_preserves_field_name_and_body_cause() {
             &[[0x28, 3, 2, 0]],
             &[],
             &[u32::MAX, 0, 1, u32::MAX, 0],
-            &[vec![n(0x101e, 0), n(0x10, 0)]],
+            &[vec![n(0x0000, 0), n(0x10, 0)]],
         ))
         .unwrap();
     assert!(vm.alloc_object("Broken").is_err());
     let cause = vm.initializer_failure.unwrap();
     assert!(cause.contains("Broken.bad"), "{cause}");
-    assert!(cause.contains("requires #110 execution"), "{cause}");
+    assert!(cause.contains("FatalOpcode"), "{cause}");
 }
 
 fn constructor_initializer_module(static_field: bool, arguments: u32, integer: bool) -> Vec<u8> {
@@ -1876,18 +1877,5 @@ fn initializer_constructor_runs_script_body_with_integer_argument_and_retains_ob
             vm.constructor_calls[0].arguments,
             vec![slr_vm::values::Value::int(17)]
         );
-    }
-}
-#[test]
-fn unsupported_constructor_initializer_argument_families_remain_boundaries() {
-    for (arguments, integer) in [(1, false), (2, true)] {
-        let mut vm = VmHost::new();
-        constructor_target(&mut vm, true, false);
-        vm.loader
-            .load_file(&constructor_initializer_module(false, arguments, integer))
-            .unwrap();
-        assert!(vm.alloc_object("Holder").is_err());
-        assert_eq!(vm.objects.len(), 1);
-        assert!(vm.constructor_calls.is_empty());
     }
 }

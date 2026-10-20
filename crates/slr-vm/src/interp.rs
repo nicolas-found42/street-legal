@@ -425,6 +425,17 @@ pub trait Host {
         None
     }
 
+    /// The concatenating arm of `FUN_0041b4d0` for two `String` cells, tried
+    /// after [`Self::operator_on_refs`] declines. `None` falls back to the
+    /// plain helper.
+    fn concatenate_strings(
+        &mut self,
+        _left: &mut Value,
+        _right: &mut Value,
+    ) -> Option<Result<(), VmError>> {
+        None
+    }
+
     /// Typed plain assignment. Object-model hosts provide loaded-class
     /// conversion; numeric-only hosts retain the standalone helper behavior.
     fn store_value(&mut self, alu: &mut Alu, destination: &mut Value, source: &mut Value) {
@@ -981,6 +992,11 @@ impl Thread {
                     self.write_lvalue(host, lv, left)?;
                     return Ok(());
                 }
+                if let Some(r) = host.concatenate_strings(&mut left, value) {
+                    r?;
+                    self.write_lvalue(host, lv, left)?;
+                    return Ok(());
+                }
             }
         }
         // `*=` and `/=` work on a temporary copy of the variable
@@ -1067,6 +1083,9 @@ impl Thread {
                     }
                     if left.tag.is_ref() || right.tag.is_ref() {
                         if let Some(r) = host.operator_on_refs(RefOperator::Add, left, right) {
+                            r?;
+                            done = true;
+                        } else if let Some(r) = host.concatenate_strings(left, right) {
                             r?;
                             done = true;
                         }

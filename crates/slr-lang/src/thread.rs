@@ -695,14 +695,39 @@ impl ThreadHost {
     /// made, which the exe would fault on and the port reports as
     /// [`StartOutcome::RunFailed`].
     pub fn start(&mut self, receiver: u32) -> StartOutcome {
-        let Some(id) = self.objects.get(&receiver).and_then(|object| object.handle) else {
+        let Some(id) = self.begin_start(receiver) else {
             return StartOutcome::NoThread;
         };
+        let target = self.target_source.map_or(0, |source| source(receiver));
+        let ran = target != 0 && self.run_source.is_some_and(|run| run(target, id));
+        self.finish_start(receiver, id, ran)
+    }
+
+    /// exe: LAB_0047c570, up to the `target` read at `0x47c5c2`.
+    ///
+    /// The first half of [`Self::start`] for a caller that makes the `run`
+    /// call itself (it needs the interpreter, which cannot be reached from a
+    /// seam hook while this runtime is borrowed): look the thread up through
+    /// the receiver's handle field and clear [`CREATED`]. `None` is the
+    /// no-thread exit (`0x47c598`).
+    pub fn begin_start(&mut self, receiver: u32) -> Option<ThreadId> {
+        let id = self
+            .objects
+            .get(&receiver)
+            .and_then(|object| object.handle)?;
         // The exe's `or ecx,2` / `je` guard is dead code; the clear is
         // unconditional (see `CREATED`).
         self.queues.get_mut(id).flags &= !CREATED;
-        let target = self.target_source.map_or(0, |source| source(receiver));
-        let ran = target != 0 && self.run_source.is_some_and(|run| run(target, id));
+        Some(id)
+    }
+
+    /// exe: LAB_0047c570 from `0x47c5d7`.
+    ///
+    /// The second half of [`Self::start`]: `ran` is the call-by-name `eax != 0`.
+    /// Zero (a missing target, or a `run` that entered a script frame and so
+    /// left a pending continuation) leaves the thread alive with its handle
+    /// and script object ([`StartOutcome::RunFailed`]); non-zero kills it.
+    pub fn finish_start(&mut self, receiver: u32, id: ThreadId, ran: bool) -> StartOutcome {
         if !ran {
             return StartOutcome::RunFailed;
         }

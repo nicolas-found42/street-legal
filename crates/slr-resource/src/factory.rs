@@ -33,10 +33,13 @@ pub enum Event {
 pub struct Template {
     pub id: u32,
     pub container: u32,
-    pub class: ClassId,
+    pub class: Option<ClassId>,
     pub quality: u32,
     pub words: [u32; 2],
     pub compiled_constructor: bool,
+    /// Engine-native class named by a `native <name>` descriptor line. The
+    /// headless runtime creates no engine object for it (see `NATIVE_CLASSES`).
+    pub native_class: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Instance {
@@ -165,10 +168,11 @@ impl Factory {
         let template = Template {
             id,
             container,
-            class,
+            class: Some(class),
             quality: 1.0f32.to_bits(),
             words: [1.0f32.to_bits(), 0],
             compiled_constructor: false,
+            native_class: None,
         };
         self.templates.insert(id, template.clone());
         Ok(Some(template))
@@ -184,10 +188,20 @@ impl Factory {
         if let Some(t) = self.templates.get(&id) {
             return Ok(t.clone());
         }
-        let class = data.class.ok_or("type8 template has no script class")?;
+        // A `script` line whose class does not load leaves +0x10 null: the
+        // original logs "Missing class" and continues, so the template exists
+        // without a script class.
+        let class = data.class;
         let container = node::with_res(|h| {
-            if h.container_for_id(id).is_some() {
-                return Err("external template ID already belongs to another container".into());
+            if let Some(existing) = h.container_for_id(id) {
+                // A header registered from its package is adopted: the
+                // descriptor parse that installs the script class is the
+                // materialisation of that same container.
+                return if h.container(existing).is_some_and(|c| c.type_id == 8) {
+                    Ok(existing)
+                } else {
+                    Err("external template ID already belongs to another container".into())
+                };
             }
             let mut c = Container::new(8, id);
             c.flags = 0;
@@ -205,6 +219,7 @@ impl Factory {
             quality: 1f32.to_bits(),
             words: data.words,
             compiled_constructor: false,
+            native_class: data.native.clone(),
         };
         self.templates.insert(id, t.clone());
         Ok(t)
@@ -254,20 +269,25 @@ impl Factory {
         if template.compiled_constructor {
             return Err("compiled GameType constructor is not installed".into());
         }
+        // A loaded type1 parent is inherited from without any load work
+        // (`piVar1[0x19] & 1` set skips the parent load calls); the two range
+        // words flow through the setters at vtable +0x14/+0x18. Unloaded or
+        // other-kind parents would take the parent-load branch, which is not
+        // modelled.
+        let mut inherited_range = [0, 0];
         if let Some(parent) = root.container {
-            if !self.fresh_empty_parents.contains(&parent)
-                || !node::with_res(|h| {
-                    h.container(parent).is_some_and(|c| {
-                        c.type_id == 1
-                            && c.load_state & 1 != 0
-                            && c.detail == 0
-                            && c.instance
-                                .as_ref()
-                                .is_some_and(|i| i.info.is_none() && !i.member)
-                    })
-                })
-            {
-                return Err("parented native instance inheritance requires the declared loaded fresh-empty type1 profile".into());
+            let loaded = node::with_res(|h| {
+                h.container(parent)
+                    .is_some_and(|c| c.type_id == 1 && c.load_state & 1 != 0)
+            });
+            if !loaded {
+                return Err(
+                    "parented native instance inheritance requires a loaded type1 parent; the unloaded-parent load branch is not modelled"
+                        .into(),
+                );
+            }
+            if let Some(parent) = self.instances.values().find(|i| i.container == parent) {
+                inherited_range = parent.range_bits;
             }
         }
         self.events.push(Event::Call("0x536ed0"));
@@ -285,6 +305,9 @@ impl Factory {
             let mut c = Container::new(1, id);
             c.parent = root.container.unwrap_or(0);
             c.flags = self.initial_instance_flags | 0x200;
+            // The factory's own load call (vtable +0xc with 1.0f) leaves the
+            // instance loaded, which is what makes it an inheritable parent.
+            c.load_state |= 1;
             c.instance = Some(GameInstance {
                 script,
                 ..GameInstance::default()
@@ -321,7 +344,7 @@ impl Factory {
             flags: self.initial_instance_flags | 0x200,
             quality: 1.0f32.to_bits(),
             words: template.words,
-            range_bits: [0, 0],
+            range_bits: inherited_range,
         };
         self.created_count = self.created_count.wrapping_add(1);
         self.instances.insert(id, instance.clone());
@@ -335,27 +358,40 @@ impl Factory {
 pub struct ScriptData {
     pub class: Option<ClassId>,
     pub words: [u32; 2],
+    pub native: Option<String>,
 }
 impl Default for ScriptData {
     fn default() -> Self {
         Self {
             class: None,
             words: [1f32.to_bits(), 0],
+            native: None,
         }
     }
 }
+
+/// The engine's native game-object classes: the name table at `0x60c848`
+/// (`ground`, `camera`, ... `building`), each paired in the exe with a compiled
+/// constructor. Only the names are modelled.
+pub const NATIVE_CLASSES: [&str; 15] = [
+    "ground", "camera", "object", "car", "part", "trigger", "player", "button", "cursor", "bot",
+    "road", "walk", "trlight", "ped", "building",
+];
 impl ScriptData {
     /// exe: FUN_005461a0
     pub fn apply(
         &mut self,
         text: &str,
-        request: &mut impl FnMut(&str) -> Result<ClassId, String>,
+        request: &mut impl FnMut(&str) -> Result<Option<ClassId>, String>,
     ) -> Result<(), String> {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let mut words = line.split_whitespace();
             match (words.next(), words.next(), words.next()) {
-                (Some("script"), Some(name), None) => self.class = Some(request(name)?),
+                (Some("script"), Some(name), None) => self.class = request(name)?,
                 (Some("lod_amp"), Some("1.000"), None) => self.words[0] = 1f32.to_bits(),
+                (Some("native"), Some(name), None) if NATIVE_CLASSES.contains(&name) => {
+                    self.native = Some(name.to_owned());
+                }
                 _ => return Err(format!("unsupported type8 descriptor line {line:?}")),
             }
         }
