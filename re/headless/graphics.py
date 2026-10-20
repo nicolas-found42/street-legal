@@ -195,6 +195,7 @@ class Direct3D9:
         self.methods = None
         self.objects = set()
         self.creation_versions = []
+        self.extension = None
         self.last_call = {}
 
     def create(self, args):
@@ -258,6 +259,9 @@ class Direct3D9:
             if key not in self.profile.type_checks:
                 raise self.boundary("undeclared_device_type_check", args=values)
             return self.profile.type_checks[key]
+        if self.extension is not None and slot in (1, 2, 5, 10, 11, 12, 14, 16):
+            self.extension.last_call = self.last_call
+            return self.extension.interface_call(slot, args)
         raise self.boundary(
             "unsupported_com_method",
             interface="IDirect3D9",
