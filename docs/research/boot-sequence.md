@@ -124,6 +124,30 @@ execution has not reached it.
   release/free calls and virtual slot `0x134` with supplied results; no GPU
   work executes. The Rust headless profile implements only the absent branch.
 
+- `re/oracle/boot_native_link_probe.py`: original `FUN_0053a5e0`,
+  `FUN_00408a70`, `FUN_00429060`, `FUN_0042a9e0` and field storage, with
+  supplied resources/decoded instance storage and script-dispatch boundaries.
+  Two dispatch results preserve a temporary retained successor during the
+  constructor callback and leave the script handle alone after return. Real
+  ResourceRef `newNative`, `set(123)` and `id` then execute against that link;
+  they preserve its identity and allocate nothing. These native checks occur
+  after resolver return, and cover the already-linked/same-ID case only.
+- `re/oracle/boot_gametype_factory_probe.py`: original `FUN_0053a1a0`,
+  three supplied-ID/resource-constructor cases. Root/child resource descriptors
+  begin `[8, created_id, 2, 0, 0]`; the live data's `+0x10` receives argument
+  **2**, the script class. The old decompiler parameter label is misleading;
+  raw `0x53a279`/`0x53a27d` and fresh execution agree. A zero allocated ID
+  returns null before resource construction.
+- `re/oracle/boot_native_factory_probe.py`: original `FUN_0053a2a0`,
+  three supplied resource/virtual/event profiles. With a script class and no
+  compiled constructor in the template, it creates a type-1 instance, retains
+  the template link, stores the existing script object from argument 3 at
+  live data `+0x50`, and releases its temporary instance handle. Passive PC
+  observation records no script allocation/constructor/interpreter entry in
+  this branch. Zero requested/allocated IDs return null. Resource constructors,
+  virtual loads/refcounts and event/physics callbacks remain controlled seams;
+  this does not validate a complete native factory backend.
+
 All these original-function probes ran under Unicorn. Their JSONL and repeat
 outputs are ignored under `re/out/boot/`. None runs whole-game startup, supplies
 an original script-native trace, or establishes MainMenu.

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oracle import Oracle, CW_D3D9
 
 
-def run(script, dispatch_result=0):
+def run(script, dispatch_result=0, real_link=False):
     exe = (
         Path(__file__).resolve().parents[2]
         / "reference/raw/StreetLegal_Redline.bak.exe"
@@ -53,6 +53,22 @@ def run(script, dispatch_result=0):
     holder = mem(4)
     o.write_u32(holder, 0x55)
     o.write_u32(0x62E00C, holder)
+    if real_link:
+        owner = mem(32)
+        container = mem(12)
+        elements = mem(4)
+        ptr_cell = mem(12)
+        int_type = mem(2)
+        o.write(int_type, b"I\0")
+        o.write_u32(ptr_cell + 4, int_type)
+        o.write_u32(elements, ptr_cell)
+        o.write_u32s(container, [1, elements, 1])
+        o.write_u32(owner + 12, container)
+        o.write_u32(instance + 16, owner)
+        o.write_u32(0x62E008, 0)
+        o.write_u32(data + 0x44, 0)
+        o.write_u32(node + 0x50, 123)
+        o.write_u32(reqnode + 0x50, 456)
 
     def hook(addr, n, ret=0, conv="cdecl", name=None):
         def f(oc, a):
@@ -67,7 +83,8 @@ def run(script, dispatch_result=0):
     hook(0x536890, 5, node, "thiscall")
     hook(0x544B90, 1, 0, "thiscall")
     hook(0x300F0000, 1, data, "thiscall", "node.data")
-    hook(0x429060, 1, 0, "thiscall")
+    if not real_link:
+        hook(0x429060, 1, 0, "thiscall")
     hook(0x419860, 4, gtype, "thiscall")
     hook(0x41F340, 4, thread, "thiscall")
     hook(0x404E20, 0, instance, "thiscall")
@@ -90,8 +107,29 @@ def run(script, dispatch_result=0):
         return 0
 
     hook(0x41F9F0, 1, arguments, "thiscall")
-    hook(0x42A9E0, 3)
-    hook(0x4207C0, 3, dispatch_result, "thiscall")
+    if not real_link:
+        hook(0x42A9E0, 3)
+
+    constructor_link_state = None
+
+    def dispatch(oc, args):
+        nonlocal constructor_link_state
+        native_ptr = oc.read_u32(ptr_cell + 8)
+        prev, next_link, created, owner_node = oc.read_u32s(native_ptr, 4)
+        assert prev == 0 and created == 123 and owner_node == node
+        assert next_link != 0 and oc.read_u32(next_link) == native_ptr
+        assert oc.read_u32(node + 0x48) == native_ptr
+        constructor_link_state = {
+            "id": 123,
+            "owner": "native-node",
+            "prev": 0,
+            "temporary_successor": True,
+            "owner_head_matches": True,
+        }
+        assert oc.read_u32(data + 0x50) == instance
+        return dispatch_result
+
+    hook(0x4207C0, 3, dispatch if real_link else dispatch_result, "thiscall")
     hook(0x427210, 1, 0, "thiscall")
     hook(0x4988A0, 0, 0, "thiscall")
     hook(0x498B10, 0, 0, "thiscall")
@@ -103,6 +141,40 @@ def run(script, dispatch_result=0):
     except Exception:
         print(events, file=sys.stderr)
         raise
+    native_observations = []
+    if script and real_link:
+        from io_vectors import _call_frame, _cell
+
+        native_ptr = o.read_u32(ptr_cell + 8)
+        expected_link = o.read_u32s(native_ptr, 4)
+        for address, name, signature, parameters in [
+            (0x47CEA0, "newNative", "()V", []),
+            (0x47CF80, "set", "(I)V", [_cell(o, "I", 123)]),
+            (0x47D290, "id", "()I", []),
+        ]:
+            frame = _call_frame(
+                o,
+                "java.util.resource.ResourceRef",
+                name,
+                signature,
+                parameters + [_cell(o, "L", instance)],
+            )
+            before_heap = o.heap_ptr
+            result = o.call(address, [frame], fpu_cw=CW_D3D9)
+            assert o.read_u32(ptr_cell + 8) == native_ptr
+            assert o.read_u32s(native_ptr, 4) == expected_link
+            assert o.heap_ptr == before_heap
+            if name == "id":
+                assert result.eax == 123
+            native_observations.append(
+                {
+                    "name": name,
+                    "signature": signature,
+                    "no_allocation": True,
+                    "same_link": True,
+                    "id": result.eax if name == "id" else None,
+                }
+            )
     labels = {
         root: "root",
         request: "request",
@@ -125,9 +197,26 @@ def run(script, dispatch_result=0):
             e["args"][3] = o.read_cstr(e["args"][3]).decode()
         if e["call"] == "0x4207c0":
             e["args"][2] = o.read_cstr(e["args"][2]).decode()
+    link_state = None
+    if script and real_link:
+        native_ptr = o.read_u32(ptr_cell + 8)
+        assert native_ptr != 0
+        assert o.read_u32s(native_ptr, 4) == [0, 0, 123, node]
+        assert o.read_u32(node + 0x48) == native_ptr
+        assert o.read_u32(data + 0x50) == instance
+        link_state = {
+            "id": 123,
+            "owner": "native-node",
+            "prev": 0,
+            "next": 0,
+            "owner_head_matches": True,
+            "script_backref_matches": True,
+        }
     calls = [e["call"] for e in events]
     if script:
-        expected = ["0x41f340", "0x404e20", "0x41f9f0", "0x42a9e0", "0x4207c0"]
+        expected = ["0x41f340", "0x404e20", "0x41f9f0", "0x4207c0"]
+        if not real_link:
+            expected.insert(3, "0x42a9e0")
         if dispatch_result == 0:
             expected.append("0x420ff0")
         assert [x for x in calls if x in expected or x == "0x420ff0"] == expected
@@ -152,6 +241,11 @@ def run(script, dispatch_result=0):
     return {
         "script": script,
         "dispatch_result": dispatch_result,
+        **(
+            {"constructor_link_state": constructor_link_state, "link_state": link_state, "native_observations": native_observations}
+            if real_link
+            else {}
+        ),
         "events": events,
         "stop": hex(o.reg("eip")),
         "oracle": "Unicorn original FUN_0053a5e0; synthetic resource/node/heap boundaries; original FUN_00408a70; Thread::run recording boundary",
