@@ -287,6 +287,17 @@ pub enum LoadError {
 /// compare); execution dereferences IDs and never falls back to a name
 /// lookup when an ID dereference fails.
 ///
+/// Request-driven loading (`FUN_00410890`/`FUN_00410630`/`FUN_0041d290`/
+/// `FUN_00410430`): a cache miss consults the package cache — the
+/// port-side construction over the real `stock/` tree standing in for the
+/// unrecovered original package-tree build (`FUN_0041cdc0`/`FUN_0041d9c0`/
+/// `FUN_0041d690`) and OS enumeration, which were never executed
+/// end-to-end — then reads one file, registers every module it contains,
+/// and returns the ordinary cache selection for the requested name.
+/// Matching is exact-case against cache entries, never via filesystem
+/// case-insensitivity. Diagnostics accumulate the original log lines for
+/// null-with-log misses; [`Loader::take_diagnostics`] drains them.
+///
 /// exe: FUN_0040fe70 (boot) + FUN_00411b20 (chunk loop)
 #[derive(Clone, Debug, Default)]
 pub struct Loader {
@@ -298,6 +309,19 @@ pub struct Loader {
     packages: Vec<(String, String)>,
     booted: bool,
     body_owners: Vec<ClassId>,
+    /// Package cache (`FUN_0041d290`): `(directory, basename)` entries in
+    /// walk order. Built by [`Loader::build_package_cache`] over the real
+    /// `stock/` tree (explicit seam for the unrecovered original
+    /// package-tree construction + OS enumeration).
+    package_entries: Vec<(String, String)>,
+    /// Original log-and-continue diagnostics (`loadClass failed`, `Class
+    /// not found`, `JVM::getClass ... not found`, package conflicts).
+    diagnostics: Vec<String>,
+    /// Read seam (`FUN_00410430` + `FUN_0054c300`): maps the logical
+    /// `directory\basename.class` request to file bytes. Defaults to the
+    /// real `stock/` tree; tests override it to count reads, serve
+    /// controlled bytes, or force failures.
+    reader: FileReader,
 }
 
 /// The original 403a90/411610 class cache: 512 buckets holding stable
@@ -305,11 +329,105 @@ pub struct Loader {
 /// insert-after-head placement live here, so selection reproduces the
 /// observed duplicate-winner topology without redirecting issued IDs.
 ///
-/// exe: FUN_00403a90
+/// The `FUN_00410430` + `FUN_0054c300` file-read seam: maps the original's
+/// logical `directory\basename.class` request to exact stock bytes.
+/// `None` is the original failed read (log `loadClass failed`, return
+/// null, no fallback filename, no second directory). The default reads
+/// the real `stock/` tree with `/` for `\`; tests override it.
 #[derive(Clone, Debug)]
-struct ClassCache {
-    buckets: Vec<Vec<ClassId>>,
+pub struct FileReader {
+    stock_root: Option<std::path::PathBuf>,
+    overlay: std::collections::HashMap<String, Option<Vec<u8>>>,
+    reads: usize,
 }
+
+impl Default for FileReader {
+    fn default() -> Self {
+        Self {
+            stock_root: None,
+            overlay: std::collections::HashMap::new(),
+            reads: 0,
+        }
+    }
+}
+
+impl FileReader {
+    /// Read through the real `stock/` tree rooted at `root`.
+    #[must_use]
+    pub fn stock(root: std::path::PathBuf) -> Self {
+        Self {
+            stock_root: Some(root),
+            overlay: std::collections::HashMap::new(),
+            reads: 0,
+        }
+    }
+
+    /// Serve `bytes` for exactly `logical` (test seam for controlled
+    /// stock bytes).
+    pub fn serve(&mut self, logical: &str, bytes: Vec<u8>) {
+        self.overlay.insert(logical.to_owned(), Some(bytes));
+    }
+
+    /// Fail exactly `logical` (test seam for a stale cache entry: the
+    /// name is listed but the read fails).
+    pub fn fail(&mut self, logical: &str) {
+        self.overlay.insert(logical.to_owned(), None);
+    }
+
+    /// How many reads crossed this seam (cache-hit no-read assertions).
+    #[must_use]
+    pub fn reads(&self) -> usize {
+        self.reads
+    }
+
+    /// `FUN_00410430` + `FUN_0054c300`: serve the exact bytes for the
+    /// logical `directory\basename.class` request, or `None` for the
+    /// original failed read. Overlay entries win; otherwise the real
+    /// `stock/` file is read with `/` for `\`, matching every path
+    /// component in exact case — except the `scripts` folder, which the
+    /// original's substring table spells lowercase
+    /// (`system\scripts\...`) while the checkout spells `Scripts`
+    /// (likewise the probe's logical requests). Basenames and class
+    /// names always match exactly, never via filesystem
+    /// case-insensitivity.
+    ///
+    /// exe: FUN_00410430
+    pub fn read(&mut self, logical: &str) -> Option<Vec<u8>> {
+        self.reads += 1;
+        if let Some(entry) = self.overlay.get(logical) {
+            return entry.clone();
+        }
+        let root = self.stock_root.as_ref()?;
+        let mut current = root.clone();
+        let mut components = logical.split('\\').peekable();
+        while let Some(component) = components.next() {
+            let is_last = components.peek().is_none();
+            let fallback = !is_last && component.eq_ignore_ascii_case("scripts");
+            let found = std::fs::read_dir(&current).ok()?.filter_map(|entry| entry.ok()).find(
+                |entry| {
+                    entry.file_name().to_str().is_some_and(|name| {
+                        (name == component
+                            || (fallback && name.eq_ignore_ascii_case(component)))
+                            && (is_last || entry.path().is_dir())
+                    })
+                },
+            )?;
+            current = found.path();
+        }
+        std::fs::read(&current).ok().filter(|_| current.is_file())
+    }
+}
+
+ /// The original 403a90/411610 class cache: 512 buckets holding stable
+ /// arena record IDs in registration-chain order. Head retention and
+ /// insert-after-head placement live here, so selection reproduces the
+ /// observed duplicate-winner topology without redirecting issued IDs.
+ ///
+ /// exe: FUN_00403a90
+ #[derive(Clone, Debug)]
+ struct ClassCache {
+     buckets: Vec<Vec<ClassId>>,
+ }
 
 /// Number of class-cache buckets in the original registrar (403a90).
 ///
@@ -429,6 +547,228 @@ impl Loader {
                 .class_by_id(id)
                 .ok_or_else(|| LoadError::NotFound(bare_name(descriptor).into())),
             _ => Err(LoadError::NotFound(descriptor.into())),
+        }
+    }
+
+    /// Request a class by dotted name or `L...;` descriptor, loading its
+    /// file on a cache miss exactly like the original: `FUN_00410890`
+    /// normalizes the descriptor and checks `FUN_00411610` first (a hit
+    /// performs no compile check, no file read, no registration); on miss
+    /// `FUN_00410630` asks `FUN_0041d290` for a directory via the
+    /// `JVM+0x7c` package root, takes the last dotted component as the
+    /// basename, requests `directory + "\\" + basename + ".class"` through
+    /// `FUN_00410430` (real concatenation `FUN_00551140`; the [`FileReader`]
+    /// seam supplies the bytes), registers every module the file contains
+    /// (real `FUN_00411b20` parse + real `FUN_00403a90` registration), and
+    /// returns the ordinary cache lookup for the requested name — the
+    /// winner after registration, not "first parsed class" by fiat. A
+    /// missing directory entry, a failed read, or a still-absent name
+    /// returns `None` with the original log-and-continue diagnostics on
+    /// [`Loader::take_diagnostics`]; the exe continues. Hard
+    /// malformed-file errors stay errors per [`LoadError`] conventions.
+    /// Array descriptors never load (arrays own no records).
+    ///
+    /// exe: FUN_00410890
+    pub fn request(&mut self, descriptor: &str) -> Result<Option<ClassId>, LoadError> {
+        if ArrayDescriptor::new(descriptor).is_some() {
+            return Ok(None);
+        }
+        let name = bare_name(descriptor);
+        if let Some(id) = self.lookup(name) {
+            return Ok(Some(id));
+        }
+        Ok(self.load_on_miss(name)?)
+    }
+
+    /// `FUN_00410630`: directory selection + basename construction + file
+    /// read + register-all-modules + final cache lookup. Returns the
+    /// selected record for `name`, or `None` with diagnostics when the
+    /// original logs and continues.
+    ///
+    /// exe: FUN_00410630
+    fn load_on_miss(&mut self, name: &str) -> Result<Option<ClassId>, LoadError> {
+        let Some(directory) = self.select_directory(name) else {
+            self.diagnostics.push(format!(
+                "!Class not found: {name} in file \"controlled-class-cache\" at line 0"
+            ));
+            self.diagnostics.push(format!(
+                "!JVM::getClass: class \"{name}\" not found in file \"controlled-class-cache\" at line 0"
+            ));
+            return Ok(None);
+        };
+        let basename = name.rsplit('.').next().unwrap_or(name);
+        let logical = format!("{directory}\\{basename}.class");
+        let Some(bytes) = self.reader.read(&logical) else {
+            self.diagnostics.push(format!(
+                "!JavaMachine::loadClass: failed to load {logical}"
+            ));
+            self.diagnostics.push(format!(
+                "!JVM::getClass: class \"{name}\" not found in file \"controlled-class-cache\" at line 0"
+            ));
+            return Ok(None);
+        };
+        // Real `FUN_00411b20` parse + real `FUN_00403a90` registration of
+        // every module, then the ordinary cache lookup for the requested
+        // name (post-load `FUN_0041cfe0` package check omitted: the port
+        // cache carries no package-conflict topology yet).
+        self.load_file(&bytes)?;
+        Ok(self.lookup(name))
+    }
+
+    /// `FUN_0041d290`: select the package-cache directory for the
+    /// requested exact-case basename. When several entries list the
+    /// basename, the deepest directory wins (most backslash components;
+    /// ties keep walk order): the probe's controlled cache selects
+    /// `system\Scripts\render\osd\dialog` for `Dialog`, not the
+    /// shallower `system\Scripts\render\osd` that also lists a
+    /// (stale, old-format) `Dialog`. A stale selected entry (name
+    /// listed but read fails) does NOT fall back — the caller logs and
+    /// returns null after the single failed read. Absent basenames and
+    /// case mismatches select nothing and read nothing.
+    ///
+    /// exe: FUN_0041d290
+    fn select_directory(&self, name: &str) -> Option<String> {
+        let basename = name.rsplit('.').next()?;
+        if basename.is_empty() || !name.contains('.') {
+            return None;
+        }
+        self.package_entries
+            .iter()
+            .filter(|(_, entry)| *entry == *basename)
+            .max_by_key(|(directory, _)| {
+                (
+                    directory.chars().filter(|c| *c == '\\').count(),
+                    std::cmp::Reverse(
+                        self.package_entries
+                            .iter()
+                            .position(|entry| {
+                                entry.0 == **directory && entry.1 == *basename
+                            })
+                            .unwrap_or(usize::MAX),
+                    ),
+                )
+            })
+            .map(|(directory, _)| directory.clone())
+    }
+
+    /// `FUN_00410430`'s logical filename for a request: the selected
+    /// directory, a backslash, the last dotted component, `.class`.
+    /// Diagnostics and tests observe it through the read seam.
+    ///
+    /// exe: FUN_00410430
+    #[must_use]
+    pub fn request_filename(&self, name: &str) -> Option<String> {
+        let directory = self.select_directory(name)?;
+        let basename = name.rsplit('.').next().unwrap_or(name);
+        Some(format!("{directory}\\{basename}.class"))
+    }
+
+    /// Drain the accumulated log-and-continue diagnostics.
+    #[must_use]
+    pub fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Observe the package cache (diagnostics, directory-order tests).
+    #[must_use]
+    pub fn package_cache(&self) -> &[(String, String)] {
+        &self.package_entries
+    }
+
+    /// Override the file-read seam (tests: read counting, controlled
+    /// bytes, forced failures). The stock-tree reader stays the default.
+    pub fn set_reader(&mut self, reader: FileReader) {
+        self.reader = reader;
+    }
+
+    /// Build the package cache over the real `stock/` tree (explicit seam
+    /// for the unrecovered original package-tree construction
+    /// `FUN_0041cdc0`/`FUN_0041d9c0`/`FUN_0041d690` + OS enumeration, never
+    /// executed end-to-end): for each boot `PACKAGES` mapping in order,
+    /// walk the package root recursively and record `(subdirectory,
+    /// basename)` for every `*.class` file found. The logical directory
+    /// keeps the boot `PACKAGES` case verbatim (`system\scripts\...`, as
+    /// the original's substring table spells it); only basenames and the
+    /// nested-subdirectory walk touch the disk. A nested folder (e.g.
+    /// `render/osd/dialog` under the `render` package root) contributes
+    /// its own directory entries — the probe's controlled cache selects
+    /// `system\Scripts\render\osd\dialog` for
+    /// `java.render.osd.dialog.*`, not the package root. Bounded: this
+    /// records names only, never file bytes — loading stays
+    /// request-driven.
+    pub fn build_package_cache(&mut self, root: &std::path::Path) {
+        self.package_entries.clear();
+        let packages = self.packages.clone();
+        for (directory, _) in &packages {
+            // Locate the package root on disk by exact-case walk, with a
+            // one-component case-insensitive fallback for the `scripts`
+            // folder: the logical spelling (`system\scripts\...`,
+            // `sl\scripts\...`) differs from the checkout's case
+            // (`system/Scripts/...`, `sl/Scripts/...`) in exactly that
+            // component (the probe's logical requests likewise spell it
+            // lowercase while the tree spells it `Scripts`). Matching is
+            // still exact-case against cache entries at request time;
+            // this only finds the enumeration root.
+            let components: Vec<&str> = directory.split('\\').collect();
+            let mut absolute = root.to_path_buf();
+            let mut located = true;
+            for component in components.iter() {
+                let fallback = component.eq_ignore_ascii_case("scripts");
+                let next = std::fs::read_dir(&absolute).ok().and_then(|entries| {
+                    entries.filter_map(|entry| entry.ok()).find(|entry| {
+                        entry.file_name().to_str().is_some_and(|name| {
+                            (name == *component
+                                || (fallback && name.eq_ignore_ascii_case(component)))
+                                && entry.path().is_dir()
+                        })
+                    })
+                });
+                match next {
+                    Some(entry) => absolute = entry.path(),
+                    None => {
+                        located = false;
+                        break;
+                    }
+                }
+            }
+            if !located {
+                continue;
+            }
+            let mut found: Vec<(String, String)> = Vec::new();
+            let mut stack = vec![(absolute.clone(), directory.clone())];
+            while let Some((dir, logical)) = stack.pop() {
+                let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                let mut children: Vec<std::path::PathBuf> = read_dir
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .collect();
+                children.sort();
+                for child in children {
+                    if child.is_dir() {
+                        let name = child
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned);
+                        if let Some(name) = name {
+                            stack.push((child, format!("{logical}\\{name}")));
+                        }
+                    } else if child.extension().is_some_and(|ext| ext == "class")
+                    {
+                        let Some(stem) = child
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .map(str::to_owned)
+                        else {
+                            continue;
+                        };
+                        found.push((logical.clone(), stem));
+                    }
+                }
+            }
+            found.sort();
+            self.package_entries.extend(found);
         }
     }
 
