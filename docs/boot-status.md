@@ -10,7 +10,7 @@ Last updated: 2026-10-20, branch `exact-port`.
 
 ```sh
 cargo run -p slr-boot -- stock --config-instance-id 0xffff0080 --game-init-instance-id 0xffff007f
-re/boot-compare.sh [original.slrlog]     # boot + call-log diff against the oracle
+re/boot-compare.sh re/out/headless/oracle-33d8aa8/observed/script-natives.slrlog
 ```
 
 Unchanged stock scripts execute Config and GameInit, enter MainMenu at frame
@@ -39,8 +39,8 @@ listed here. A clean test suite alone does not satisfy this definition.
   `Thread::run` over the same stock scripts and records the script-to-native call
   log. Run with `re/headless/run-boot.sh`; log at
   `re/out/headless/boot/observed/script-natives.slrlog`, facts in `original-facts.json`.
-  The Config and GameInit resource IDs the original assigns are 0xFFFF0080 (Config)
-  and are the values used above; this replaces the earlier supplied guess for Config.
+  Config ID 0xFFFF0080 was observed in the original. The controlled driver supplies
+  GameInit ID 0xFFFF007F; original allocation history is not fully replayed.
 * **Comparison (current checkpoint):** command delivery moves the first node
   divergence from #5061 to #19458 (with `DROP=java.lang.GameType.getInfo`, field initializers skipped by
   default; comparison covers a common prefix, not equal-length acceptance):
@@ -112,8 +112,10 @@ listed here. A clean test suite alone does not satisfy this definition.
 
 ## Recovery
 
-* Remote `origin/exact-port` holds all integrated work. The oracle agent works on a separate
-  branch/worktree (`.claude/worktrees/agent-*`, ignored via `.git/info/exclude`).
+* Remote `origin/exact-port` holds the integrated runtime and oracle source. The
+  oracle worktree `.claude/worktrees/agent-a20d568c5b681332f` is inactive, clean and
+  retained at `33d8aa8`, also pushed on its original branch. No old agent needs
+  to be resumed. Do not delete that worktree or either branch without approval.
 * `stock/` and `reference/` are read-only; derived outputs stay under `re/out/`.
 * No Wine. Issue #1 and `docs/plan.md` remain the umbrella; #110 tracks VM completion.
 
@@ -145,3 +147,31 @@ verified all three bounded runtime/test/gap claims without contradictions. Its
 patch review still escalated (safe-to-apply 0.38, low test-gap confidence 0.07),
 so this is not automatic quality approval or parity acceptance. Interface-array
 coverage and the native-log mismatches remain explicit follow-up work.
+
+## Fresh-agent verification and recovery pitfalls
+
+The first continuation task is the filtered native mismatch in Frontier. Read `AGENTS.md`, `GLOSSARY.md`, ADRs 0004/0008/0009,
+`docs/fidelity.md`, `docs/research/boot-sequence.md` and `docs/tufa-executor.md`
+for constraints and implementation context. The temporary session handoff is
+only an index to this canonical state.
+
+`re/boot-compare.sh` prints the runtime's exit status and both comparisons but
+its own shell exit status is not an acceptance gate. Read `compare.txt` and
+`compare-all.txt`; runtime exit 0 currently coexists with native divergence.
+`re/step-compare.py` compares only the common prefix, skips field initializers
+unless `KEEP_FI=1`, and must use the documented DROP setting when reproducing
+node #19458. Equal common prefixes alone do not establish complete trace parity.
+
+All oracle captures, profiles, `re/out/native_api.tsv`, the stock install and
+local oracle virtualenv are local-only dependencies; they are not recovered by
+a fresh clone. Preserve `re/out/` and the retained oracle worktree. The four
+copied oracle inputs were checked byte-for-byte against that worktree during
+handoff preparation. Never commit captures or stock/reference data. The Python
+suite is `~/slr-oracle-venv/bin/python -m unittest discover -s re/headless -v`;
+missing local inputs can skip tests, so inspect its summary.
+
+Runtime acceptance regression:
+`cargo test -p slr-boot --test stock_menu_prefix`.
+It runs both 600-frame success and 200-frame rejection and overwrites the
+standard `re/out/boot/runtime*.calllog` outputs. Run the boot comparison again
+after tests before interpreting those outputs.
