@@ -450,3 +450,29 @@ fn raw_constant_bytes_cannot_silently_become_class_names_or_field_descriptors() 
         assert!(vm.loader.find("\u{fffd}").is_none());
     }
 }
+
+#[test]
+fn stock_string_token_wrapper_passes_index_and_separator_to_native() {
+    use slr_vm::{interp::Thread, values::Value};
+    use slr_x87::X87;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut vm = VmHost::new();
+    for name in ["Object", "Native", "String"] {
+        let data = std::fs::read(root.join(format!("stock/system/Scripts/lang/{name}.class")))
+            .expect("local stock String classes required");
+        vm.loader.load_file(&data).unwrap();
+    }
+    let mut table = slr_lang::NativeTable::new();
+    slr_lang::string::install(&mut table);
+    slr_lang::install(&mut vm, &table);
+    let text = intern_string(&mut vm, b"640 480 32");
+    let class = vm.loader.lookup("java.lang.String").unwrap();
+    for (index, expected) in [(0, b"640".as_slice()), (1, b"480"), (2, b"32")] {
+        let mut thread = Thread::new();
+        vm.enter_method(&mut thread, class, text, "token", &[Value::int(index)])
+            .unwrap();
+        thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
+        let result = thread.pop_deref_with(&mut vm).expect("script token result");
+        assert_eq!(string_bytes(&vm, result.payload).as_deref(), Some(expected));
+    }
+}

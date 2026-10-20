@@ -22,6 +22,41 @@ pub const GET_LEFT: u32 = 0x0048_1970;
 /// the stock `save/game/options` file during Config construction.
 pub const DISPLAY_MODE: (i32, i32) = (800, 600);
 
+/// Same declared adapter modes as the headless original's hypothetical SM2 HAL
+/// profile, after FUN_004b8970's duplicate elimination and LAB_004b8650 sort
+/// (depth descending, width then height ascending). This is scenario data,
+/// not enumeration of the physical host GPU.
+pub fn configure_display() {
+    slr_render_natives::reset_render();
+    slr_render_natives::with_render(|h| {
+        h.set_display_modes(
+            [32, 16]
+                .into_iter()
+                .flat_map(|depth| {
+                    [(640, 480), (800, 600), (1024, 768)]
+                        .into_iter()
+                        .map(move |(w, h)| [w, h, depth])
+                })
+                .collect(),
+        );
+        h.set_current_desc([DISPLAY_MODE.0, DISPLAY_MODE.1, 32]);
+    });
+}
+
+/// The render collaborator interns in its own arena; the VM must receive a
+/// real Java string, as LAB_0047c460 does through FUN_004174a0.
+fn display_mode_name(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let word = slr_render_natives::bridge(vm, info)?;
+    let name = slr_render_natives::with_render(|h| h.string(word).map(str::to_owned))?;
+    match vm.intern_string(Some(name.as_bytes())) {
+        Ok(word) => Some(word),
+        Err(e) => {
+            vm.native_failure = Some(format!("displayModeName string: {e:?}"));
+            None
+        }
+    }
+}
+
 thread_local! {
     /// Receiver word -> `[flags, left, top, width, height]`.
     static VIEWPORTS: RefCell<HashMap<u32, [u32; 5]>> = RefCell::new(HashMap::new());
@@ -81,6 +116,8 @@ pub fn get_aspect(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 }
 
 pub fn install(vm: &mut VmHost) {
+    vm.native_impls
+        .insert(slr_render_natives::DISPLAY_MODE_NAME, display_mode_name);
     for (address, native) in [
         (CREATE, create as slr_vm::host::NativeFn),
         (RESIZE, resize),

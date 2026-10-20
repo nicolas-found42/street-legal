@@ -1054,6 +1054,34 @@ impl Loader {
         }
         let source_kind = source.as_bytes().first().copied();
         let target_kind = target.as_bytes().first().copied();
+        // FUN_004109e0 synthesizes array CCDs with Object as their base,
+        // no interfaces, and the element CCD's kind (primitive arrays: 0).
+        // Keep their descriptor identity without attempting a file lookup.
+        if source_kind == Some(b'[') || target_kind == Some(b'[') {
+            for descriptor in [source, target].into_iter().filter(|s| s.starts_with('[')) {
+                let element = descriptor.trim_start_matches('[');
+                if element.starts_with('L') {
+                    let class = self
+                        .find(bare_name(element))
+                        .ok_or_else(|| LoadError::NotFound(element.into()))?;
+                    if class.kind != 0 {
+                        return Err(LoadError::Malformed(
+                            "interface-array conversion is not modelled".into(),
+                        ));
+                    }
+                }
+            }
+            return Ok(match (source_kind, target_kind) {
+                (Some(b'L'), Some(b'[')) if source == "L;" => 100,
+                (Some(b'['), Some(b'L')) if bare_name(target) == "java.lang.Object" => 101,
+                (Some(b'L'), Some(b'['))
+                    if self.find(bare_name(source)).is_some_and(|c| c.kind != 0) =>
+                {
+                    0
+                }
+                _ => -1,
+            });
+        }
         Ok(match (source_kind, target_kind) {
             (Some(b'I'), Some(b'F')) => 101,
             (Some(b'F'), Some(b'I')) => 100,
@@ -1935,6 +1963,71 @@ fn link_method(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn array_overload_rejects_unrelated_class_candidates_without_loading_array_file() {
+        use super::*;
+        use crate::values::TypeTag;
+        let mut loader = Loader::new();
+        for (name, base) in [
+            ("java.lang.Object", None),
+            ("java.lang.String", Some("java.lang.Object")),
+            ("java.util.Vector", Some("java.lang.Object")),
+            ("Menu", Some("java.lang.Object")),
+        ] {
+            loader.insert_test_class(Class {
+                kind: 0,
+                name: name.into(),
+                base: base.map(str::to_owned),
+                interfaces: vec![],
+                methods: if name == "Menu" {
+                    [
+                        "([Ljava.lang.String;Ljava.lang.String;)V",
+                        "(Ljava.util.Vector;Ljava.lang.String;)V",
+                    ]
+                    .into_iter()
+                    .map(|sig| Method {
+                        class: name.into(),
+                        name: "addItem".into(),
+                        sig: sig.into(),
+                        flags: 1,
+                        static_vector: false,
+                        is_native: false,
+                        body: 0,
+                        is_abstract: false,
+                        extra: 0,
+                    })
+                    .collect()
+                } else {
+                    vec![]
+                },
+                fields: vec![],
+                bodies: vec![],
+            });
+        }
+        let array = "[Ljava.lang.String;";
+        assert_eq!(
+            loader.conversion_cost(array, "Ljava.lang.Object;").unwrap(),
+            101
+        );
+        assert_eq!(
+            loader.conversion_cost(array, "Ljava.util.Vector;").unwrap(),
+            -1
+        );
+        assert_eq!(
+            loader.conversion_cost("Ljava.util.Vector;", array).unwrap(),
+            -1
+        );
+        let found = loader
+            .resolve_overload(
+                "Menu",
+                "addItem",
+                &[TypeTag::Array(array), TypeTag::Ref("L;")],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.method.sig, "([Ljava.lang.String;Ljava.lang.String;)V");
+        assert!(loader.find(array).is_none());
+    }
     use super::*;
 
     fn tiny_module(

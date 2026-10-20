@@ -866,13 +866,10 @@ fn object_natives_match_oracle_vectors() {
                     "token" => {
                         let charset = row["charset"].as_str().expect("charset");
                         let seps = slr_lang::seam::intern_string(&mut vm, charset.as_bytes());
-                        // Container order is the declared arguments followed by
-                        // the receiver (`478d6b..481d6e` shows the exe taking the
-                        // charset word straight out of the marshal slot and the
-                        // copy out of its own frame).
+                        // Match real VM calls: reversed parameters, then receiver.
                         vec![
-                            Value::int(row["index"].as_i64().expect("index") as i32),
                             Value::reference(seps),
+                            Value::int(row["index"].as_i64().expect("index") as i32),
                             Value::reference(receiver_word),
                         ]
                     }

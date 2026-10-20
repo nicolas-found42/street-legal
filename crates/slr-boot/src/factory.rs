@@ -145,6 +145,27 @@ pub struct Created {
     pub template: u32,
 }
 
+/// Native descriptor inherited by an instantiated template, if any.
+pub fn native_class(container: u32) -> Option<String> {
+    WORLD.with(|world| {
+        let world = world.borrow();
+        let w = world.as_ref()?;
+        let instance = w
+            .factory
+            .instances
+            .values()
+            .find(|i| i.container == container)?;
+        let template_container =
+            node::with_res(|h| h.node(instance.template_link).map(|n| n.container))?;
+        w.factory
+            .templates
+            .values()
+            .find(|t| t.container == template_container)?
+            .native_class
+            .clone()
+    })
+}
+
 /// Resolve `requested` (0 = the receiver class's default template) and create
 /// the type-1 instance for `script`.
 pub fn instantiate(
@@ -189,6 +210,9 @@ pub fn instantiate(
             .factory
             .create_instance(root, requested, script, name, &mut || w.ids.allocate())?
             .ok_or("native instance allocation returned zero")?;
+        if w.factory.templates[&requested].native_class.as_deref() == Some("player") {
+            crate::engine::player_created(instance.container);
+        }
         Ok(Created {
             id: instance.id,
             container: instance.container,

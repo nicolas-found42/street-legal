@@ -118,6 +118,12 @@ pub fn take_trace() -> Vec<String> {
     with(|s| std::mem::take(&mut s.trace))
 }
 
+/// The native player starts with EVENT_COMMAND subscribed. Observed at
+/// FUN_004265c0's loaded-data branch in the headless original (mask +0x70).
+pub fn player_created(container: u32) {
+    with(|s| *s.masks.entry(container).or_insert(0) |= 0x10);
+}
+
 /// Simulated world time in seconds (`**0x617650`).
 #[must_use]
 pub fn sim_time() -> f32 {
@@ -394,7 +400,26 @@ pub fn dispatch(
     }
     let instance_mask = with(|s| s.masks.get(&container).copied().unwrap_or(0));
     let script = script_of(container);
-    if instance_mask & mask != 0 && script != 0 {
+    // FUN_004265c0 first offers the event to the native object's vtable +0x38.
+    // FUN_0047a920 consumes Controller commands and invokes setcontrol directly.
+    let native_consumed = instance_mask & mask != 0
+        && kind == 0x10
+        && crate::factory::native_class(container).as_deref() == Some("player");
+    if native_consumed {
+        if let EventArg::Str(Some(text)) = arg {
+            match text.split_whitespace().next() {
+                Some("setcontrol") if script != 0 => {
+                    call_script(vm, script, "setcontrol", &[], "EVENT")?;
+                }
+                Some("device") => {
+                    // The stock Controller has no addDeviceMapping body. Its native
+                    // mapping is still a declared headless-input gap.
+                }
+                _ => {}
+            }
+        }
+    }
+    if instance_mask & mask != 0 && script != 0 && !native_consumed {
         if matches!(kind, 1 | 4 | 0x20 | 0x40) {
             return Err(format!(
                 "event type {kind:#x} carries a physics argument structure that is not modelled"
@@ -646,6 +671,10 @@ pub fn step(vm: &mut VmHost) -> Result<(), String> {
 
 pub fn install(vm: &mut VmHost) {
     for (addr, f) in [
+        (
+            slr_resource::node::QUEUE_EVENT,
+            queue_event as slr_vm::host::NativeFn,
+        ),
         (0x0047_e000, rem_notification as slr_vm::host::NativeFn),
         (0x0047_e050, add_notification),
         (0x0047_e100, add_notification_extended),
@@ -658,5 +687,57 @@ pub fn install(vm: &mut VmHost) {
         (0x0048_1cc0, unregister_callbacks),
     ] {
         vm.native_impls.insert(addr, f);
+    }
+}
+
+/// exe: LAB_0047da30 -> FUN_00426800. Despite its name this dispatches immediately.
+fn queue_event(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    // Preserve resource capture and native argument conversion before callbacks.
+    slr_resource::node::bridge(vm, info);
+    let w = match words(info) {
+        Ok(w) => w,
+        Err(e) => return fail(vm, info, e),
+    };
+    let target = container_of(w[0])?;
+    let source = container_of(w[1]);
+    let arg = EventArg::Str(string(vm, w[3]));
+    if let Err(e) = dispatch(vm, target, source, w[2], &arg, None) {
+        return fail(vm, info, e);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_mask_changes_apply_to_native_player_subscription() {
+        configure(FrameConfig::default());
+        slr_resource::node::reset_res();
+        let receiver = 7;
+        let container = with_res(|h| {
+            let c = h.add_container(slr_resource::node::Container::new(1, 123));
+            let node = h.add_bound_node(123, c);
+            h.bind_object(receiver, node);
+            c
+        });
+        player_created(container);
+        assert_eq!(with(|s| s.masks[&container]), 0x10);
+        let mut vm = VmHost::new();
+        let args = [Value::int(0x10), Value::reference(receiver)];
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            class: "java.lang.GameType",
+            name: "clearEventMask",
+            sig: "(I)V",
+            args: &args,
+        };
+        clear_event_mask(&mut vm, &info);
+        assert!(vm.native_failure.is_none());
+        assert_eq!(with(|s| s.masks[&container]), 0);
+        set_event_mask(&mut vm, &info);
+        assert_eq!(with(|s| s.masks[&container]), 0x10);
     }
 }

@@ -36,6 +36,12 @@ fn main() {
     for (id, name) in ids {
         println!("CLASS {name}");
         let pool = loader.pool_of(id).unwrap().to_vec();
+        if filter.as_deref() == Some("--pool") {
+            for (i, entry) in pool.iter().enumerate() {
+                println!("  POOL {i}: {entry:?}");
+            }
+            continue;
+        }
         for m in &loader.find_by_id(id).unwrap().methods {
             if filter
                 .as_ref()

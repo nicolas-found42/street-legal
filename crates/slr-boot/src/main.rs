@@ -212,7 +212,8 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
     // driver overrides in those classes are recorded here instead.
     let driver_owned = (info.class == "java.render.Viewport"
         && !matches!(info.name, "activate" | "deactivate"))
-        || (info.class == "java.io.Input" && info.name == "getDeviceName");
+        || (info.class == "java.io.Input" && info.name == "getDeviceName")
+        || (info.class == "java.render.GfxEngine" && info.name == "displayModeName");
     if !driver_owned
         && (info.class.starts_with("java.render.")
             || info.class.starts_with("java.sound.")
@@ -820,6 +821,7 @@ fn execute() -> Result<(), String> {
     factory::configure(config_instance_id, game_init_instance_id);
     sched::configure_clock(clock_step);
     engine::configure(engine::FrameConfig::default());
+    viewport::configure_display();
     let mut vm = VmHost::new();
     vm.call_trace = std::env::var_os("SLR_TRACE_CALLS").is_some();
     slr_vm::interp::set_step_trace(std::env::var_os("SLR_TRACE_STEPS").is_some());

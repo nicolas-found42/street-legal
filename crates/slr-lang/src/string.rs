@@ -245,10 +245,9 @@ pub fn finalize(vm: &mut VmHost, info: &CallInfo<'_>) -> NativeResult {
 /// exe exhibits. Nothing in the stock scripts calls `token` twice with a null
 /// charset, and the seam has no CRT static block to hang the state on.
 pub fn token(vm: &mut VmHost, info: &CallInfo<'_>) -> NativeResult {
-    // The marshaller walks the declared parameters last-first (the JVM order:
-    // the receiver is the last cell, the last declared parameter follows it),
-    // so `out[1]` is the `Ljava.lang.String;` and `out[2]` the `I`.
-    let [receiver, charset, index] = marshalled::<3>(info);
+    // The VM container holds reversed parameters followed by the receiver.
+    // FUN_0045d910 walks back through it in descriptor order: index, charset.
+    let [receiver, index, charset] = marshalled::<3>(info);
     let src = text(vm, receiver).unwrap_or_default();
     let seps = text(vm, charset).unwrap_or_default();
     // `481d37 inc esi / 481d3a cmp esi,0x100 / jle 481d4f`: the frame buffer
@@ -478,10 +477,10 @@ mod tests {
         let text = string_arg(&mut vm, b"a,b c");
         let seps = string_arg(&mut vm, b", ");
         // Index 0: the first token. (The seam's argument order is the
-        // declared arguments followed by the receiver.)
+        // reversed declared arguments followed by the receiver, as emitted by the VM.)
         let args = [
-            Value::int(0),
             Value::reference(seps),
+            Value::int(0),
             Value::reference(text),
         ];
         let ret = token(
@@ -492,8 +491,8 @@ mod tests {
         assert_eq!(bytes_of(&vm, ret).as_deref(), Some(&b"a"[..]));
         // Index 2: the third token.
         let args = [
-            Value::int(2),
             Value::reference(seps),
+            Value::int(2),
             Value::reference(text),
         ];
         let ret = token(
@@ -510,8 +509,8 @@ mod tests {
         let text = string_arg(&mut vm, b"a");
         let seps = string_arg(&mut vm, b",");
         let args = [
-            Value::int(5),
             Value::reference(seps),
+            Value::int(5),
             Value::reference(text),
         ];
         let ret = token(
