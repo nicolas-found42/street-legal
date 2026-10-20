@@ -80,6 +80,56 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
             "native resource ID record #{ordinal}"
         );
     }
+    // Package-manager indices are primitive results too. Compare the entire
+    // stock discovery pass, not just its first previously divergent return.
+    let library_indices = |records: &[slr_calllog::LogRecord]| {
+        records
+            .iter()
+            .filter_map(|record| match record {
+                slr_calllog::LogRecord::NativeCall {
+                    class,
+                    name,
+                    result,
+                    ..
+                } if class == "java.lang.System" && name == "openLib" => Some(result.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_libraries = library_indices(&expected);
+    assert!(!expected_libraries.is_empty());
+    assert_eq!(library_indices(&actual), expected_libraries);
+    let packages: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            root.join("re/out/headless/package-investigation/full-observed/original-facts.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let packages = &packages["package_history"];
+    assert_eq!(packages["truncated"], false);
+    assert_eq!(packages["pending"], 0);
+    let expected_packages: String = packages["creations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["index"].as_u64().unwrap() != 0xffff)
+        .map(|entry| {
+            format!(
+                "{}\t{}\n",
+                entry["index"].as_u64().unwrap(),
+                entry["name"]
+                    .as_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase()
+            )
+        })
+        .collect();
+    assert_eq!(
+        std::fs::read_to_string(root.join("re/out/boot/package-indices.tsv")).unwrap(),
+        expected_packages
+    );
     // Compare the created resource graph too: an allocator-only adjustment
     // could satisfy the ID assertions while omitting ownership/type effects.
     let history: serde_json::Value = serde_json::from_str(

@@ -22,8 +22,9 @@ use std::{
 #[derive(Default)]
 struct Resources {
     pub(crate) root: PathBuf,
-    pub(crate) packages: Vec<(String, Package)>,
+    pub(crate) packages: Vec<(String, Option<Package>)>,
     registered: std::collections::HashMap<usize, slr_resource::package::Installed>,
+    loading: std::collections::HashSet<usize>,
 }
 impl Resources {
     fn package(&mut self, name: &str) -> Result<usize, String> {
@@ -34,10 +35,25 @@ impl Resources {
         if let Some(i) = self.packages.iter().position(|(n, _)| *n == name) {
             return Ok(i);
         }
-        let p = Package::open(self.root.join(&name)).map_err(|e| format!("RPK {name}: {e:?}"))?;
         let i = self.packages.len();
-        self.packages.push((name, p));
+        if i >= 0xffff {
+            return Err("package manager indices exhausted".into());
+        }
+        // FUN_00538380 reserves a name independently of file availability.
+        self.packages.push((name, None));
         Ok(i)
+    }
+    fn read_package(&mut self, index: usize) -> Result<(), String> {
+        let (name, package) = self
+            .packages
+            .get_mut(index)
+            .ok_or("unknown package index")?;
+        if package.is_none() {
+            *package = Some(
+                Package::open(self.root.join(&name)).map_err(|e| format!("RPK {name}: {e:?}"))?,
+            );
+        }
+        Ok(())
     }
     fn resolve(&mut self, package: Option<&str>, id: u32) -> Result<u32, String> {
         let i = if let Some(package) = package {
@@ -45,11 +61,15 @@ impl Resources {
         } else {
             0
         };
+        self.request_headers(i)?;
         let foreign = id >> 16;
         let i = if foreign == 0 {
             i
         } else {
-            let p = &self.packages[i].1;
+            let p = self.packages[i]
+                .1
+                .as_ref()
+                .ok_or("package header missing")?;
             let link = p
                 .links
                 .iter()
@@ -57,44 +77,93 @@ impl Resources {
                 .ok_or_else(|| format!("unknown RPK link {foreign}"))?
                 .name
                 .clone();
-            self.package(&link)?
+            let linked = self.package(&link)?;
+            self.request_headers(linked)?;
+            linked
         };
         Ok(((i as u32) << 16) | (id & 0xffff))
     }
     /// Register the package named by a mapped resource ID, if not yet done.
     fn request_metadata(&mut self, id: u32) -> Result<(), String> {
         let index = (id >> 16) as usize;
-        let (name, package) = self
+        self.request_headers(index)?;
+        let package = self
             .packages
             .get(index)
+            .and_then(|(_, package)| package.as_ref())
             .ok_or("mapped package is not available")?;
         if !package.entries.iter().any(|e| e.type_id == id & 0xffff) {
             return Err("mapped resource is outside the known package; original absence behavior is not asserted".into());
         }
+        Ok(())
+    }
+    /// Load links and register headers in their original interleaved order.
+    /// Each header resolves its foreign parent before joining that parent's
+    /// child list; loading all dependencies first would reorder those lists.
+    fn request_headers(&mut self, index: usize) -> Result<(), String> {
+        self.read_package(index)?;
+        // System roots are still provided by the controlled boot driver.
         if index == 0 {
-            return Err("the system package is registered by the boot driver".into());
+            return Ok(());
         }
         if self.registered.contains_key(&index) {
             return Ok(());
         }
-        let name = name.clone();
-        let links: Vec<String> = package.links.iter().map(|l| l.name.clone()).collect();
-        for link in links {
-            // A missing linked file is tolerated: its entries stay absent.
-            let _ = self.package(&link);
+        if !self.loading.insert(index) {
+            return Err(format!("cyclic package header dependency at index {index}"));
         }
-        let installed = slr_resource::node::with_res(|host| {
-            slr_resource::package::install_package(host, &self.packages, index)
-        })?;
-        println!(
-            "BOOT resource metadata {name} entries={}; declared foreign roots {}; no descriptor materialization",
-            installed.ids.len(),
-            installed.declared_foreign_roots.len()
-        );
-        self.registered.insert(index, installed);
-        Ok(())
+        let result = (|| {
+            let package = self.packages[index].1.as_ref().unwrap();
+            let links = package.links.clone();
+            let parents: Vec<_> = package.entries.iter().map(|entry| entry.super_id).collect();
+            for link in &links {
+                self.package(&link.name)?;
+            }
+            let mut installed = slr_resource::package::Installed {
+                ids: Vec::new(),
+                declared_foreign_roots: Vec::new(),
+            };
+            for (entry_index, parent) in parents.into_iter().enumerate() {
+                if parent >> 16 != 0 {
+                    let link = links
+                        .iter()
+                        .find(|link| link.package_id_shifted == parent & 0xffff_0000)
+                        .ok_or("foreign resource parent link missing")?;
+                    let foreign = self.package(&link.name)?;
+                    if foreign != 0 {
+                        // Missing stock obstacles retain the declared empty-root
+                        // boundary; their names still consume original indices.
+                        let name = &self.packages[foreign].0;
+                        if self.root.join(name).exists() {
+                            self.request_headers(foreign)?;
+                        }
+                    }
+                }
+                let entry = slr_resource::node::with_res(|host| {
+                    slr_resource::package::install_header(host, &self.packages, index, entry_index)
+                })?;
+                installed.ids.extend(entry.ids);
+                installed
+                    .declared_foreign_roots
+                    .extend(entry.declared_foreign_roots);
+            }
+            println!("BOOT resource metadata {} entries={}; declared foreign roots {}; no descriptor materialization",
+                self.packages[index].0, installed.ids.len(), installed.declared_foreign_roots.len());
+            self.registered.insert(index, installed);
+            Ok(())
+        })();
+        self.loading.remove(&index);
+        result
     }
     fn write_trace(&self, output: &Path) -> Result<(), String> {
+        let indices: String = self
+            .packages
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| format!("{index}\t{name}\n"))
+            .collect();
+        std::fs::write(output.join("package-indices.tsv"), indices)
+            .map_err(|e| format!("PackageTraceBoundary: {e}"))?;
         let snapshot = slr_resource::node::with_res(|host| {
             let mut text = String::from("CONTROLLED package header registration; foreign roots declared empty, their own hierarchy and other children unmodeled; no descriptor parsing/materialization\n");
             let mut indices: Vec<_> = self.registered.keys().copied().collect();
@@ -134,6 +203,7 @@ impl Resources {
                 .packages
                 .get((next >> 16) as usize)
                 .ok_or_else(|| format!("template package of {next:#x} is not installed"))?;
+            let p = p.as_ref().ok_or("template package header missing")?;
             let e = p
                 .entries
                 .iter()
@@ -178,7 +248,9 @@ impl Resources {
             .packages
             .get((id >> 16) as usize)
             .ok_or("missing RPK")?
-            .1;
+            .1
+            .as_ref()
+            .ok_or("missing RPK header")?;
         let e = p
             .entries
             .iter()
@@ -341,8 +413,8 @@ fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 }
 /// `java.lang.System.openLib(String)I` (`LAB_00487be0`): register the package
 /// by name with the package manager (`FUN_00538380`, index = first-use order)
-/// and force its header load by resolving local resource 1 (`FUN_00545fc0`).
-/// The answer is the package index, or -1 when that resolution fails.
+/// and force its header load (`FUN_00544170`). A loaded header answers the
+/// package index even without local resource 1; an unavailable file answers -1.
 fn open_lib(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let mut words = [0; 2];
     if let Err(error) = slr_vm::host::marshal_args(info, &mut words) {
@@ -362,13 +434,12 @@ fn open_lib(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             Ok(index) => index,
             Err(_) => return Ok(u32::MAX),
         };
-        let has_entry_one = r.packages[index].1.entries.iter().any(|e| e.type_id == 1);
-        if !has_entry_one {
+        let cached =
+            r.registered.contains_key(&index) || (index == 0 && r.packages[index].1.is_some());
+        if !cached && !r.root.join(&r.packages[index].0).exists() {
             return Ok(u32::MAX);
         }
-        if index != 0 {
-            r.request_metadata(((index as u32) << 16) | 1)?;
-        }
+        r.request_headers(index)?;
         Ok::<u32, String>(index as u32)
     });
     match result {
@@ -606,7 +677,8 @@ fn run(
     RES.with(|r| {
         let mut r = r.borrow_mut();
         r.root = root.into();
-        r.package("system.rpk")
+        let index = r.package("system.rpk")?;
+        r.read_package(index)
     })
     .map_err(|e| e.to_string())?;
     println!("BOOT RPK system.rpk");
@@ -631,6 +703,8 @@ fn run(
         .with(|r| {
             r.borrow().packages[0]
                 .1
+                .as_ref()
+                .unwrap()
                 .entries
                 .iter()
                 .find(|e| e.alias.trim_end_matches('\0') == "Config")
@@ -943,6 +1017,77 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn open_lib_missing_local_one_loads_headers_before_original_fast_path() {
+        use slr_vm::vmclass::{Class, Field};
+        let oracle =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../re/out/boot/openlib-header.json");
+        let row: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(oracle)
+                .expect("generate re/oracle/openlib_header_probe.py output first"),
+        )
+        .unwrap();
+        assert_eq!(row["header_loads"][0]["state"], 0);
+        assert_eq!(row["final_header_state"], 2);
+        assert!(row["fallbacks"].as_array().unwrap().is_empty());
+        let output = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../re/out/boot/openlib-edge-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&output).unwrap();
+        let mut data = b"RPAK".to_vec();
+        for value in [0x200u32, 0, 0, 0, 0, 0, 0] {
+            data.extend(value.to_le_bytes());
+        }
+        std::fs::write(output.join("empty.rpk"), data).unwrap();
+        RES.with(|resources| {
+            *resources.borrow_mut() = Resources {
+                root: output.clone(),
+                packages: vec![("system.rpk".into(), None)],
+                ..Resources::default()
+            };
+        });
+        let mut vm = VmHost::new();
+        vm.loader.insert_test_class(Class {
+            kind: 0,
+            name: "java.lang.String".into(),
+            base: None,
+            interfaces: vec![],
+            fields: vec![Field {
+                class: "java.lang.String".into(),
+                name: "ptr".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+            methods: vec![],
+            bodies: vec![],
+        });
+        let name = vm.intern_string(Some(b"empty.rpk")).unwrap();
+        let args = [Value::reference(name), Value::reference(0)];
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            class: "java.lang.System",
+            name: "openLib",
+            sig: "(Ljava.lang.String;)I",
+            args: &args,
+        };
+        // Real FUN_005383f0 loads headers before the wrapper reads their state,
+        // including the first successful open of a package without local 1.
+        assert_eq!(row["existence_checks"], 1);
+        for expected in row["results"].as_array().unwrap() {
+            assert_eq!(
+                open_lib(&mut vm, &info),
+                Some(expected.as_u64().unwrap() as u32)
+            );
+            if output.join("empty.rpk").exists() {
+                std::fs::remove_file(output.join("empty.rpk")).unwrap();
+            }
+        }
+        assert!(vm.native_failure.is_none());
+        std::fs::remove_dir_all(output).unwrap();
+        RES.with(|resources| *resources.borrow_mut() = Resources::default());
+    }
+    #[test]
     fn template_chains_follow_super_ids_and_missing_packages_fail_closed() {
         let mut bytes = b"RPAK".to_vec();
         for word in [0x200u32, 0, 0, 0, 0, 0, 0] {
@@ -964,8 +1109,9 @@ mod tests {
         }
         let resources = Resources {
             root: PathBuf::new(),
-            packages: vec![("system.rpk".into(), package)],
+            packages: vec![("system.rpk".into(), Some(package))],
             registered: Default::default(),
+            loading: Default::default(),
         };
         assert_eq!(
             resources

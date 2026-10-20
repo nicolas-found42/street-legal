@@ -1,5 +1,12 @@
 //! `java.io.Input` / `java.io.MouseCursor` / `java.io.Controller` natives
-//! (M1-09 slice I7): logging stubs.
+//! (M1-09 slice I7): device-less logging plus loaded-player mapping identities.
+//!
+//! `InputHost::call_controller` additionally models the original loaded-player
+//! add/delete/reset mapping table. Boot resolves the native resource and uses
+//! that path; `call` retains the original no-handle constants below. Original
+//! sequence evidence: `re/oracle/controller_mapping_probe.py`. Device sampling,
+//! axis metadata, force/smoothing behavior and player commands remain boundaries.
+//! The historical device-less slice described below applies to `call`.
 //!
 //! The 20 rows below are the exe's input-facing natives. None of them is
 //! portable yet: every one of them reads the DirectInput device table the
@@ -453,6 +460,62 @@ pub struct InputHost {
     log: Vec<String>,
     strings: HashMap<u32, Vec<u8>>,
     next_string: u32,
+    controllers: HashMap<u32, ControllerMappings>,
+}
+
+/// Identity/state projection of original `FUN_0054d650`'s 152 mapping slots.
+/// Samples remain zero in the declared headless input scenario.
+#[derive(Debug, Clone, PartialEq)]
+struct ControllerMappings {
+    slots: [[u32; 8]; 152],
+    count: u32,
+}
+
+impl Default for ControllerMappings {
+    fn default() -> Self {
+        Self {
+            slots: [[0; 8]; 152],
+            count: 0,
+        }
+    }
+}
+
+impl ControllerMappings {
+    fn call(&mut self, address: u32, words: &[u32]) -> Option<u32> {
+        match address {
+            CONTROLLER_USER_ADD => {
+                let args: [u32; 7] = std::array::from_fn(|i| word_at(words, i + 1));
+                if (args[1] as i32) < 0 || (args[2] as i32) < 0 {
+                    return Some(u32::MAX);
+                }
+                let Some(index) = self.slots.iter().position(|slot| slot[0] == 0) else {
+                    return Some(0);
+                };
+                self.slots[index] = [
+                    args[0], args[1], args[2], 0, args[3], args[4], args[5], args[6],
+                ];
+                self.count = self.count.wrapping_add(1);
+                Some(index as u32 + 1)
+            }
+            CONTROLLER_USER_DEL => {
+                let key: [u32; 3] = std::array::from_fn(|i| word_at(words, i + 1));
+                if let Some(slot) = self.slots.iter_mut().find(|slot| slot[..3] == key) {
+                    slot[0] = 0;
+                    self.count = self.count.wrapping_sub(1);
+                }
+                Some(0)
+            }
+            CONTROLLER_USER_RESET => {
+                // Original reset clears only each mapping's action sentinel.
+                for slot in &mut self.slots {
+                    slot[0] = 0;
+                }
+                self.count = 0;
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Default for InputHost {
@@ -470,6 +533,7 @@ impl InputHost {
             log: Vec::new(),
             strings: HashMap::new(),
             next_string: 0,
+            controllers: HashMap::new(),
         }
     }
 
@@ -518,13 +582,39 @@ impl InputHost {
             self.log.push(LOG_PREFIX.to_owned());
             self.log.push(text.to_owned());
         }
-        let word = match stub.result {
+        self.call_with_result(stub, words, None)
+    }
+
+    /// Run a mapping operation for a verified loaded native player. `owner`
+    /// is the resource identity, shared by all script wrappers of that player.
+    /// Other controller operations retain their explicit headless constants.
+    pub fn call_controller(&mut self, stub: &Stub, words: &[u32], owner: u32) -> Option<u32> {
+        let override_result = matches!(
+            stub.binding.impl_addr,
+            CONTROLLER_USER_ADD | CONTROLLER_USER_DEL | CONTROLLER_USER_RESET
+        )
+        .then(|| {
+            self.controllers
+                .entry(owner)
+                .or_default()
+                .call(stub.binding.impl_addr, words)
+        });
+        self.call_with_result(stub, words, override_result)
+    }
+
+    fn call_with_result(
+        &mut self,
+        stub: &Stub,
+        words: &[u32],
+        override_result: Option<Option<u32>>,
+    ) -> Option<u32> {
+        let word = override_result.unwrap_or_else(|| match stub.result {
             StubResult::Void => None,
             StubResult::Int(value) => Some(value as u32),
             StubResult::Float(value) => Some(value.to_bits()),
             StubResult::EmptyString => Some(self.intern(b"")),
             StubResult::NullWithLog { .. } => Some(0),
-        };
+        });
         let sig = stub.binding.sig;
         let args = param_types(sig)
             .into_iter()
@@ -976,6 +1066,55 @@ mod tests {
         };
         assert_eq!(bridge(&mut vm, &info), None);
         assert!(with_input(|input| input.records().is_empty()));
+    }
+
+    #[test]
+    fn controller_mappings_replay_original_sequence() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/controller-mapping.json");
+        let source = std::fs::read_to_string(&path)
+            .expect("generate re/oracle/controller_mapping_probe.py output first");
+        let row: serde_json::Value = serde_json::from_str(&source).unwrap();
+        let mut input = InputHost::new();
+        for (index, operation) in row["operations"].as_array().unwrap().iter().enumerate() {
+            let address = match operation["name"].as_str().unwrap() {
+                "add" => CONTROLLER_USER_ADD,
+                "del" => CONTROLLER_USER_DEL,
+                "reset" => CONTROLLER_USER_RESET,
+                name => panic!("unknown operation {name}"),
+            };
+            let stub = stub_by_addr(address).unwrap();
+            let mut words = vec![123];
+            words.extend(
+                operation["params"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as u32),
+            );
+            let result = input.call_controller(stub, &words, 17);
+            assert_eq!(
+                result,
+                operation["result"].as_u64().map(|v| v as u32),
+                "operation {index}"
+            );
+            let state = input.controllers.get(&17).unwrap();
+            assert_eq!(
+                state.count as u64,
+                operation["count"].as_u64().unwrap(),
+                "count {index}"
+            );
+            assert_eq!(
+                serde_json::to_value(&state.slots[..3]).unwrap(),
+                operation["slots"],
+                "slots {index}"
+            );
+        }
+        // Resource identities isolate mapping tables, and missing handles keep
+        // the original device-less result.
+        let stub = stub_by_addr(CONTROLLER_USER_ADD).unwrap();
+        assert_eq!(input.call_controller(stub, &[123, 7, 0, 1], 18), Some(1));
+        assert_eq!(input.call(stub, &[123, 7, 0, 1]), Some(0));
     }
 
     /// The descriptor walk behind the record: parameter types, return type.

@@ -26,6 +26,8 @@ from unicorn import x86_const as X
 
 import calllog
 from resource_history import ResourceHistory
+from menu_history import MenuHistory
+from package_history import PackageHistory
 
 THREAD_RUN = 0x420FF0
 NATIVE_PRE_SITES = (0x42007E, 0x42008C, 0x4200A2, 0x4200B7)
@@ -135,6 +137,8 @@ class Observer:
         self.loop_iterations = 0
         self.install()
         self.resource_history = ResourceHistory(self)
+        self.menu_history = MenuHistory(self)
+        self.package_history = PackageHistory(self)
 
     # ------------------------------------------------------------- plumbing
     def hook(self, address, callback):
@@ -587,6 +591,7 @@ class Observer:
         self.loop_counts[name] = count + 1
         if address == 0x418D10:
             self.loop_iterations += 1
+            self.menu_history.sample(self.reg("ecx"), self.loop_iterations)
             if self.first_loop_icount is None:
                 self.first_loop_icount = self.host.icount
             if self.loop_iterations in (1, 2, 3, 10, 100):
@@ -630,6 +635,8 @@ class Observer:
             "native_counts": dict(sorted(self.native_counts.items())),
             "resource_creations": self.creations,
             "resource_history": self.resource_history.sidecar(),
+            "menu_history": self.menu_history.sidecar(),
+            "package_history": self.package_history.sidecar(),
             "boot_function": getattr(self, "boot", None),
             "snapshots": self.snapshots,
             "main_loop_calls": self.loop,

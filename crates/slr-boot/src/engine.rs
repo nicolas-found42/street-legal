@@ -124,6 +124,38 @@ pub fn player_created(container: u32) {
     with(|s| *s.masks.entry(container).or_insert(0) |= 0x10);
 }
 
+/// Controller native bridge: resolve the same loaded native player resource
+/// used by the original wrapper before entering its mapping table.
+pub fn controller_bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let address = vm.natives.resolve(info.class, info.name, info.sig)?;
+    let stub = slr_io::input::stub_by_addr(address)?;
+    let mut words = [0; slr_io::input::MAX_WORDS];
+    let written = marshal_args(info, &mut words).unwrap_or(0);
+    let owner = vm
+        .read_field(words[0], "ptr")
+        .ok()
+        .and_then(|ptr| with_res(|host| host.node(ptr.payload).map(|node| node.container)))
+        .filter(|container| {
+            with_res(|host| {
+                host.container(*container)
+                    .is_some_and(|c| c.type_id == 1 && c.load_state == 1)
+            }) && crate::factory::native_class(*container).as_deref() == Some("player")
+        });
+    slr_io::input::with_input(|host| {
+        let result = match owner {
+            Some(owner) => host.call_controller(stub, &words[..written], owner),
+            None => host.call(stub, &words[..written]),
+        };
+        slr_calllog::headless::record(
+            host.records()
+                .last()
+                .expect("controller call recorded")
+                .clone(),
+        );
+        result
+    })
+}
+
 /// Simulated world time in seconds (`**0x617650`).
 #[must_use]
 pub fn sim_time() -> f32 {
@@ -670,6 +702,10 @@ pub fn step(vm: &mut VmHost) -> Result<(), String> {
 }
 
 pub fn install(vm: &mut VmHost) {
+    for stub in slr_io::input::CONTROLLER_STUBS {
+        vm.native_impls
+            .insert(stub.binding.impl_addr, controller_bridge);
+    }
     for (addr, f) in [
         (
             slr_resource::node::QUEUE_EVENT,

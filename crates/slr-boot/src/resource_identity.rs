@@ -71,7 +71,11 @@ fn camera_root() -> Result<u32, String> {
     // them. The original additionally retains a direct camera-root handle.
     let (kind, flags) = crate::RES.with(|r| {
         let r = r.borrow();
-        let system = &r.packages.first().ok_or("system package missing")?.1;
+        let system = r
+            .packages
+            .first()
+            .and_then(|(_, package)| package.as_ref())
+            .ok_or("system package missing")?;
         let root = system
             .entries
             .iter()

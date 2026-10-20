@@ -64,7 +64,10 @@ fn materialise(container: u32, request: &str) -> Result<(), String> {
     }
     let (descriptor, root) = crate::RES.with(|r| {
         let r = r.borrow();
-        let package = r.packages.get((id >> 16) as usize).map(|(_, p)| p);
+        let package = r
+            .packages
+            .get((id >> 16) as usize)
+            .and_then(|(_, p)| p.as_ref());
         let text = package.and_then(|p| {
             p.entries
                 .iter()
