@@ -428,6 +428,51 @@ pub fn link_created_script(
     Ok(link)
 }
 
+/// Attach an existing Native.ptr handle to an already created native resource.
+/// This is the final link repair in GameType.createNativeInstance; it allocates
+/// no Java object or replacement native handle.
+pub fn bind_existing_script(
+    vm: &mut VmHost,
+    object: u32,
+    container: u32,
+) -> Result<ScriptLink, String> {
+    let ptr = vm
+        .read_field(object, "ptr")
+        .map_err(|e| format!("Native.ptr: {e:?}"))?
+        .payload;
+    with_res(|host| {
+        let target = host
+            .containers
+            .get(&container)
+            .ok_or("native instance container missing")?;
+        if target.type_id != 1 || target.instance.as_ref().map(|i| i.script) != Some(object) {
+            return Err("native instance script identity mismatch".into());
+        }
+        let resource_id = target.id;
+        let current = host
+            .nodes
+            .get(&ptr)
+            .ok_or("existing Native.ptr node missing")?;
+        if current.container != container {
+            if current.container != 0 {
+                host.unlink(ptr);
+            }
+            host.insert_head(container, ptr);
+            host.nodes
+                .get_mut(&ptr)
+                .ok_or("Native.ptr node disappeared")?
+                .id = resource_id;
+        }
+        host.bind_object(object, ptr);
+        Ok(ScriptLink {
+            node: ptr,
+            container,
+            resource_id,
+            script: object,
+        })
+    })
+}
+
 /// Release the creation operation's temporary retained link after dispatch/run
 /// returns. The script's Native.ptr node and resource identity remain installed.
 /// The caller keeps the retain while inspecting a stopped constructor.

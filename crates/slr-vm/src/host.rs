@@ -2189,7 +2189,11 @@ impl VmHost {
                 return Err(VmError::Unsupported(0x0024));
             }
         }
+        self.native_failure = None;
         let result = native(self, &info);
+        if self.native_failure.is_some() {
+            return Err(VmError::Unsupported(0x0024));
+        }
         if let Some(observe) = self.native_observer {
             observe(&info, result);
         }

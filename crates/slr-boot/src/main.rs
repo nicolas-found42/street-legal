@@ -1,4 +1,5 @@
 //! Headless stock bootstrap. All script bodies come from the read-only install.
+mod factory;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{
@@ -150,7 +151,7 @@ fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> Str
 }
 
 fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
-    if info.class == "java.lang.GameType" {
+    if info.class == "java.lang.GameType" && info.name != "createNativeInstance" {
         return Err("GameType engine collaborator is not installed".into());
     }
     if info.class == "java.lang.Thread" && info.name == "start" {
@@ -177,6 +178,8 @@ fn install(vm: &mut VmHost) {
     slr_render_natives::install_headless(vm);
     slr_input::install_headless(vm);
     slr_sound::install_headless(vm);
+    vm.native_impls
+        .insert(0x00481a70, factory::create_native_instance);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
 }
@@ -418,6 +421,7 @@ fn execute() -> Result<(), String> {
     project_stock(&root, &files).map_err(|e| format!("ProjectionBoundary: {e}"))?;
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
+    factory::configure(config_instance_id, game_init_instance_id);
     let mut vm = VmHost::new();
     let outcome = run(
         &root,
@@ -426,6 +430,7 @@ fn execute() -> Result<(), String> {
         &output,
         game_init_instance_id,
     );
+    factory::write_trace(&output)?;
     let file = std::fs::File::create(output.join("runtime.calllog"))
         .map_err(|e| format!("CallLogBoundary: {e}"))?;
     let mut writer =

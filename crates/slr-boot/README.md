@@ -35,12 +35,14 @@ established.
 
 With both IDs the current stock run enters Init, then stops in
 `Sound.init → Dummy.<init> → GameType.createNativeInstance` at a named
-`NativeBackendBoundary`. The GameType engine collaborator is not installed.
+`NativeBackendBoundary`. The factory backend now models the measured default-class template and fresh native instance branches. Stock Sound requests explicit `system.rpk:0x1b`, so it currently stops at the named external-template materialisation boundary before allocating an instance.
 The driver also guards unwired `Thread.start` before it could silently lose a
 pending script frame. A rejected native call produces no fabricated result.
 
 Script file operations use a fresh complete copy under ignored
-`re/out/boot/files/`, never stock. Native calls are written in the existing binary
+`re/out/boot/files/`, never stock. The controlled allocator starts at seed1 with supplied Config/Init IDs reserved; this is not recovered original startup history. Factory operations are written to `re/out/boot/factory-operations.txt`.
+
+Native calls are written in the existing binary
 call-log format to `re/out/boot/runtime.calllog`. Standard output reports the
 ordered driver boundaries and standard error reports exact execution stops;
 redirect both to `re/out/boot/runtime.txt` to inspect a replay. Missing native
@@ -60,9 +62,18 @@ headless-original startup still stops before script execution. Consequently
 there is no original script-call prefix available for an execution comparison.
 
 Pending boot work includes native registration order/full surface, actual
-original allocation history, native GameType factory/resource loading,
+original allocation history, external GameType resource materialisation,
 present-backend graphics refresh, scheduler/native-thread wiring and monotonic
 clock/pacing. Native link validation uses
 `re/oracle/boot_native_link_probe.py` (original creation/link/field-store
 instructions, supplied resources and script-dispatch boundary). The current
 frontier deliberately exits with a nonzero status.
+
+Default factory evidence: original `FUN_0053a1a0` (three supplied-boundary
+cases), `FUN_0053a2a0` (three controlled cases plus one fresh original type1
+constructor and empty lifecycle case), and `FUN_00536ed0`/`FUN_00536f90`
+(two 130-allocation/recycle sequences) under Unicorn. Fresh instance flags are
+0x221, template flags2, and gametype words start at 1.0f/0. The class cache uses
+retained ClassId identity. Tests preserve the receiver's existing Native.ptr
+while attaching the new container and script back-reference. This does not
+establish external resource inheritance or parent child-list parity.

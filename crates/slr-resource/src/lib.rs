@@ -43,5 +43,6 @@
 //!   id the exe threads through `DAT_0062e008`. The exe's object graph is
 //!   not observable through any ported interface.
 
+pub mod factory;
 pub mod handles;
 pub mod node;

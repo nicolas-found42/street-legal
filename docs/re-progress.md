@@ -16,12 +16,12 @@ python3 re/progress.py
 
 | Measure | Handoff baseline (`7caab32`) | Current integration |
 |---|---:|---:|
-| Generated ledger symbol rows | 430 | 481 |
-| Rows with passing evidence | 321 | 363 |
+| Generated ledger symbol rows | 430 | 485 |
+| Rows with passing evidence | 321 | 367 |
 | Ported rows without registered passing evidence | 109 | 118 |
-| Unique annotated addresses | 423 | 479 |
-| Ghidra function entries with an annotation | 200 / 4,356 | 232 / 4,356 |
-| Ghidra function entries with passing evidence | 151 / 4,356 | 173 / 4,356 |
+| Unique annotated addresses | 423 | 483 |
+| Ghidra function entries with an annotation | 200 / 4,356 | 236 / 4,356 |
+| Ghidra function entries with passing evidence | 151 / 4,356 | 177 / 4,356 |
 | Native registrations with exact ledger symbol | 108 / 353 | 178 / 353 |
 | Native registrations with exact symbol and passing evidence | 85 / 353 | 158 / 353 |
 | Native registrations with any annotation at the same address | 173 / 353 | 205 / 353 |
@@ -42,7 +42,7 @@ existing tests exercise null/error envelopes or injected engine seams; inspect
 them before extending any exactness claim to live engine paths.
 
 The baseline `cargo test --workspace` passed (106 successful test-result
-summaries). Current ledger collection passed 458/458 evidence rows. These are test-to-symbol evidence rows, distinct from the 363 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
+summaries). Current ledger collection passed 463/463 evidence rows. These are test-to-symbol evidence rows, distinct from the 367 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
 
 An interner audit also removed `FUN_004174a0` from the math oracle's passing
 claims. That probe replaces the helper with a callback that records output bytes
@@ -64,8 +64,15 @@ implementation.
   --game-init-instance-id 0xffff007f` applies 37 stock settings words, takes the
   measured absent-renderer refresh branch, resolves `Config.init`, then enters
   unchanged `java.game.Init`. It stops in `Sound.init → Dummy.<init>` at
-  `java.lang.GameType.createNativeInstance(GameRef,I,String,String)V`: its
-  required engine collaborator is unavailable. The stop includes script frames
+  `java.lang.GameType.createNativeInstance(GameRef,I,String,String)V`: it requests external
+  `system.rpk:0x1b`, whose template materialiser is unavailable. The measured
+  default-class template/native factory branches are implemented with an
+  explicit seed1 allocator profile reserving supplied Config/Init IDs. Original
+  Unicorn replay covers template creation, fresh and zero-storage instance
+  branches, ID refill/recycle, retained template link and script back-reference.
+  Fresh flags0x221 and template words1.0f/0 follow original constructors.
+  Class-cache hits allocate nothing and native attachment preserves Native.ptr.
+  Parent child-list and external template inheritance remain unclaimed. The stop includes script frames
   and source line; no engine return is fabricated. Unwired Thread.start is also
   guarded before dropping a pending frame. The one-ID command stops at
   `GameInitCreationBoundary`; the default stops at `ResourceCreationBoundary`.
@@ -77,8 +84,8 @@ implementation.
   the original 353 rows. Original Unicorn probes cover controlled creation,
   links/native queries, empty bodies, field flags, IDs, settings/refresh and
   File.exists/delete; none executes original script bodies or establishes an
-  original script-call prefix. Workspace checks: 913 tests, formatting/Clippy,
-  ledger 458/458, regeneration without drift. Native factories/resources,
+  original script-call prefix. Workspace checks: 919 tests, formatting/Clippy,
+  ledger 463/463, regeneration without drift. Native factories/resources,
   original allocation history, present-backend rendering, scheduler/thread/
   clock wiring and MainMenu remain open; parity is still 0/30. See
   `docs/research/boot-sequence.md` and `crates/slr-boot/README.md`.
