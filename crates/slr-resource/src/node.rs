@@ -530,6 +530,8 @@ impl Node {
 /// One `X` container: the engine resource object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Container {
+    /// Unmaterialized package header, when installed by a measured profile.
+    pub header: Option<crate::package::Header>,
     /// `+0x14` — the parent container.
     pub parent: u32,
     /// `+0x20` — the first child container.
@@ -565,6 +567,7 @@ impl Container {
     #[must_use]
     pub fn new(type_id: i32, id: u32) -> Container {
         Container {
+            header: None,
             parent: 0,
             first_child: 0,
             next_sibling: 0,

@@ -808,7 +808,9 @@ name = "slr-resource"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sha2",
  "slr-calllog",
+ "slr-fmt-rpak",
  "slr-fmt-tufa",
  "slr-vm",
  "slr-x87",

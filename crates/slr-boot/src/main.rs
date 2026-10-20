@@ -18,6 +18,7 @@ use std::{
 struct Resources {
     root: PathBuf,
     packages: Vec<(String, Package)>,
+    frontend: Option<slr_resource::package::Installed>,
 }
 impl Resources {
     fn package(&mut self, name: &str) -> Result<usize, String> {
@@ -54,6 +55,54 @@ impl Resources {
             self.package(&link)?
         };
         Ok(((i as u32) << 16) | (id & 0xffff))
+    }
+    fn request_metadata(&mut self, id: u32) -> Result<(), String> {
+        let index = (id >> 16) as usize;
+        let (name, package) = self
+            .packages
+            .get(index)
+            .ok_or("mapped package is not available")?;
+        if !package.entries.iter().any(|e| e.type_id == id & 0xffff) {
+            return Err("mapped resource is outside the known package; original absence behavior is not asserted".into());
+        }
+        if name != "frontend.rpk" {
+            return Err(format!(
+                "package {name} metadata registration is not measured"
+            ));
+        }
+        if self.frontend.is_none() {
+            let system = &self
+                .packages
+                .iter()
+                .find(|(n, _)| n == "system.rpk")
+                .ok_or("system roots not available")?
+                .1;
+            self.frontend = Some(slr_resource::node::with_res(|host| {
+                slr_resource::package::install_frontend(host, package, system, index as u16)
+            })?);
+            println!("BOOT resource metadata frontend.rpk entries=279; declared empty foreign system roots; no descriptor materialization");
+        }
+        Ok(())
+    }
+    fn write_trace(&self, output: &Path) -> Result<(), String> {
+        let snapshot = slr_resource::node::with_res(|host| {
+            let entries: Vec<_> = self
+                .frontend
+                .iter()
+                .flat_map(|p| &p.ids)
+                .map(|id| {
+                    (
+                        *id,
+                        host.container_for_id(*id)
+                            .and_then(|word| host.container(word))
+                            .cloned(),
+                    )
+                })
+                .collect();
+            format!("CONTROLLED complete pinned frontend headers; declared empty foreign system-root identities, their own hierarchy/other children unmodeled; no descriptor parsing/materialization\nprofile={:#?}\nentries={entries:#?}\nevents={:#?}\n", self.frontend, host.events())
+        });
+        std::fs::write(output.join("resource-registration.txt"), snapshot)
+            .map_err(|e| format!("ResourceTraceBoundary: {e}"))
     }
     fn template_phases(&self, id: u32) -> Result<Vec<(u32, String)>, String> {
         if id >> 16 != 0 {
@@ -189,6 +238,19 @@ fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
     if info.class == "java.lang.GameType" && info.name != "createNativeInstance" {
         return Err("GameType engine collaborator is not installed".into());
     }
+    if info.class == slr_resource::node::RESOURCE_REF_CLASS
+        && [
+            "load",
+            "cache",
+            "precache",
+            "makeTexture",
+            "makeSound",
+            "duplicate",
+        ]
+        .contains(&info.name)
+    {
+        return Err("ResourceMaterializationBoundary: original descriptor/device/cache backend is not installed".into());
+    }
     if info.class == "java.lang.Thread" && info.name == "start" {
         return Err("Thread.start target/frame/scheduler bridge is not installed".into());
     }
@@ -214,8 +276,13 @@ fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
                 .is_some_and(|node| node.id != words[1] && h.container_for_id(words[1]).is_none())
         });
     if requires_load {
-        vm.native_failure=Some(format!("{}.{}{}: ResourceLoadingBoundary: mapped resource {:#010x} is not installed; original missing-resource behavior is not asserted",info.class,info.name,info.sig,words[1]));
-        return None;
+        if let Err(error) = RES.with(|r| r.borrow_mut().request_metadata(words[1])) {
+            vm.native_failure = Some(format!(
+                "{}.{}{}: ResourceLoadingBoundary: mapped resource {:#010x}: {error}",
+                info.class, info.name, info.sig, words[1]
+            ));
+            return None;
+        }
     }
     slr_resource::node::bridge(vm, info)
 }
@@ -494,6 +561,7 @@ fn execute() -> Result<(), String> {
         game_init_instance_id,
     );
     factory::write_trace(&output)?;
+    RES.with(|r| r.borrow().write_trace(&output))?;
     std::fs::write(
         output.join("initializer-constructors.txt"),
         format!("{:#?}", vm.constructor_calls),
@@ -559,6 +627,7 @@ mod tests {
         let resources = Resources {
             root: PathBuf::new(),
             packages: vec![("system.rpk".into(), package)],
+            frontend: None,
         };
         assert_eq!(
             resources
