@@ -179,16 +179,22 @@ execution has not reached it.
   With the class-request identity supplied at `FUN_00410890`, the parser stores
   that class at data `+0x10`, leaves the compiled constructor null, and retains
   words `+0x18 = 0x3f800000`, `+0x1c = 0`. These are two supplied parser phases;
-  package inheritance and original class loading are not executed.
+  package inheritance and original class loading are not executed. The external
+  template flags remain zero.
 
 - `re/oracle/boot_native_factory_child_probe.py`: the fresh native factory
   with real type-1 parent/child constructors, a declared already-materialized
   empty parent, original inherited-range setters and empty post-create helpers.
   A supplied child-registration boundary retains the parent pointer. Parent and
   child range words are `[0, 0]` and final instance flags are `0x221`. This
-  does not execute parent loading or parent-child list registration. The current
-  production checkpoint rejects parented native creation until its measured
-  profile and remaining topology are explicitly implemented.
+  does not execute parent loading or parent-child list registration. The declared
+  parent retains flags `1` and load-state `0`. Production supports this measured
+  empty-parent profile; other parent profiles stop explicitly.
+- `re/oracle/resource_child_registration_probe.py`: real `FUN_00536a10`
+  explicit-parent insertion with real type-8 and type-1 constructors. Each of
+  three sequential inserts checks parent, head, tail, previous, next and sentinel
+  links. Allocation is supplied; manager lookup and package hierarchy loading
+  are not executed.
 
 All these original-function probes ran under Unicorn. Their JSONL and repeat
 outputs are ignored under `re/out/boot/`. None runs whole-game startup, supplies

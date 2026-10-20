@@ -64,7 +64,7 @@ def run():
     assert o.read_u32(data + 16) == klass
     assert o.read_u32(data + 24) == 0x3f800000
     assert o.read_u32(data + 28) == 0
-    return {'oracle': 'Unicorn original546ae0+5461a0; actual stock system.rpk text; supplied410890 class identity', 'phases': phases, 'requests': requests, 'compiled_constructor': 0, 'class_matches_request': True, 'word18_bits': o.read_u32(data + 24), 'word1c_bits': o.read_u32(data + 28), 'scope': 'two supplied parser phases; package inheritance/loading not executed'}
+    return {'oracle': 'Unicorn original546ae0+5461a0; actual stock system.rpk text; supplied410890 class identity', 'phases': phases, 'requests': requests, 'template_flags': o.read_u32(node + 0x54), 'compiled_constructor': 0, 'class_matches_request': True, 'word18_bits': o.read_u32(data + 24), 'word1c_bits': o.read_u32(data + 28), 'scope': 'two supplied parser phases; package inheritance/loading not executed'}
 
 
 if __name__ == '__main__':

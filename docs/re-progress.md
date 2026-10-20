@@ -92,6 +92,12 @@ implementation.
   clock wiring and MainMenu remain open; parity is still 0/30. See
   `docs/research/boot-sequence.md` and `crates/slr-boot/README.md`.
 
+- **Fresh headless-original replay:** recovered ignored profiles now pass the
+  parent-run 109-test Python suite with zero skips. The declared notification
+  profile reaches `ShowWindow(HWND, SW_HIDE)` before stock script execution;
+  this is the furthest shared startup evidence, not a script-call oracle.
+  Recovery receipts remain under `re/out/headless/recovery/`.
+
 - **Request-driven loader:** the recovered original-executable selection oracle
   now replays all 13 path/directory/direct-file rows (5/6/2) against unchanged
   stock class bytes. Lazy requests compare compile/read event order, diagnostics,
