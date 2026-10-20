@@ -182,7 +182,7 @@ class InterfaceModel:
         else:
             return DIERR_DEVICENOTREG
         if kind in self.created:
-            raise self.platform.boundary("second_device_of_kind", kind=kind)
+            raise self.platform.boundary("second_device_of_kind", device=kind)
         model = DeviceModel(self.platform, kind)
         device = host.com.new_object("IDirectInputDevice8A", model)
         self.created[kind] = device
@@ -228,7 +228,7 @@ class DeviceModel:
         expected = (0x100, 0x100) if self.kind == "keyboard" else (0x10, 7)
         if size != 0x18 or objsize != 0x10 or (data_size, count) != expected:
             raise self.platform.boundary(
-                "unsupported_data_format", kind=self.kind, words=[size, objsize, flags, data_size, count]
+                "unsupported_data_format", device=self.kind, words=[size, objsize, flags, data_size, count]
             )
         if self.acquired:
             return 0x80070005  # DIERR_ACCESSDENIED while acquired
@@ -261,7 +261,7 @@ class DeviceModel:
 
     def Acquire(self, obj, a):
         if self.data_size is None or self.coop is None:
-            raise self.platform.boundary("acquire_before_setup", kind=self.kind)
+            raise self.platform.boundary("acquire_before_setup", device=self.kind)
         self.acquired = True
         return DI_OK
 

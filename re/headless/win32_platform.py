@@ -47,6 +47,11 @@ class Win32Platform:
         self.api_table = {
             "ShowWindow": ("user32.dll", 2, self.show_window, profile.window is not None),
             "SetFocus": ("user32.dll", 1, self.set_focus, profile.window is not None),
+            "PeekMessageA": ("user32.dll", 5, self.peek_message, profile.window is not None),
+            "GetQueueStatus": ("user32.dll", 1, self.queue_status, profile.window is not None),
+            "InterlockedExchange": ("kernel32.dll", 2, self.interlocked_exchange, True),
+            "InterlockedIncrement": ("kernel32.dll", 1, self.interlocked_increment, True),
+            "InterlockedDecrement": ("kernel32.dll", 1, self.interlocked_decrement, True),
             "GetFullPathNameA": ("kernel32.dll", 4, self.full_path, True),
             "LoadLibraryA": ("kernel32.dll", 1, self.load_library, profile.modules is not None),
             "FreeLibrary": ("kernel32.dll", 1, self.free_library, profile.modules is not None),
@@ -125,6 +130,40 @@ class Win32Platform:
         self.focus = handle
         self.last_call = {"api": "SetFocus", "previous": previous, "messages": "elided"}
         return previous
+
+    # Atomic read-modify-write on guest memory: one virtual CPU, so a plain
+    # read and write between instructions is atomic by construction.
+    def interlocked_exchange(self, args):
+        target, value = args
+        previous = self.host.read_u32(target)
+        self.host.write_u32(target, value)
+        return previous
+
+    def interlocked_increment(self, args):
+        value = (self.host.read_u32(args[0]) + 1) & 0xFFFFFFFF
+        self.host.write_u32(args[0], value)
+        return value
+
+    def interlocked_decrement(self, args):
+        value = (self.host.read_u32(args[0]) - 1) & 0xFFFFFFFF
+        self.host.write_u32(args[0], value)
+        return value
+
+    def peek_message(self, args):
+        message, hwnd, low, high, remove = args
+        if not message or hwnd not in (0, *self.host.windows) or remove & ~0x1 & ~0x2:
+            raise self.boundary("unsupported_argument", api="PeekMessageA", args=args)
+        # Declared scenario: no message is ever pending (documented result: zero).
+        self.require_empty_queue("PeekMessageA")
+        return 0
+
+    def queue_status(self, args):
+        self.require_empty_queue("GetQueueStatus")
+        return 0
+
+    def require_empty_queue(self, api):
+        if self.profile.window is None or self.profile.window.message_queue != "empty":
+            raise self.boundary("undeclared_message_queue", api=api)
 
     def require_elided_messages(self, api):
         if self.profile.window is None or self.profile.window.message_delivery != "elided":

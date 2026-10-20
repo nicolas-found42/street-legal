@@ -118,7 +118,7 @@ PROFILE = {
         "exports": {"d3d9.dll": ["DebugSetMute"]},
     },
     "registry": {"keys": {"HKLM\\Software\\Microsoft\\Direct3D": {}}},
-    "window": {"message_delivery": "elided"},
+    "window": {"message_delivery": "elided", "message_queue": "empty"},
     "input": {
         # DIDC_ATTACHED; DI8DEVTYPE_KEYBOARD|PCENH and DI8DEVTYPE_MOUSE|TRADITIONAL
         "keyboard": {"flags": 1, "devtype": 0x403, "axes": 0, "buttons": 128, "povs": 0},
@@ -130,6 +130,7 @@ PROFILE = {
     # No DirectShow runtime: CLSID_FilterGraph is not registered, so the original's
     # own FMV code takes its CoCreateInstance-failed path (no intro videos).
     "com": {"unregistered_clsids": ["e436ebb3-524f-11ce-9f53-0020af0ba770"]},
+    "timer": {"period_min_ms": 1, "period_max_ms": 1000000},
     "sound": {
         # Software-only (emulated) driver: no hardware mixing or 3D buffers.
         "caps": {

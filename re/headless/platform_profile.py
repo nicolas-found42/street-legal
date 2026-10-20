@@ -19,6 +19,7 @@ from pathlib import Path
 
 from dinput_platform import InputProfile
 from dsound_platform import SoundProfile
+from mmtimer import TimerProfile
 
 LABEL = re.compile(r"hypothetical-[A-Za-z0-9_.-]{1,67}")
 MAX_BYTES = 256 * 1024
@@ -272,11 +273,14 @@ class RegistryProfile:
 
 class WindowProfile:
     def __init__(self, data):
-        if not isinstance(data, dict) or set(data) != {"message_delivery"}:
-            raise ValueError("window needs exactly message_delivery")
+        if not isinstance(data, dict) or set(data) != {"message_delivery", "message_queue"}:
+            raise ValueError("window needs exactly message_delivery and message_queue")
         if data["message_delivery"] != "elided":
             raise ValueError("only declared elided window message delivery is modelled")
+        if data["message_queue"] != "empty":
+            raise ValueError("only a declared permanently empty message queue is modelled")
         self.message_delivery = data["message_delivery"]
+        self.message_queue = data["message_queue"]
 
 
 class ComProfile:
@@ -292,7 +296,7 @@ class ComProfile:
 
 
 class PlatformProfile:
-    SECTIONS = {"d3d", "modules", "registry", "window", "input", "sound", "com"}
+    SECTIONS = {"d3d", "modules", "registry", "window", "input", "sound", "com", "timer"}
 
     def __init__(self, data):
         allowed = {"label", "provenance"} | self.SECTIONS
@@ -312,6 +316,7 @@ class PlatformProfile:
         self.input = InputProfile(data["input"]) if "input" in data else None
         self.sound = SoundProfile(data["sound"]) if "sound" in data else None
         self.com = ComProfile(data["com"]) if "com" in data else None
+        self.timer = TimerProfile(data["timer"]) if "timer" in data else None
         self.digest = hashlib.sha256(
             json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

@@ -28,6 +28,7 @@ from observer import Observer
 from platform_profile import PlatformProfile
 from dinput_platform import DirectInputPlatform
 from dsound_platform import DirectSoundPlatform, ds_kind
+from mmtimer import MultimediaTimers
 from win32_platform import Win32Platform
 from window_messages import CREATION_MESSAGE_NAMES
 from window_transcript import DeclaredWindowReturn
@@ -71,6 +72,9 @@ class Startup(Oracle):
         calllog_path=None,
         observe_dir=None,
         record_limit=10000,
+        event_ring=None,
+        progress_every=None,
+        fast_count=False,
     ):
         if type(record_limit) is not int or not 1 <= record_limit <= 100000:
             raise ValueError("event limit must be an integer from 1 to 100000")
@@ -103,13 +107,25 @@ class Startup(Oracle):
         self.exe_sha256 = hashlib.sha256(Path(exe).read_bytes()).hexdigest()
         if self.exe_sha256 != EXE_SHA256:
             raise ValueError("expected read-only original build606 .bak.exe")
-        self.events = []
+        if event_ring is not None and (type(event_ring) is not int or not 1 <= event_ring <= 1000000):
+            raise ValueError("event ring must be an integer from 1 to 1000000")
+        self.event_ring = event_ring
+        self.progress_every = progress_every
+        self.next_progress = progress_every or 0
+        self.events = deque(maxlen=event_ring) if event_ring is not None else []
+        self.events_total = 0
         self.trail = deque(maxlen=32)
         self.winmain = False
         self.record_limit = record_limit
         super().__init__(str(exe))
         # The PE's IAT is resolved into emulator thunks, exactly as Oracle does;
         # all thunk entries are intercepted before those default bodies execute.
+        if type(self)._on_write is Startup._on_write:
+            # The default write hook does nothing; skip a Python call per store.
+            self.uc.hook_del(self._write_hook)
+        self.fast_count = bool(fast_count)
+        if self.fast_count:
+            self.enable_block_counting()
         self.modules = {self.base: "StreetLegal_Redline.exe"}
         for index, entry in enumerate(self.pe.DIRECTORY_ENTRY_IMPORT):
             self.modules[0x11000000 + index * 0x10000] = entry.dll.decode().lower()
@@ -261,6 +277,8 @@ class Startup(Oracle):
                 self,
                 natives_path=observe_dir / "script-natives.slrlog",
                 raw_path=observe_dir / "script-natives.raw.slrlog",
+                all_path=observe_dir / "script-natives-all.slrlog",
+                steps_path=observe_dir / "script-steps.jsonl",
             )
         if self.calllog_path is not None:
             self.calllog = calllog.Writer(self.calllog_path)
@@ -279,6 +297,10 @@ class Startup(Oracle):
             if platform_profile.input is not None:
                 self.dinput = DirectInputPlatform(self, Boundary, platform_profile.input)
                 self.dinput.register(self)
+            self.timers = None
+            if platform_profile.timer is not None:
+                self.timers = MultimediaTimers(self, Boundary, platform_profile.timer)
+                self.timers.register(self)
             self.dsound = None
             if platform_profile.sound is not None:
                 self.dsound = DirectSoundPlatform(self, Boundary, platform_profile.sound)
@@ -353,6 +375,66 @@ class Startup(Oracle):
         else:
             raise Boundary("unlogged_com_family", interface=obj.interface)
 
+    def enable_block_counting(self):
+        """Count instructions per translated block instead of per instruction.
+
+        The counter is exact at every API/thunk entry (all earlier blocks have run);
+        only quantum thread switches and the instruction-limit stop move to block
+        boundaries. Python is called once per block, and per instruction only inside
+        the thunk and sentinel windows and at WinMain.
+        """
+        from capstone import CS_ARCH_X86, CS_MODE_32, Cs
+        from unicorn import UC_HOOK_BLOCK, UC_HOOK_CODE
+
+        self.block_lengths = {}
+        self.block_disasm = Cs(CS_ARCH_X86, CS_MODE_32)
+        self.uc.hook_del(self._code_hook)
+        self.uc.hook_add(UC_HOOK_BLOCK, self._on_block)
+        for begin, end in ((0x7F000000, 0x7F00FFFF), (0x7FFF0000, 0x7FFF0FFF), (WINMAIN, WINMAIN)):
+            self.uc.hook_add(UC_HOOK_CODE, self._on_code, None, begin, end)
+
+    def _on_block(self, uc, address, size, user_data):
+        if 0x7F000000 <= address < 0x7F010000 or 0x7FFF0000 <= address < 0x7FFF1000:
+            return  # thunk and sentinel instructions are counted by the code hook
+        key = (address, size)
+        count = self.block_lengths.get(key)
+        if count is None:
+            code = bytes(uc.mem_read(address, size))
+            count = self.block_lengths[key] = max(
+                1, sum(1 for _ in self.block_disasm.disasm(code, address))
+            )
+        self.icount += count
+        self.trail.append(address)
+        if self.progress_every and self.icount >= self.next_progress:
+            self.report_progress()
+        if self.icount >= self.next_quantum and len(self.threads) > 1 and self.schedule():
+            return
+        if self.limit and self.icount >= self.limit:
+            self._err = Boundary("instruction_limit", limit=self.limit, eip=address)
+            uc.emu_stop()
+
+    def report_progress(self):
+        self.next_progress += self.progress_every
+        last = self.events[-1] if self.events else {}
+        print(
+            json.dumps(
+                {
+                    "progress_icount": self.icount,
+                    "events_total": self.events_total,
+                    "last_import": last.get("import") or last.get("method"),
+                    "natives": self.observer.stats["native_calls"] if self.observer else None,
+                    "thread_runs": self.observer.stats["thread_run"] if self.observer else None,
+                    "loop_iterations": self.observer.loop_iterations if self.observer else None,
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def events_full(self):
+        """Event budget check; a ring keeps only the latest events and never stops the run."""
+        return self.event_ring is None and len(self.events) >= self.record_limit
+
     def begin_window_callback(self, request):
         if len(request.args) != 4 or request.args[1] not in CREATION_MESSAGE_NAMES:
             raise Boundary("unsupported_window_callback", args=list(request.args))
@@ -361,7 +443,7 @@ class Startup(Oracle):
             or len(self.pending_window_callbacks) >= 4
         ):
             raise Boundary("window_callback_depth", per_thread_limit=1, total_limit=4)
-        if len(self.events) >= self.record_limit:
+        if self.events_full():
             raise Boundary("record_limit", limit=self.record_limit)
         context = self.uc.context_save()
         stack = (self.reg("esp") - 4 * (len(request.args) + 1) - 64) & ~15
@@ -490,10 +572,12 @@ class Startup(Oracle):
         pass
 
     def _on_code(self, uc, address, size, ud):
-        if len(self.events) >= self.record_limit:
+        if self.events_full():
             self._err = Boundary("record_limit", limit=self.record_limit)
             uc.emu_stop()
             return
+        if self.progress_every and self.icount >= self.next_progress:
+            self.report_progress()
         if address == THREAD_RETURN:
             self.threads[self.thread_id]["status"] = "terminated"
             self.threads[self.thread_id]["exit_code"] = self.reg("eax")
@@ -548,7 +632,7 @@ class Startup(Oracle):
                 )
                 uc.emu_stop()
                 return
-            if len(self.events) >= self.record_limit:
+            if self.events_full():
                 self._err = Boundary("record_limit", limit=self.record_limit)
                 uc.emu_stop()
                 return
@@ -561,6 +645,7 @@ class Startup(Oracle):
                 "thread": self.thread_id,
             }
             self.events.append(event)
+            self.events_total += 1
             if (
                 address in self.com_methods
                 or short == "Direct3DCreate9"
@@ -627,7 +712,8 @@ class Startup(Oracle):
             if not self._err and self.threads[self.thread_id]["status"] != "runnable":
                 self.schedule()
             return
-        super()._on_code(uc, address, size, ud)
+        if not self.fast_count:
+            super()._on_code(uc, address, size, ud)
 
     def get_version(self, args):
         # Explicit NT5.1/build2600 environment profile, not host OS detection.
@@ -1102,6 +1188,15 @@ class Startup(Oracle):
             raise Boundary("unsupported_argument", api="CreateThread", args=args)
         if not self.text_range[0] <= start < self.text_range[1]:
             raise Boundary("unsupported_thread_entry", address=start)
+        thread = self.spawn_thread(start, parameter)
+        if id_out:
+            self.write_u32(id_out, thread)
+        return 0x50000000 + thread * 4
+
+    def spawn_thread(self, start, parameter):
+        """Create a runnable thread with its own stack, TEB and TLS; returns its id."""
+        if len(self.threads) >= 16:
+            raise Boundary("thread_budget", limit=16)
         thread = max(self.threads) + 1
         low = 0x40000000 + thread * 0x200000
         top = low + 0x100000
@@ -1126,9 +1221,18 @@ class Startup(Oracle):
             "tls": {},
             "last_error": 0,
         }
-        if id_out:
-            self.write_u32(id_out, thread)
-        return 0x50000000 + thread * 4
+        return thread
+
+    def wake_sleepers(self):
+        now = self.clock_ms()
+        for state in self.threads.values():
+            if (
+                state["status"] == "sleeping"
+                and state.get("sleep_until") is not None
+                and state["sleep_until"] <= now
+            ):
+                state["status"] = "runnable"
+                state["sleep_until"] = None
 
     def schedule(self):
         current = self.threads[self.thread_id]
@@ -1139,7 +1243,19 @@ class Startup(Oracle):
             last_error=self.last_error,
             com_depth=self.com_depth,
         )
+        self.wake_sleepers()
         ready = sorted(t for t, s in self.threads.items() if s["status"] == "runnable")
+        if not ready:
+            # Every thread is blocked: virtual time passes until the earliest wake time.
+            wakes = [
+                s["sleep_until"]
+                for s in self.threads.values()
+                if s["status"] == "sleeping" and s.get("sleep_until") is not None
+            ]
+            if wakes:
+                self.elapsed_ms += max(0, min(wakes) - self.clock_ms())
+                self.wake_sleepers()
+                ready = sorted(t for t, s in self.threads.items() if s["status"] == "runnable")
         if not ready:
             self._err = Boundary(
                 "scheduler_no_runnable_threads",
@@ -1609,7 +1725,7 @@ class Startup(Oracle):
             "main_menu_reached": False,
             "instructions": self.icount,
             "stop": stop,
-            "events": self.events,
+            "events": list(self.events),
             "trail": list(self.trail),
         }
         if self.media_profile is not None:
@@ -1639,6 +1755,11 @@ class Startup(Oracle):
                     }
                     for handle, record in self.desktop.messages.records.items()
                 ]
+        if self.fast_count:
+            result["instruction_counter_mode"] = "block"
+        if self.event_ring is not None:
+            result["event_ring"] = self.event_ring
+            result["events_total"] = self.events_total
         if self.platform_profile is not None:
             result["platform_scenario"] = self.platform_profile.metadata
             result["com_call_counts"] = dict(sorted(self.com.counts.items()))
@@ -1706,6 +1827,21 @@ def main():
         help="explicit bounded hypothetical cursor/resource/window scenario JSON",
     )
     ap.add_argument(
+        "--fast-count",
+        action="store_true",
+        help="count instructions per block (exact at API entries; about 3x faster)",
+    )
+    ap.add_argument(
+        "--progress-every",
+        type=int,
+        help="print a progress line to stderr every N instructions",
+    )
+    ap.add_argument(
+        "--event-ring",
+        type=int,
+        help="keep only the latest N diagnostic events (1..1000000); never stops on the event budget",
+    )
+    ap.add_argument(
         "--platform-profile",
         type=Path,
         help="explicit bounded hypothetical post-window platform scenario JSON",
@@ -1755,6 +1891,9 @@ def main():
                 scratch_output(args.observe_dir) if args.observe_dir is not None else None
             ),
             record_limit=args.event_limit,
+            event_ring=args.event_ring,
+            progress_every=args.progress_every,
+            fast_count=args.fast_count,
         )
         runner = result
         result = runner.run(args.limit)

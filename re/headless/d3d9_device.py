@@ -225,9 +225,9 @@ class D3D9Platform:
         adapter, devtype, hwnd, flags, pparams, out = values
         host = self.host
         if not out or not pparams:
-            return self.refuse('create_device_check_1')
+            return self.refuse("null_output_or_parameters")
         if adapter >= self.graphics.profile.adapter_count or devtype not in (1, 2, 3):
-            return self.refuse('create_device_check_2')
+            return self.refuse("adapter_or_device_type")
         if devtype != 1:
             raise self.boundary("undeclared_device_type_creation", device_type=devtype)
         if flags & ~D3DCREATE_KNOWN:
@@ -258,17 +258,17 @@ class D3D9Platform:
         if params["BackBufferCount"] > 3 or not (1 <= params["BackBufferWidth"] <= 8192) or not (
             1 <= params["BackBufferHeight"] <= 8192
         ):
-            return self.refuse('create_device_check_3')
+            return self.refuse("backbuffer_size_or_count")
         if params["Windowed"] not in (0, 1) or params["EnableAutoDepthStencil"] not in (0, 1):
-            return self.refuse('create_device_check_4')
+            return self.refuse("boolean_fields")
         if not params["Windowed"]:
             modes = self.graphics.profile.modes.get((adapter, params["BackBufferFormat"] if params["BackBufferFormat"] in (22, 23, 24) else 22), ())
             wanted = (params["BackBufferWidth"], params["BackBufferHeight"])
             refresh = params["FullScreen_RefreshRateInHz"]
             if not any(m[:2] == wanted and (refresh in (0, m[2])) for m in modes):
-                return self.refuse('create_device_check_5')
+                return self.refuse("fullscreen_mode_not_enumerated")
         if params["EnableAutoDepthStencil"] and params["AutoDepthStencilFormat"] not in DEPTH_FORMATS:
-            return self.refuse('create_device_check_6')
+            return self.refuse("depth_stencil_format")
         model = DeviceModel(self, params, flags, hwnd, adapter)
         obj = self.host.com.new_object("IDirect3DDevice9", model)
         model.obj = obj

@@ -18,8 +18,8 @@ JSON sidecar. Addresses are build 606 (`StreetLegal_Redline.bak.exe`):
 
 from __future__ import annotations
 
+import json
 import struct
-import zlib
 
 from unicorn import UC_HOOK_CODE
 from unicorn import x86_const as X
@@ -46,6 +46,18 @@ LOOP_CALLS = {
 PORT_SKIPPED_CLASSES = ("java.render.", "java.sound.")
 PORT_SKIPPED_EXACT = ("java.io.Input", "java.io.MouseCursor", "java.io.Controller")
 
+NODE_DISPATCH = 0x4210C2  # movsx eax, word [ecx] in Thread::run; ECX = node, EBX = thread
+FRAME_CONSTRUCTOR = 0x407B10  # thiscall(frame, a1, a2, a3 = body entry node, ...)
+CALL_METHOD = 0x41FBC0  # thiscall(thread, call record, ...)
+CONDITIONAL_OPWORDS = (0x1015, 0x1016, 0x0004, 0x0005)
+LVALUE_VTABLE = 0x5E7344
+VALUE_VTABLE = 0x5E734C
+CONFIG_GETTERS = {
+    0x426100: ("FUN_00426100", "int"),
+    0x426170: ("FUN_00426170", "int"),
+    0x4261F0: ("FUN_004261f0", "float"),
+    0x426270: ("FUN_00426270", "string"),
+}
 CONTEXT_POINTER = 0x63641C
 PHYSICS_POINTER_SLOT = 0x617650
 GLOBAL_WORDS = {
@@ -63,6 +75,20 @@ MAX_NATIVE_DETAIL = 200000
 MAX_LOOP_DETAIL = 4000
 
 
+def _ext_to_float(raw):
+    """x87 80-bit extended (mantissa, sign|exponent) to a Python float."""
+    import math
+
+    mantissa, sign_exponent = struct.unpack("<QH", raw)
+    sign = -1.0 if sign_exponent & 0x8000 else 1.0
+    exponent = sign_exponent & 0x7FFF
+    if exponent == 0 and mantissa == 0:
+        return sign * 0.0
+    if exponent == 0x7FFF:
+        return sign * float("inf") if (mantissa << 1) & ((1 << 64) - 1) == 0 else float("nan")
+    return sign * math.ldexp(mantissa, exponent - 16383 - 63)
+
+
 def f32(word):
     return struct.unpack("<f", struct.pack("<I", word & 0xFFFFFFFF))[0]
 
@@ -73,9 +99,20 @@ def signed(word):
 
 
 class Observer:
-    def __init__(self, host, natives_path=None, raw_path=None):
+    def __init__(self, host, natives_path=None, raw_path=None, all_path=None, steps_path=None,
+                 max_steps=3_000_000):
         self.host = host
+        self.steps = open(steps_path, "w") if steps_path else None
+        self.max_steps = max_steps
+        self.step_count = 0
+        self.frame_entries = {}
+        self.frame_descriptors = {}
+        self.last_call_descriptor = None
+        self.class_names = {}
         self.uc = host.uc
+        self.all_log = calllog.Writer(all_path) if all_path else None
+        self.config_reads = []
+        self.viewports = []
         self.natives_log = calllog.Writer(natives_path) if natives_path else None
         self.raw_log = calllog.Writer(raw_path) if raw_path else None
         self.native_pending = []
@@ -138,7 +175,13 @@ class Observer:
         # Return hooks are installed statically at the instruction after every
         # direct `call` of the watched functions (adding hooks mid-run is not
         # reliable in Unicorn).
-        for target in (CREATE_INSTANCE, BOOT):
+        if self.steps is not None:
+            self.hook(NODE_DISPATCH, self.on_node)
+            self.hook(FRAME_CONSTRUCTOR, self.on_frame)
+            self.hook(CALL_METHOD, self.on_call_method)
+        for address in CONFIG_GETTERS:
+            self.hook(address, self.on_config_getter)
+        for target in (CREATE_INSTANCE, BOOT, *CONFIG_GETTERS):
             for site in self.call_sites(target):
                 if site not in self.return_hooked:
                     self.return_hooked.add(site)
@@ -277,6 +320,23 @@ class Observer:
         host = self.host
         if host.calllog is not None:
             host.calllog.record(entry)
+        if self.all_log is not None:
+            self.all_log.record(entry)
+        if call["class"] == "java.render.Viewport" and call["name"] == "create":
+            receiver_cell = call["receiver_slot"]
+            receiver = self.try_u32(receiver_cell + 8) if receiver_cell else None
+            self.viewports.append(
+                {
+                    "icount": call["icount"],
+                    "args": [(c["kind"], c["payload"]) for c in call["args"]],
+                    "result_word": result_word,
+                    "receiver_object": receiver,
+                    "result_object_words": self.words_at(result_word, 0x40),
+                    "receiver_object_words": self.words_at(receiver, 0x40),
+                    "result_object_floats_0x18_0x24": self.floats_at(result_word + 0x18, 4),
+                    "receiver_object_floats_0x18_0x24": self.floats_at((receiver or 0) + 0x18, 4),
+                }
+            )
         skipped = call["class"].startswith(PORT_SKIPPED_CLASSES) or call["class"] in PORT_SKIPPED_EXACT
         if self.natives_log is not None and not skipped:
             self.natives_log.record(entry)
@@ -298,6 +358,120 @@ class Observer:
                     "receiver_slot": call["receiver_slot"],
                 }
             )
+
+    def words_at(self, address, nbytes):
+        if not address or address < 0x1000:
+            return None
+        return [self.try_u32(address + o) for o in range(0, nbytes, 4)]
+
+    def floats_at(self, address, count):
+        words = self.words_at(address, 4 * count)
+        return None if words is None else [f32(w) if w is not None else None for w in words]
+
+    # ------------------------------------------------------- node-level trace
+    def on_call_method(self, uc, address, size, user):
+        esp = self.reg("esp")
+        record = self.try_u32(esp + 4)
+        method = self.try_u32(record + 8) if record else None
+        signature = self.try_u32(method + 0x18) if method else None
+        text = self.try_u32(signature + 4) if signature else None
+        self.last_call_descriptor = self.cstr(text) if text and text > 0x1000 else None
+
+    def on_frame(self, uc, address, size, user):
+        frame = self.reg("ecx")
+        entry = self.u32(self.reg("esp") + 12)  # a3: body entry node
+        self.frame_entries[frame] = entry
+        self.frame_descriptors[frame] = self.last_call_descriptor
+        self.last_call_descriptor = None
+
+    def class_name(self, class_object):
+        name = self.class_names.get(class_object)
+        if name is None:
+            record = self.try_u32(class_object + 4) if class_object else None
+            pointer = self.try_u32(record + 0x30) if record else None
+            name = self.cstr(pointer) if pointer and pointer > 0x1000 else "?"
+            self.class_names[class_object] = name
+        return name
+
+    def value_cell(self, cell):
+        """Decode one operand-stack cell: (type char, payload, raw words)."""
+        if not cell:
+            return {"null_cell": True}
+        raw = [self.try_u32(cell + 4 * i) for i in range(4)]
+        vtable = raw[0]
+        target, ty_pointer, payload = cell, raw[1], raw[2]
+        kind = "value"
+        inner_words = None
+        if vtable == LVALUE_VTABLE:
+            kind = "lvalue"
+            for candidate in (raw[1], raw[3]):
+                words = (
+                    [self.try_u32(candidate + 4 * i) for i in range(4)]
+                    if candidate and candidate > 0x1000
+                    else None
+                )
+                if words and words[0] == VALUE_VTABLE:
+                    inner_words = words
+                    ty_pointer, payload = words[1], words[2]
+                    break
+            else:
+                ty_pointer, payload = raw[1], raw[2]
+        text = self.cstr(ty_pointer, 4) if ty_pointer and ty_pointer > 0x1000 else None
+        return {
+            "k": kind,
+            "ty": text[:1] if text else None,
+            "p": payload,
+            "raw": raw,
+            "inner": inner_words,
+        }
+
+    def on_node(self, uc, address, size, user):
+        if self.step_count >= self.max_steps:
+            self.step_count += 1
+            return
+        thread = self.reg("ebx")
+        node = self.reg("ecx")
+        frame = self.u32(thread + 0x20)
+        word = bytes(self.uc.mem_read(node, 8))
+        opword, _line, imm = struct.unpack("<HHI", word)
+        class_object = self.u32(frame + 0x34)
+        name_pointer = self.u32(frame + 0x38)
+        entry = self.frame_entries.get(frame)
+        record = {
+            "s": self.step_count,
+            "ic": self.host.icount,
+            "t": thread,
+            "f": frame,
+            "c": self.class_name(class_object) if class_object else None,
+            "m": self.cstr(name_pointer) if name_pointer > 0x1000 else None,
+            "g": self.frame_descriptors.get(frame),
+            "n": (node - entry) // 8 if entry and node >= entry else None,
+            "o": opword,
+            "i": imm,
+        }
+        if opword in CONDITIONAL_OPWORDS:
+            container = frame + 0x1C
+            count = self.u32(container + 8)
+            data = self.u32(container + 4)
+            record["v"] = self.value_cell(self.u32(data + 4 * (count - 1))) if count else None
+            record["sd"] = count
+        self.steps.write(json.dumps(record, separators=(",", ":")) + "\n")
+        self.step_count += 1
+
+    # -------------------------------------------------------- config getters
+    def on_config_getter(self, uc, address, size, user):
+        label, kind = CONFIG_GETTERS[address]
+        esp = self.reg("esp")
+        name_pointer = self.u32(esp + 4)
+        record = {
+            "icount": self.host.icount,
+            "getter": label,
+            "kind": kind,
+            "name": self.cstr(name_pointer) if name_pointer > 0x1000 else name_pointer,
+        }
+        self.config_reads.append(record)
+        ret = self.u32(esp)
+        self.watch_pending.setdefault(ret, []).append(("config", len(self.config_reads) - 1))
 
     # -------------------------------------------------------- call-by-name
     def on_call_by_name(self, uc, address, size, user):
@@ -378,6 +552,18 @@ class Observer:
                 record["context_after"] = {
                     hex(o): self.try_u32(context + o) for o in (0xF0, 0xF4, 0x100, 0x104)
                 }
+        elif kind == "config":
+            record = self.config_reads[index]
+            eax = self.reg("eax")
+            record["eax"] = eax
+            if record["kind"] == "string":
+                record["value"] = self.cstr(eax) if eax > 0x1000 else None
+            elif record["kind"] == "float":
+                top = (self.reg("fpsw") >> 11) & 7
+                mantissa, exponent = self.uc.reg_read(X.UC_X86_REG_FP0 + top)
+                record["value"] = _ext_to_float(struct.pack("<QH", mantissa, exponent))
+            else:
+                record["value"] = signed(eax)
         elif kind == "boot":
             context = self.boot_context
             self.snapshot("after_boot_FUN_00427980")
@@ -425,6 +611,10 @@ class Observer:
             self.natives_log.close()
         if self.raw_log is not None:
             self.raw_log.close()
+        if self.all_log is not None:
+            self.all_log.close()
+        if self.steps is not None:
+            self.steps.close()
 
     def sidecar(self):
         return {
@@ -442,6 +632,9 @@ class Observer:
             "main_loop_calls": self.loop,
             "main_loop_call_counts": self.loop_counts,
             "call_by_name": self.by_name,
+            "config_reads": self.config_reads,
+            "viewport_creates": self.viewports,
             "native_calls": self.natives,
+            "script_steps": {"written": min(self.step_count, self.max_steps), "total_nodes": self.step_count},
             "native_calls_truncated": self.stats["native_calls"] > len(self.natives),
         }

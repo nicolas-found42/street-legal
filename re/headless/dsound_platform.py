@@ -169,6 +169,24 @@ class DirectSoundModel:
         return DS_OK
 
 
+    def DuplicateSoundBuffer(self, obj, a):
+        original_pointer, out = a
+        host = self.platform.host
+        original = host.com.objects.get(original_pointer)
+        if original is None or original.interface != "IDirectSoundBuffer" or not out:
+            return DSERR_INVALIDPARAM
+        source = original.model
+        if source.primary:
+            return DSERR_INVALIDPARAM
+        model = BufferModel(self.platform, source.flags, source.nbytes, source.format, primary=False, memory=source.memory)
+        model.volume, model.pan, model.frequency = source.volume, source.pan, source.frequency
+        buffer = host.com.new_object("IDirectSoundBuffer", model)
+        model.obj = buffer
+        self.platform.buffers.append(buffer)
+        host.write_u32(out, buffer.pointer)
+        return DS_OK
+
+
 def parse_format(host, pointer):
     raw = host.read(pointer, 16)
     tag, channels, rate, avg, align, bits = struct.unpack("<HHIIHH", raw)
@@ -180,13 +198,13 @@ def parse_format(host, pointer):
 
 
 class BufferModel:
-    def __init__(self, platform, flags, nbytes, fmt, primary):
+    def __init__(self, platform, flags, nbytes, fmt, primary, memory=None):
         self.platform = platform
         self.flags = flags
         self.nbytes = nbytes
         self.format = fmt
         self.primary = primary
-        self.memory = platform.alloc(nbytes) if nbytes else 0
+        self.memory = memory if memory is not None else (platform.alloc(nbytes) if nbytes else 0)
         self.volume = 0
         self.pan = 0
         self.frequency = fmt["rate"] if fmt else 0

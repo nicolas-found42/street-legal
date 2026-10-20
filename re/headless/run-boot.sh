@@ -14,4 +14,4 @@ exec "$PY" re/headless/startup.py \
   --calllog "$OUT/boot/boot.slrlog" \
   --observe-dir "$OUT/boot/observed" \
   --out "$OUT/boot/boot.json" \
-  --event-limit 100000 "$@"
+  --event-limit 100000 --event-ring 5000 --fast-count "$@"
