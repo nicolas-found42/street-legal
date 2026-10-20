@@ -1725,3 +1725,169 @@ fn static_initializer_failure_preserves_field_name_and_body_cause() {
     assert!(cause.contains("Broken.bad"), "{cause}");
     assert!(cause.contains("requires #110 execution"), "{cause}");
 }
+
+fn constructor_initializer_module(static_field: bool, arguments: u32, integer: bool) -> Vec<u8> {
+    let pool = vec![
+        PoolEntry::Str("Holder".into()),
+        PoolEntry::Class(0),
+        PoolEntry::Str("Target".into()),
+        PoolEntry::Class(2),
+        PoolEntry::Str("LTarget;".into()),
+        PoolEntry::Str("value".into()),
+    ];
+    let mut body = vec![n(0x1007, 0x1e), n(0x1006, 3)];
+    for _ in 0..arguments {
+        body.extend([
+            n(0x1007, 0x1c),
+            n(if integer { 0x100b } else { 0x200a }, 17),
+        ]);
+    }
+    body.extend([n(0x1027, arguments), n(0x21, 0), n(0x10, 0)]);
+    let fields = [[if static_field { 0x28 } else { 1 }, 5, 4, 0]];
+    module(
+        &pool,
+        if static_field { &fields } else { &[] },
+        if static_field { &[] } else { &fields },
+        &[u32::MAX, 0, 1, u32::MAX, 0],
+        &[body],
+    )
+}
+fn constructor_target(vm: &mut VmHost, args: bool, real_body: bool) -> slr_vm::vmclass::ClassId {
+    use slr_vm::vmclass::{Class, Field, Method};
+    let target = vm.loader.insert_test_class(Class {
+        kind: 0,
+        name: "Target".into(),
+        base: None,
+        interfaces: vec![],
+        fields: if real_body {
+            vec![Field {
+                class: "Target".into(),
+                name: "marker".into(),
+                ty: "I".into(),
+                is_static: false,
+            }]
+        } else {
+            vec![]
+        },
+        methods: vec![Method {
+            class: "Target".into(),
+            name: "<init>".into(),
+            sig: if args { "(I)" } else { "()" }.into(),
+            flags: 1,
+            static_vector: false,
+            is_native: false,
+            body: 0,
+            is_abstract: false,
+            extra: 0,
+        }],
+        bodies: if real_body { vec![] } else { vec![vec![]] },
+    });
+    if real_body {
+        vm.add_body(
+            "Target",
+            vec![n(0x1001, 1), n(0x1d, 0), n(0x1008, 0x23), n(0x2a, 0)],
+            vec![PoolEntry::Str("marker".into())],
+        )
+        .unwrap();
+    }
+    target
+}
+#[test]
+fn initializer_constructor_original_rows() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../re/out/boot/initializer-constructor.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("SLR_ORACLE_SKIPPED: initializer_constructor_original_rows");
+        return;
+    };
+    let rows: Vec<Json> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 4);
+    for row in rows {
+        let static_field = row["static"].as_bool().unwrap();
+        let arguments = row["arguments"].as_u64().unwrap() as u32;
+        let mut vm = VmHost::new();
+        let target = constructor_target(&mut vm, arguments != 0, false);
+        vm.loader
+            .load_file(&constructor_initializer_module(
+                static_field,
+                arguments,
+                true,
+            ))
+            .unwrap();
+        let holder = vm.alloc_object("Holder").unwrap();
+        let value = vm.read_field(holder, "value").unwrap();
+        assert_eq!(row["outcome"], "ok");
+        assert_eq!(value.tag.name(), row["value_type"].as_str().unwrap());
+        assert_eq!(vm.constructor_calls.len(), 1);
+        let call = &vm.constructor_calls[0];
+        assert_eq!(
+            json!([{"name":"<init>","signature":call.signature,"target_matches":call.class==target}]),
+            row["requests"]
+        );
+        assert_eq!(
+            json!([vm.loader.class_name(call.caller_class.unwrap()).unwrap()]),
+            row["body_entries"]
+        );
+        assert_eq!(
+            call.arguments,
+            if arguments == 0 {
+                vec![]
+            } else {
+                vec![slr_vm::values::Value::int(17)]
+            }
+        );
+        assert_eq!(
+            json!([call
+                .arguments
+                .iter()
+                .map(|value| json!({"type":value.tag.name(),"value":value.payload}))
+                .collect::<Vec<_>>()]),
+            row["collected_arguments"]
+        );
+        assert_eq!(json!([call.arguments.len()]), row["collector_counts"]);
+        assert_eq!(
+            json!([u32::from(!call.entered_script_frame.unwrap())]),
+            row["dispatch_returns"]
+        );
+        assert_eq!(value.payload, call.receiver);
+        assert_eq!(row["value_matches_allocated_instance"], true);
+        assert_eq!(row["receiver_matches_allocated_instance"], true);
+        assert!(
+            matches!(vm.objects[(value.payload-0x1000) as usize].class,slr_vm::vmclass::ClassRef::Loaded(id) if id==target)
+        );
+    }
+}
+#[test]
+fn initializer_constructor_runs_script_body_with_integer_argument_and_retains_object() {
+    for static_field in [true, false] {
+        let mut vm = VmHost::new();
+        constructor_target(&mut vm, true, true);
+        vm.loader
+            .load_file(&constructor_initializer_module(static_field, 1, true))
+            .unwrap();
+        let holder = vm.alloc_object("Holder").unwrap();
+        let value = vm.read_field(holder, "value").unwrap();
+        assert_eq!(vm.read_field(value.payload, "marker").unwrap().payload, 17);
+        assert_eq!(value.payload, vm.constructor_calls[0].receiver);
+        assert_eq!(
+            vm.constructor_calls[0].arguments,
+            vec![slr_vm::values::Value::int(17)]
+        );
+    }
+}
+#[test]
+fn unsupported_constructor_initializer_argument_families_remain_boundaries() {
+    for (arguments, integer) in [(1, false), (2, true)] {
+        let mut vm = VmHost::new();
+        constructor_target(&mut vm, true, false);
+        vm.loader
+            .load_file(&constructor_initializer_module(false, arguments, integer))
+            .unwrap();
+        assert!(vm.alloc_object("Holder").is_err());
+        assert_eq!(vm.objects.len(), 1);
+        assert!(vm.constructor_calls.is_empty());
+    }
+}

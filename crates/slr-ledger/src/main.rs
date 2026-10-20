@@ -80,6 +80,7 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-vm", "initializers", vec![("initializer_constructor_original_rows",vec!["FUN_00403e80","FUN_00407da0","FUN_00408a30","FUN_0041fbc0"])]),
         ("slr-resource", "factory", vec![
             ("template_original_rows",vec!["FUN_0053a1a0"]),
             ("native_factory_controlled_original_rows",vec!["FUN_0053a2a0"]),

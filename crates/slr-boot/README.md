@@ -37,10 +37,24 @@ With both IDs the stock run completes `Sound.init`: it materialises
 `system.rpk:0x1b` using its `script java.util.resource.Dummy` descriptor after
 root1's `lod_amp 1.000`, requests the actual retained class, and creates the
 native instance with the existing script and Native.ptr. Its compiled engine
-constructor remains null. The next stop is `InitializerBoundary`:
-`java.render.Frontend.defLoadingPic` requires initializer body execution beyond
-the current preflight. No initializer execution is bypassed. Unwired
-`Thread.start` also remains guarded before it could drop a pending frame.
+constructor remains null. `Frontend.defLoadingPic` now enters its unchanged
+`ResourceRef(I)` constructor with mapped resource ID `0x000100a8` and retains
+the allocated object through constructor delegation. It stops at the named
+`ResourceRef.set(I)V` resource-loading boundary: that nonzero mapped ID has no
+registered container. The initializer field has not been committed. The guard
+preserves zero and same-ID behavior, including a same-ID hit with an unavailable
+lookup. It does not claim the resource is actually missing from stock.
+Unwired `Thread.start` also remains guarded before it could drop a pending frame.
+
+Initializer constructor support is limited to zero arguments or one integer
+literal/resource literal. Other argument forms and the existing unsupported
+initializer families remain explicit boundaries. Four original Unicorn rows
+exercise static/instance initializer allocation and null-body `()`/`(I)`
+constructor dispatch with real argument collection; decoded metadata/allocation
+are supplied. A separate Rust regression executes a real constructor script
+body and verifies integer assignment and object retention. Resolved constructor
+class IDs/names, receivers, arguments and frame-entry outcomes are inspectable
+in `re/out/boot/initializer-constructors.txt`.
 
 Script file operations use a fresh complete copy under ignored
 `re/out/boot/files/`, never stock. The controlled allocator starts at seed1 with supplied Config/Init IDs reserved; this is not recovered original startup history. Factory operations are written to `re/out/boot/factory-operations.txt`.

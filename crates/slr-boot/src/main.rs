@@ -195,6 +195,30 @@ fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
     Ok(())
 }
 
+fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let mut words = [0; 2];
+    if let Err(error) = slr_vm::host::marshal_args(info, &mut words) {
+        vm.native_failure = Some(format!(
+            "{}.{}{}: resource arguments {error:?}",
+            info.class, info.name, info.sig
+        ));
+        return None;
+    }
+    let ptr = vm
+        .read_field(words[0], "ptr")
+        .ok()
+        .map(|value| value.payload);
+    let requires_load = words[1] != 0
+        && slr_resource::node::with_res(|h| {
+            ptr.and_then(|ptr| h.node(ptr))
+                .is_some_and(|node| node.id != words[1] && h.container_for_id(words[1]).is_none())
+        });
+    if requires_load {
+        vm.native_failure=Some(format!("{}.{}{}: ResourceLoadingBoundary: mapped resource {:#010x} is not installed; original missing-resource behavior is not asserted",info.class,info.name,info.sig,words[1]));
+        return None;
+    }
+    slr_resource::node::bridge(vm, info)
+}
 fn install(vm: &mut VmHost) {
     let mut table = slr_lang::NativeTable::new();
     slr_lang::math::install(&mut table);
@@ -215,6 +239,8 @@ fn install(vm: &mut VmHost) {
     slr_sound::install_headless(vm);
     vm.native_impls
         .insert(0x00481a70, factory::create_native_instance);
+    vm.native_impls
+        .insert(slr_resource::node::SET_ID, resource_set);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
 }
@@ -468,6 +494,11 @@ fn execute() -> Result<(), String> {
         game_init_instance_id,
     );
     factory::write_trace(&output)?;
+    std::fs::write(
+        output.join("initializer-constructors.txt"),
+        format!("{:#?}", vm.constructor_calls),
+    )
+    .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
     let file = std::fs::File::create(output.join("runtime.calllog"))
         .map_err(|e| format!("CallLogBoundary: {e}"))?;
     let mut writer =
@@ -541,5 +572,129 @@ mod tests {
         for id in [28, 3, 1, 0x1001b] {
             assert!(resources.template_phases(id).is_err(), "{id:#x}");
         }
+    }
+    #[test]
+    fn resource_set_stops_on_unpopulated_id_without_clearing_existing_link() {
+        use slr_vm::{
+            values::Value,
+            vmclass::{Class, Field},
+        };
+        let mut vm = VmHost::new();
+        for (name, base, fields) in [
+            (
+                "java.lang.Native",
+                None,
+                vec![Field {
+                    class: "java.lang.Native".into(),
+                    name: "ptr".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                }],
+            ),
+            (
+                slr_resource::node::RESOURCE_REF_CLASS,
+                Some("java.lang.Native"),
+                vec![],
+            ),
+        ] {
+            vm.loader.insert_test_class(Class {
+                kind: 0,
+                name: name.into(),
+                base: base.map(str::to_owned),
+                interfaces: vec![],
+                fields,
+                methods: vec![],
+                bodies: vec![],
+            });
+        }
+        slr_resource::node::reset_res();
+        slr_resource::node::install(&mut vm);
+        let object = vm
+            .alloc_object(slr_resource::node::RESOURCE_REF_CLASS)
+            .unwrap();
+        slr_resource::node::bridge(
+            &mut vm,
+            &CallInfo {
+                jvm: 0,
+                thread: 0,
+                class: slr_resource::node::RESOURCE_REF_CLASS,
+                name: "newNative",
+                sig: "()V",
+                args: &[Value::reference(object)],
+            },
+        );
+        slr_resource::node::with_res(|h| {
+            let c = h.add_container(slr_resource::node::Container::new(7, 123));
+            h.bind_id(123, c);
+        });
+        for id in [123, 0x100a8] {
+            resource_set(
+                &mut vm,
+                &CallInfo {
+                    jvm: 0,
+                    thread: 0,
+                    class: slr_resource::node::RESOURCE_REF_CLASS,
+                    name: "set",
+                    sig: "(I)V",
+                    args: &[Value::int(id), Value::reference(object)],
+                },
+            );
+            if id == 123 {
+                assert!(vm.native_failure.is_none());
+                let ptr = vm.read_field(object, "ptr").unwrap().payload;
+                let before = slr_resource::node::with_res(|h| {
+                    h.bind_id(123, 0);
+                    (
+                        h.node(ptr).unwrap().clone(),
+                        h.node_count(),
+                        h.events().len(),
+                    )
+                });
+                resource_set(
+                    &mut vm,
+                    &CallInfo {
+                        jvm: 0,
+                        thread: 0,
+                        class: slr_resource::node::RESOURCE_REF_CLASS,
+                        name: "set",
+                        sig: "(I)V",
+                        args: &[Value::int(123), Value::reference(object)],
+                    },
+                );
+                assert!(vm.native_failure.is_none());
+                slr_resource::node::with_res(|h| {
+                    assert_eq!(
+                        (
+                            h.node(ptr).unwrap().clone(),
+                            h.node_count(),
+                            h.events().len()
+                        ),
+                        before
+                    )
+                });
+            } else {
+                assert!(vm
+                    .native_failure
+                    .as_deref()
+                    .unwrap()
+                    .contains("ResourceLoadingBoundary: mapped resource 0x000100a8"));
+            }
+        }
+        let ptr = vm.read_field(object, "ptr").unwrap().payload;
+        slr_resource::node::with_res(|h| assert_eq!(h.node(ptr).unwrap().id, 123));
+        vm.native_failure = None;
+        resource_set(
+            &mut vm,
+            &CallInfo {
+                jvm: 0,
+                thread: 0,
+                class: slr_resource::node::RESOURCE_REF_CLASS,
+                name: "set",
+                sig: "(I)V",
+                args: &[Value::int(0), Value::reference(object)],
+            },
+        );
+        assert!(vm.native_failure.is_none());
+        slr_resource::node::with_res(|h| assert_eq!(h.node(ptr).unwrap().id, 0));
     }
 }

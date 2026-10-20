@@ -16,12 +16,12 @@ python3 re/progress.py
 
 | Measure | Handoff baseline (`7caab32`) | Current integration |
 |---|---:|---:|
-| Generated ledger symbol rows | 430 | 487 |
-| Rows with passing evidence | 321 | 369 |
-| Ported rows without registered passing evidence | 109 | 118 |
-| Unique annotated addresses | 423 | 485 |
-| Ghidra function entries with an annotation | 200 / 4,356 | 238 / 4,356 |
-| Ghidra function entries with passing evidence | 151 / 4,356 | 179 / 4,356 |
+| Generated ledger symbol rows | 430 | 488 |
+| Rows with passing evidence | 321 | 371 |
+| Ported rows without registered passing evidence | 109 | 117 |
+| Unique annotated addresses | 423 | 486 |
+| Ghidra function entries with an annotation | 200 / 4,356 | 239 / 4,356 |
+| Ghidra function entries with passing evidence | 151 / 4,356 | 181 / 4,356 |
 | Native registrations with exact ledger symbol | 108 / 353 | 178 / 353 |
 | Native registrations with exact symbol and passing evidence | 85 / 353 | 158 / 353 |
 | Native registrations with any annotation at the same address | 173 / 353 | 205 / 353 |
@@ -42,7 +42,7 @@ existing tests exercise null/error envelopes or injected engine seams; inspect
 them before extending any exactness claim to live engine paths.
 
 The baseline `cargo test --workspace` passed (106 successful test-result
-summaries). Current ledger collection passed 466/466 evidence rows. These are test-to-symbol evidence rows, distinct from the 369 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
+summaries). Current ledger collection passed 470/470 evidence rows. These are test-to-symbol evidence rows, distinct from the 371 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
 
 An interner audit also removed `FUN_004174a0` from the math oracle's passing
 claims. That probe replaces the helper with a callback that records output bytes
@@ -72,8 +72,15 @@ implementation.
   descriptor or package branches stop explicitly. Original Unicorn rows compare
   two supplied text-parser phases, a supplied loaded-empty parent and explicit
   parent registration; general package-manager loading remains unverified.
-  The next named stop is `InitializerBoundary` at
-  `java.render.Frontend.defLoadingPic` (body419), before Frontend.init.
+  `Frontend.defLoadingPic` now enters unchanged `ResourceRef(I)` with mapped
+  `frontend.rpk:168` (replay ID0x000100a8), preserving the allocated object through
+  constructor delegation. It stops precisely at `ResourceRef.set(I)V` because
+  that resource container is not installed. This is an explicit loading boundary,
+  not evidence of a missing stock resource; the field is not committed. Zero and
+  same-ID behavior stays delegated. Four new original static/instance null-body
+  constructor rows compare argument collection, receiver identity and immediate
+  dispatch; a Rust real-body regression checks integer assignment/retention.
+  Other constructor argument/initializer families remain guarded.
   The stop includes script frames
   and source line; no engine return is fabricated. Unwired Thread.start is also
   guarded before dropping a pending frame. The one-ID command stops at
@@ -84,10 +91,10 @@ implementation.
   inspectable under `re/out/boot/`. The installed surface remains 192 native
   keys/191 implementation addresses, including seven Controller rows outside
   the original 353 rows. Original Unicorn probes cover controlled creation,
-  links/native queries, empty bodies, field flags, IDs, settings/refresh and
-  File.exists/delete; none executes original script bodies or establishes an
-  original script-call prefix. Workspace checks: 924 tests, formatting/Clippy,
-  ledger 466/466, regeneration without drift. General resource loading,
+  links/native queries, empty bodies, field flags, IDs, settings/refresh, initializer constructors and
+  File.exists/delete; none executes original stock script bodies or establishes an
+  original script-call prefix. Workspace checks: 928 tests, formatting/Clippy,
+  ledger 470/470, regeneration without drift. General resource loading,
   original allocation history, present-backend rendering, scheduler/thread/
   clock wiring and MainMenu remain open; parity is still 0/30. See
   `docs/research/boot-sequence.md` and `crates/slr-boot/README.md`.

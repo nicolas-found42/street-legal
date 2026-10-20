@@ -481,6 +481,19 @@ pub enum InitializationDiagnostic {
     Body(crate::ops::Diagnostic),
 }
 
+/// Resolved constructor request before dispatch; arguments remain in source order.
+#[derive(Clone, Debug)]
+pub struct ConstructorCall {
+    pub class: crate::vmclass::ClassId,
+    pub class_name: String,
+    pub caller_class: Option<crate::vmclass::ClassId>,
+    pub receiver: u32,
+    pub signature: String,
+    pub arguments: Vec<Value>,
+    /// None on dispatch failure; false is original immediate/null-body return.
+    pub entered_script_frame: Option<bool>,
+}
+
 /// The object model over a loaded world.
 pub struct VmHost {
     /// Loaded classes and packages.
@@ -500,6 +513,8 @@ pub struct VmHost {
     pub resource_resolver: Option<ResourceResolver>,
     /// Original log-and-continue method resolution diagnostics.
     pub method_diagnostics: Vec<&'static str>,
+    /// Inspectable constructor dispatch requests, including pending initializers.
+    pub constructor_calls: Vec<ConstructorCall>,
     /// Last unavailable native, including its exact descriptor.
     pub missing_native: Option<String>,
     /// Optional observer of actual native calls in dispatch order.
@@ -613,6 +628,7 @@ impl VmHost {
             native_impls: HashMap::new(),
             resource_resolver: None,
             method_diagnostics: vec![],
+            constructor_calls: vec![],
             missing_native: None,
             native_observer: None,
             native_boundary: None,
@@ -1062,8 +1078,28 @@ impl VmHost {
 
     fn initializer_supported(&self, body: BodyId) -> bool {
         self.loader.body(body).is_some_and(|nodes| {
-            nodes.iter().all(|node| {
-                !matches!(node.opword, 0x101e | 0x0021..=0x0023 | 0x4025 | 0x4026)
+            nodes.iter().enumerate().all(|(index, node)| {
+                if node.opword == 0x21 {
+                    // Original initializer vectors establish new+constructor
+                    // with no arguments or one primitive integer literal. Keep
+                    // other constructor argument families as named boundaries.
+                    let Some(count) = index.checked_sub(1).and_then(|i| nodes.get(i)) else {
+                        return false;
+                    };
+                    if count.opword != 0x1027 {
+                        return false;
+                    }
+                    return match count.imm {
+                        0 => true,
+                        1 => index.checked_sub(3).is_some_and(|i| {
+                            nodes[i].opword == 0x1007
+                                && nodes[i].imm == 0x1c
+                                && matches!(nodes[i + 1].opword, 0x100b | 0x100e)
+                        }),
+                        _ => false,
+                    };
+                }
+                !matches!(node.opword, 0x101e | 0x0022..=0x0023 | 0x4025 | 0x4026)
                     && !(matches!(node.opword, 0x1007 | 0x1008) && matches!(node.imm, 0x1f..=0x20))
             })
         })
@@ -1893,6 +1929,7 @@ impl VmHost {
         self.call_dynamic_id(thread, class, receiver, &name)
     }
 
+    /// exe: FUN_00408a30
     fn call_constructor(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let frame = thread.frames.last().ok_or(VmError::NoFrame)?;
         let (class, receiver) = if op.kind == ExternKind::CallInit {
@@ -2104,6 +2141,7 @@ impl VmHost {
             .ok_or(VmError::NullSlot)?
             .to_vec();
         let mut types = Vec::with_capacity(count);
+        let mut argument_values = Vec::with_capacity(count);
         for slot in arguments {
             let value = self.borrow_slot(thread, slot)?;
             let tag = if value.tag.is_ref() && value.payload != 0 {
@@ -2112,6 +2150,7 @@ impl VmHost {
                 value.tag
             };
             types.push(tag);
+            argument_values.push(value);
         }
         let selected = self
             .loader
@@ -2123,7 +2162,27 @@ impl VmHost {
             self.method_diagnostics
                 .push("Class::getMethod: more matching methods found");
         }
-        self.dispatch_method_id(thread, &method, defining, receiver)
+        if name == "<init>" {
+            self.constructor_calls.push(ConstructorCall {
+                class,
+                class_name: self.loader.class_name(class).unwrap_or("<stale>").into(),
+                caller_class: thread
+                    .frames
+                    .last()
+                    .and_then(|f| self.loader.context_id(f.class_ctx)),
+                receiver,
+                signature: method.sig.clone(),
+                arguments: argument_values,
+                entered_script_frame: None,
+            });
+        }
+        let constructor_index = (name == "<init>").then(|| self.constructor_calls.len() - 1);
+        let result = self.dispatch_method_id(thread, &method, defining, receiver);
+        if let Some(index) = constructor_index {
+            self.constructor_calls[index].entered_script_frame =
+                result.as_ref().ok().map(|flow| *flow == Flow::Stay);
+        }
+        result
     }
 
     /// ID-carrying native invocation: the receiver tag is resolved from the
