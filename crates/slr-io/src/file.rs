@@ -3,12 +3,15 @@
 //! Machine model (all `[static]`, machine code read; oracle: the probe that
 //! calls the exe's own natives under Unicorn, `re/oracle/io_vectors.py` for
 //! `open`/`close` and the `ResourceRef` pair and `re/oracle/sdat_vectors.py`
-//! for the four raw-word rows, local only):
+//! for the four raw-word rows; `tests/support/file_path_oracle.py` for
+//! exists/delete native marshalling and path wrappers, local only):
 //!
 //! | exe | registry row | body |
 //! |---|---|---|
 //! | [`FILE_OPEN`] `0x485440` | `open(I)I` | handle-field reuse/allocate, slot open, header/footer scan, handle-field store |
 //! | [`FILE_CLOSE`] `0x485870` | `close()V` | slot close + SDAT footer, struct free, handle-field clear |
+//! | [`FILE_EXISTS`] `0x486170` | `exists(String)I` | read VM String bytes; probe root-confined filesystem |
+//! | [`FILE_DELETE`] `0x486150` | `delete(String)I` | read VM String bytes; release retained handle then delete |
 //! | [`FILE_MOVE`] `0x486120` | `move(String;String;)I` | release retained closed handles; non-overwriting move; 0 success / -1 failure |
 //! | [`FILE_WRITE_INT`] `0x485b20` | `write(I)I` | the value word, four little-endian bytes |
 //! | [`FILE_WRITE_FLOAT`] `0x485bc0` | `write(F)I` | the float's four raw IEEE bits |
@@ -207,6 +210,10 @@ pub const FILE_MOVE: u32 = 0x0048_6120;
 
 /// `java.io.File.copy(String;String)I` native.
 pub const FILE_COPY: u32 = 0x0048_60f0;
+/// Exe address of `java.io.File.delete(String)I`.
+pub const FILE_DELETE: u32 = 0x0048_6150;
+/// Exe address of `java.io.File.exists(String)I`.
+pub const FILE_EXISTS: u32 = 0x0048_6170;
 
 /// The class the File rows are registered under.
 pub const FILE_CLASS: &str = "java.io.File";
@@ -259,12 +266,8 @@ pub struct IoBinding {
     pub impl_addr: u32,
 }
 
-/// The ten `java.io.File` rows these slices port (I2-I4, #107 and #108). In this
-/// binding table: `write`'s `(I)` / `(F)` overloads sit between `close`
-/// and `write(String)`, `readInt` / `readFloat` before `readString`
-/// (`tsv` 172-185; `delete` / `exists`, the `ResourceRef`
-/// pair and the `FindFile` rows are later slices).
-pub const FILE_NATIVE_BINDINGS: [IoBinding; 10] = [
+/// File native rows backed by the file host, including path operations.
+pub const FILE_NATIVE_BINDINGS: [IoBinding; 12] = [
     IoBinding {
         class: FILE_CLASS,
         name: "open",
@@ -324,6 +327,18 @@ pub const FILE_NATIVE_BINDINGS: [IoBinding; 10] = [
         name: "readString",
         sig: "()Ljava.lang.String;",
         impl_addr: FILE_READ_STRING,
+    },
+    IoBinding {
+        class: FILE_CLASS,
+        name: "delete",
+        sig: "(Ljava.lang.String;)I",
+        impl_addr: FILE_DELETE,
+    },
+    IoBinding {
+        class: FILE_CLASS,
+        name: "exists",
+        sig: "(Ljava.lang.String;)I",
+        impl_addr: FILE_EXISTS,
     },
 ];
 
@@ -1162,7 +1177,7 @@ pub fn reset(root: impl Into<PathBuf>) {
     FILES.with(|cell| *cell.borrow_mut() = FileHost::new(root));
 }
 
-/// Register the ten `java.io.File` rows in the host's native registry
+/// Register the `java.io.File` rows in the host's native registry
 /// (`FUN_00416b00`). Idempotent: the exe's registrar overwrites a record.
 pub fn register(vm: &mut VmHost) {
     for row in FILE_NATIVE_BINDINGS {
@@ -1187,6 +1202,23 @@ pub fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     // stack on a short container); the port reads 0 there.
     let written = marshal_args(info, &mut out).unwrap_or(0);
     match impl_addr {
+        FILE_EXISTS | FILE_DELETE => {
+            // Real VM String objects own bytes through inherited Native.ptr.
+            // Native-only fixtures may still supply FileHost string words.
+            let path = vm
+                .string_bytes(out[1])
+                .map(c_string)
+                .or_else(|| with_files(|files| files.string(out[1]).map(c_string)))
+                .unwrap_or_default();
+            let path = String::from_utf8_lossy(&path);
+            Some(with_files(|files| {
+                if impl_addr == FILE_EXISTS {
+                    files.exists(&path)
+                } else {
+                    files.delete(&path)
+                }
+            }))
+        }
         FILE_COPY | FILE_MOVE => Some(with_files(|files| {
             let source = files.string(out[1]).map(c_string).unwrap_or_default();
             let destination = files.string(out[2]).map(c_string).unwrap_or_default();

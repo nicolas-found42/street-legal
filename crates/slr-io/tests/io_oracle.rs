@@ -458,7 +458,13 @@ fn the_findfile_rows_replay() {
 #[test]
 fn the_binding_rows_are_the_file_natives() {
     let rows = slr_io::FILE_NATIVE_BINDINGS;
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 12);
+    assert_eq!(rows[10].name, "delete");
+    assert_eq!(rows[10].sig, "(Ljava.lang.String;)I");
+    assert_eq!(rows[10].impl_addr, 0x0048_6150);
+    assert_eq!(rows[11].name, "exists");
+    assert_eq!(rows[11].sig, "(Ljava.lang.String;)I");
+    assert_eq!(rows[11].impl_addr, 0x0048_6170);
     assert_eq!(rows[0].class, FILE_CLASS);
     assert_eq!(rows[0].name, "open");
     assert_eq!(rows[0].sig, "(I)I");

@@ -422,6 +422,14 @@ fn collect_suites() -> Vec<Suite> {
         ),
         (
             "slr-io",
+            "path_native",
+            vec![(
+                "stock_file_path_natives_replay_original_native_rows",
+                vec!["LAB_00486150", "LAB_00486170"],
+            )],
+        ),
+        (
+            "slr-io",
             "io_oracle",
             vec![
                 ("the_path_rows_replay", vec!["LAB_00486150", "LAB_00486170"]),
