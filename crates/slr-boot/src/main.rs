@@ -3,6 +3,7 @@ mod engine;
 mod factory;
 mod materialise;
 mod missing_rows;
+mod resource_identity;
 mod sched;
 mod viewport;
 use slr_boot::settings::{Kind, Settings, Source};
@@ -212,6 +213,8 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
     // driver overrides in those classes are recorded here instead.
     let driver_owned = (info.class == "java.render.Viewport"
         && !matches!(info.name, "activate" | "deactivate"))
+        || (matches!(info.class, "java.render.Camera" | "java.render.Text")
+            && info.name == "create")
         || (info.class == "java.io.Input" && info.name == "getDeviceName")
         || (info.class == "java.render.GfxEngine" && info.name == "displayModeName");
     if !driver_owned
@@ -536,6 +539,7 @@ fn install(vm: &mut VmHost) {
     ] {
         vm.native_impls.insert(address, materialise::load_like);
     }
+    resource_identity::install(vm);
     slr_lang::seam::with_lang_host(|h| {
         h.clock_source = Some(sched::clock_f32);
         // Observed in the original run: the first `System.timeWarp(0.0)` answers 1.0.

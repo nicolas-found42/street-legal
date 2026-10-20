@@ -931,6 +931,34 @@ impl ResHost {
         self.lookups.insert(id, container);
     }
 
+    /// Rebind an existing native handle after an engine factory returns.
+    /// LAB_004814e0 inlines the unlink/insert and copies X+0x50 into R+8.
+    pub fn bind_created(&mut self, node: u32, container: u32) -> Result<(), String> {
+        let id = if container == 0 {
+            0
+        } else {
+            self.containers
+                .get(&container)
+                .ok_or("created container missing")?
+                .id
+        };
+        let current = self
+            .nodes
+            .get(&node)
+            .ok_or("native handle missing")?
+            .container;
+        if current != container {
+            if current != 0 {
+                self.unlink(node);
+            }
+            if container != 0 {
+                self.insert_head(container, node);
+                self.nodes.get_mut(&node).unwrap().id = id;
+            }
+        }
+        Ok(())
+    }
+
     /// Supply the container returned by a create manager call (zero = miss).
     pub fn set_created_result(&mut self, container: u32) {
         self.created_result = Some(container);

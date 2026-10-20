@@ -27,6 +27,7 @@ pub const DISPLAY_MODE: (i32, i32) = (800, 600);
 /// (depth descending, width then height ascending). This is scenario data,
 /// not enumeration of the physical host GPU.
 pub fn configure_display() {
+    VIEWPORTS.with(|v| v.borrow_mut().clear());
     slr_render_natives::reset_render();
     slr_render_natives::with_render(|h| {
         h.set_display_modes(
@@ -58,7 +59,7 @@ fn display_mode_name(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 }
 
 thread_local! {
-    /// Receiver word -> `[flags, left, top, width, height]`.
+    /// Resource container -> `[flags, left, top, width, height]`.
     static VIEWPORTS: RefCell<HashMap<u32, [u32; 5]>> = RefCell::new(HashMap::new());
 }
 
@@ -68,43 +69,69 @@ fn words(info: &CallInfo<'_>) -> [u32; 6] {
     out
 }
 
-pub fn create(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
-    let w = words(info);
-    VIEWPORTS.with(|v| v.borrow_mut().insert(w[0], [w[1], w[2], w[3], w[4], w[5]]));
+pub fn create(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    let mut w = [0; 6];
+    if let Err(error) = marshal_args(info, &mut w) {
+        vm.native_failure = Some(format!("Viewport.create arguments: {error:?}"));
+        return None;
+    }
+    // LAB_004814e0 checks the existing Native.ptr before allocating. It
+    // reuses that handle, including when it was bound to another resource.
+    let ptr = vm.read_field(w[0], "ptr").ok()?.payload;
+    if !slr_resource::node::with_res(|h| h.node(ptr).is_some()) {
+        return None;
+    }
+    match crate::factory::create_viewport(ptr) {
+        Ok(container) => {
+            VIEWPORTS.with(|v| {
+                v.borrow_mut()
+                    .insert(container, [w[1], w[2], w[3], w[4], w[5]])
+            });
+        }
+        Err(error) => vm.native_failure = Some(format!("Viewport.create: {error}")),
+    }
     None
 }
 
-pub fn resize(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+fn container(vm: &mut VmHost, receiver: u32) -> Option<u32> {
+    let ptr = vm.read_field(receiver, "ptr").ok()?.payload;
+    slr_resource::node::with_res(|h| h.node(ptr).map(|n| n.container))
+}
+
+pub fn resize(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let w = words(info);
+    let resource = container(vm, w[0])?;
     VIEWPORTS.with(|v| {
-        if let Some(state) = v.borrow_mut().get_mut(&w[0]) {
+        if let Some(state) = v.borrow_mut().get_mut(&resource) {
             state[1..5].copy_from_slice(&w[1..5]);
         }
     });
     None
 }
 
-fn field(info: &CallInfo<'_>, index: usize) -> Option<u32> {
+fn field(vm: &mut VmHost, info: &CallInfo<'_>, index: usize) -> Option<u32> {
     let w = words(info);
-    Some(VIEWPORTS.with(|v| v.borrow().get(&w[0]).map_or(0, |s| s[index])))
+    let resource = container(vm, w[0]).unwrap_or(0);
+    Some(VIEWPORTS.with(|v| v.borrow().get(&resource).map_or(0, |s| s[index])))
 }
 
-pub fn get_left(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
-    field(info, 1)
+pub fn get_left(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    field(vm, info, 1)
 }
-pub fn get_top(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
-    field(info, 2)
+pub fn get_top(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    field(vm, info, 2)
 }
-pub fn get_width(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
-    field(info, 3)
+pub fn get_width(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    field(vm, info, 3)
 }
-pub fn get_height(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
-    field(info, 4)
+pub fn get_height(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    field(vm, info, 4)
 }
 
-pub fn get_aspect(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+pub fn get_aspect(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let w = words(info);
-    let state = VIEWPORTS.with(|v| v.borrow().get(&w[0]).copied());
+    let resource = container(vm, w[0]).unwrap_or(0);
+    let state = VIEWPORTS.with(|v| v.borrow().get(&resource).copied());
     Some(match state {
         None => 1.0f32.to_bits(),
         Some(s) => {
@@ -128,5 +155,152 @@ pub fn install(vm: &mut VmHost) {
         (GET_LEFT, get_left),
     ] {
         vm.native_impls.insert(address, native);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slr_resource::node::{self, Container};
+    use slr_vm::{
+        values::Value,
+        vmclass::{Class, Field},
+    };
+
+    fn invoke(vm: &mut VmHost, object: u32, name: &str, sig: &str, args: &[Value]) -> Option<u32> {
+        let mut cells: Vec<_> = args.iter().rev().copied().collect();
+        cells.push(Value::reference(object));
+        let class = if matches!(name, "create" | "getWidth") {
+            "java.render.Viewport"
+        } else {
+            node::RESOURCE_REF_CLASS
+        };
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            class,
+            name,
+            sig,
+            args: &cells,
+        };
+        match name {
+            "create" => create(vm, &info),
+            "getWidth" => get_width(vm, &info),
+            _ => node::bridge(vm, &info),
+        }
+    }
+
+    #[test]
+    fn viewport_creation_original_rows() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/viewport-create.jsonl");
+        let Ok(rows) = std::fs::read_to_string(path) else {
+            eprintln!("SLR_ORACLE_SKIPPED: viewport_creation_original_rows; run re/oracle/viewport_create_probe.py");
+            return;
+        };
+        let mut count = 0;
+        for row in rows.lines() {
+            let row: serde_json::Value = serde_json::from_str(row).unwrap();
+            let mut vm = VmHost::new();
+            node::install(&mut vm);
+            vm.loader.insert_test_class(Class {
+                kind: 0,
+                name: "java.render.Viewport".into(),
+                base: None,
+                interfaces: vec![],
+                fields: vec![Field {
+                    class: "java.render.Viewport".into(),
+                    name: "ptr".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                }],
+                methods: vec![],
+                bodies: vec![],
+            });
+            crate::factory::configure(Some(0xffff0080), Some(0xffff007f));
+            VIEWPORTS.with(|v| v.borrow_mut().clear());
+            let object = vm.alloc_object("java.render.Viewport").unwrap();
+            let missing = row["missing_handle"].as_bool().unwrap();
+            let bound = row["initially_bound"].as_bool().unwrap();
+            if !missing {
+                invoke(&mut vm, object, "newNative", "()V", &[]);
+            }
+            let ptr = vm.read_field(object, "ptr").unwrap().payload;
+            let old = bound.then(|| {
+                node::with_res(|h| {
+                    let old = h.add_container(Container::new(0x12, 123));
+                    h.bind_id(123, old);
+                    old
+                })
+            });
+            let other = if let Some(old) = old {
+                let other = node::with_res(|h| h.add_bound_node(123, old));
+                invoke(&mut vm, object, "set", "(I)V", &[Value::int(123)]);
+                Some(other)
+            } else {
+                None
+            };
+            let state: Vec<u32> = row["state"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect();
+            let args: Vec<_> = state
+                .iter()
+                .enumerate()
+                .map(|(i, bits)| {
+                    if i == 0 {
+                        Value::int(*bits as i32)
+                    } else {
+                        Value::float(f32::from_bits(*bits))
+                    }
+                })
+                .collect();
+            invoke(&mut vm, object, "create", "(IFFFF)V", &args);
+            assert_eq!(vm.native_failure, None);
+            let id = invoke(&mut vm, object, "id", "()I", &[]).unwrap();
+            assert_eq!(id, row["id"].as_u64().unwrap() as u32);
+            if !missing {
+                assert_eq!(vm.read_field(object, "ptr").unwrap().payload, ptr);
+                node::with_res(|h| {
+                    let n = h.node(ptr).unwrap();
+                    assert_eq!(n.id, id);
+                    let c = h.container(n.container).unwrap();
+                    assert_eq!((c.id, c.type_id, c.head), (id, 0x12, ptr));
+                    assert_eq!(
+                        VIEWPORTS.with(|v| v.borrow()[&n.container]),
+                        state.as_slice()
+                    );
+                    if let Some(old) = old {
+                        assert_eq!(h.container(old).unwrap().head, other.unwrap());
+                        assert_eq!(h.node(other.unwrap()).unwrap().next, 0);
+                        assert_eq!(h.node(other.unwrap()).unwrap().prev, 0);
+                    }
+                });
+                // A second wrapper of the same resource sees its viewport data.
+                let alias = vm.alloc_object("java.render.Viewport").unwrap();
+                invoke(&mut vm, alias, "newNative", "()V", &[]);
+                invoke(&mut vm, alias, "set", "(I)V", &[Value::int(id as i32)]);
+                assert_eq!(
+                    invoke(&mut vm, alias, "getWidth", "()F", &[]),
+                    Some(state[3])
+                );
+            } else {
+                assert_eq!(invoke(&mut vm, object, "getWidth", "()F", &[]), Some(0));
+                assert!(VIEWPORTS.with(|v| v.borrow().is_empty()));
+            }
+            // The missing-handle branch must consume no ID; a successful
+            // creation consumes exactly one from the shared free stack.
+            let next = vm.alloc_object("java.render.Viewport").unwrap();
+            invoke(&mut vm, next, "newNative", "()V", &[]);
+            invoke(&mut vm, next, "create", "(IFFFF)V", &args);
+            assert_eq!(
+                invoke(&mut vm, next, "id", "()I", &[]),
+                Some(row["next_id"].as_u64().unwrap() as u32)
+            );
+            count += 1;
+        }
+        assert_eq!(count, 3);
     }
 }

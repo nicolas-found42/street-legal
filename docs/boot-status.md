@@ -45,8 +45,9 @@ listed here. A clean test suite alone does not satisfy this definition.
   divergence from #5061 to #19458 (with `DROP=java.lang.GameType.getInfo`, field initializers skipped by
   default; comparison covers a common prefix, not equal-length acceptance):
   `Prime_VT.<init>` in the port versus `Emer_VT.<init>` in the original.
-  Filtered native divergence is #167: `ResourceRef.id`, original nonzero ID
-  versus port zero (render-created resources are still absent). Unfiltered
+  Resource ID records #167–169 now match the original: `0xffff0065`,
+  `0xffff0063`, `0xffff0066`. The filtered native divergence is now #202:
+  `System.openLib`, original package index 12 versus port 11. Unfiltered
   divergence is #204: `Controller.user_Add` answers 0 rather than mapping ID 1.
   The earlier device-name and Viewport frontiers have been superseded.
 * **Validation:** oracle branch Python suite: 169 tests, no failures/skips.
@@ -70,7 +71,11 @@ listed here. A clean test suite alone does not satisfy this definition.
 * Display scenario: 640x480, 800x600, 1024x768 at 32 and 16 bits, depth
   descending then width/height ascending, matching the oracle hypothetical HAL
   profile. Current mode: 800x600x32. Mode names are actual VM Strings.
-* Remaining headless render/sound/input natives are capture-only and answer zero; the 170 native rows no
+* Viewport, Camera, Text, RenderRef.create, PhysicsRef.createBox and ResourceRef.duplicate
+  now maintain resource identities/ownership. Camera creates a type-12 camera
+  resource and a type-3 render instance; Text binds its `renderinst` field's
+  handle. Renderer/physics payload creation, asset copies and their side effects
+  remain unimplemented. Other headless render/sound/input natives answer zero; the 170 native rows no
   engine slice implements (`missing_rows.rs`) are capture-only too.
 * Resource materialisation checks the descriptor's source file exists and marks the
   container loaded; nothing is decoded and original file I/O records are absent.
@@ -82,8 +87,14 @@ listed here. A clean test suite alone does not satisfy this definition.
 
 ## Frontier (next stops, in order)
 
-1. Filtered native record #167: render-created resource IDs and original allocation
-   history. Do not mask these primitive ID results to manufacture acceptance.
+1. Filtered native record #202: `System.openLib` package index 12 versus 11.
+   Investigate package discovery/registration order alongside the node vehicle
+   enumeration gap below. Resource ID records #167–169 are fixed: the passive
+   original history identifies eleven formerly omitted allocations and no
+   releases before #167. The port now creates those resources from the shared
+   allocator, with resource types and parent links compared to the original.
+   Do not mask primitive ID results to manufacture acceptance; resource lifetime
+   and allocation history beyond this prefix remain unaccepted.
 2. Unfiltered #204: controller device mapping creation (`user_Add` currently
    follows the no-device branch). Native player `device` commands remain capture-only.
 3. Node #19458: vehicle-type enumeration order; determine its resource/package
@@ -95,8 +106,9 @@ listed here. A clean test suite alone does not satisfy this definition.
 
 ## Known gaps behind the happy path
 
-* Original allocation history for resource IDs beyond Config; ours are `--game-init-instance-id`
-  and a fresh allocator.
+* Resource allocation/lifetime beyond the measured prefix through #167–169.
+  The declared original profile's first allocations are Config `0xffff0080` and
+  GameInit `0xffff007f`; the driver still supplies these IDs explicitly.
 * Physics world, render/audio/input behaviour, SDAT saves, general descriptor parsing.
 * `FUN_00428960` frame work not run: input poll, object-list step, `FUN_004277f0`
   reaping, camera/listener setup, render pass, pacing.
@@ -147,6 +159,111 @@ verified all three bounded runtime/test/gap claims without contradictions. Its
 patch review still escalated (safe-to-apply 0.38, low test-gap confidence 0.07),
 so this is not automatic quality approval or parity acceptance. Interface-array
 coverage and the native-log mismatches remain explicit follow-up work.
+
+### Viewport identity checkpoint (2026-10-20 continuation)
+
+`re/oracle/viewport_create_probe.py` executes original `LAB_004814e0`,
+`FUN_00538d60`, the real ID allocator and `ResourceRef.id` in three controlled
+cases: fresh handle, already-bound handle with a retained sibling, and missing
+handle. It supplies resource registration, virtual data/retain, Native.ptr
+lookup and renderer registration. Original intrusive rebinds and five viewport
+state stores execute. Two declared earlier allocations reserve Config/Init IDs;
+this is not original startup allocation history or D3D execution.
+
+The Rust replay verifies the resulting resource type/ID, unchanged handle,
+old-list repair, viewport state and next allocator result. It also checks that
+another wrapper bound to the same resource reads its viewport width. A temporary
+restoration of the old create body failed on ID zero versus `0xffff007e`; the
+new body passes. This validates the measured identity/state projection, not the
+whole render factory. Camera and Text creation remained capture-only at this
+checkpoint; the allocation-history continuation below supersedes that boundary.
+
+Local receipts: `re/out/boot/viewport-create{,-repeat}.jsonl` (byte-identical),
+`viewport-red-mutation.diff`, `viewport-create-red.txt`,
+`viewport-create-green.txt`, `viewport-tests.txt`, `viewport-clippy.txt`, and
+`viewport-workspace-tests.txt`; the final native/node comparisons are
+`viewport-compare.txt` and `viewport-step-compare.txt`. Reproduce the focused replay with
+`cargo test -p slr-boot --bin slr-boot viewport_creation_original_rows` after
+generating the ignored oracle rows. Original Ghidra factory evidence is retained
+in `re/out/boot/viewport-analysis.rea.json`, Evidence
+`ev_ac8c111dd23106fcec6e70cd9cc6972844bb8b92a4e05ac83d18069677319f87`;
+the native wrapper was also inspected directly from the executable's bytes.
+The decompiler omits an unused factory argument; the probe follows the actual
+six pushed arguments and confirms owner zero separately from the flag word.
+
+Independent Standards and Spec reviews found no concrete issue within this
+bounded projection. The automatic Jev gate escalated (safe-to-apply 0.15,
+low test-gap confidence); it is not automatic quality approval. Its initial
+test-claim contradictions mixed the deliberately restored old-body red receipt
+with the final green run. Source/receipt inspection and a separate verification
+resolved those bounded test claims (0.95/0.86 confidence). The remaining parity
+claim was verified but still marked for review (0.56); the literal final
+comparison receipts above retain both mismatches. No full-frontier completion
+or original boot parity is claimed.
+
+### Resource allocation history checkpoint (2026-10-20 continuation)
+
+`re/headless/resource_history.py`, attached to the passive Observer, reads
+allocator/recycler entries and returns plus runtime resource registration
+descriptors. It never writes emulated state. The declared original startup was
+run for 45M block-counted instructions with no native/factory replacement.
+`re/out/headless/allocation-history/long-observed/original-facts.json` records
+64 history events, no truncation and no pending allocator calls. There are no
+recycles before the failing viewport allocation. Its ID is `0xffff0065`.
+The captured 299-call unfiltered native prefix is byte-for-byte equal to the
+preserved oracle prefix, including primitive results. The 64-event history
+also repeats identically in a second run; see `repeat-verification.txt` in the
+same directory (18,562 exact prefix bytes).
+
+The eleven missing allocations before that viewport were two resource
+duplicates (types 14 and 5), one RenderRef instance (type 3), two physics
+instances (type 2), two text instances (type 3), and two camera type/instance
+pairs (types 12 and 3). They now create registered containers, use the shared
+allocator, repair existing handles, append parent-child links, and retain
+instance templates. Duplicate's other-type alias branch consumes no ID.
+The camera type root is resolved from the actual system.rpk header. Text uses
+the native handle of its `renderinst` field, rather than a ptr on Text itself.
+This is a headless identity projection; mesh/font copying, physics bodies,
+renderer registration and full factory failure/lifetime branches are not exact.
+
+The stock-menu regression first failed on record #167 (`0xffff0070` versus
+`0xffff0065`). It now compares #167–169 against the preserved original and
+also compares the original created-resource ID/type/parent prefix with
+`re/out/boot/resource-identities.tsv`. MainMenu still completes at frame 179
+and runs 420 idle frames. The next filtered mismatch is #202 `System.openLib`;
+unfiltered #204 remains `Controller.user_Add`. Boot parity remains unaccepted.
+
+Reproduce the history (the ignored graphics/media/desktop profiles must exist):
+
+```sh
+re/headless/run-boot.sh --limit 45000000 \
+  --observe-dir re/out/headless/allocation-history/long-observed \
+  --out re/out/headless/allocation-history/long.json \
+  --calllog re/out/headless/allocation-history/long.slrlog
+cargo test -p slr-boot --test stock_menu_prefix
+re/boot-compare.sh re/out/headless/oracle-33d8aa8/observed/script-natives.slrlog
+```
+
+The new integration regression requires that local history capture as well as
+the preserved native log. Its receipts are `re/out/boot/resource-history-red.txt`,
+`resource-history-green.txt` and `resource-history-compare.txt`. Observer tests
+exercise the real allocator/recycler with and without hooks, compare returned
+IDs/free stacks, and check explicit truncation: receipt at
+`re/out/headless/allocation-history/test-history.txt`.
+The complete headless Python suite now passes 171 tests with no failures or
+skips (`allocation-history/suite.txt`); workspace clippy also passes
+(`re/out/boot/resource-history-clippy.txt`). Independent Standards and Spec
+reviews found no concrete issue within the declared identity projection.
+Workspace tests pass 932 tests, zero failures/ignored
+(`re/out/boot/resource-history-workspace-tests.txt`, compact receipt
+`resource-history-test-summary.txt`). Fresh node comparison remains at #19458
+(`resource-history-steps.txt`). The final Jev gate verifies the bounded ID/graph
+claim (0.83 confidence) but escalates patch quality on coverage/confidence
+(safe-to-apply 0.25). Its history summary was flagged unsupported; that evidence
+bundle omitted the explicit native-record count. The machine-checked complete
+counts/repeat/prefix facts are now in `allocation-history/verification.json`.
+No contradictions were reported. The gate's raw result is
+`re/out/boot/resource-history-jev-gate.json`; it is not automatic quality approval.
 
 ## Fresh-agent verification and recovery pitfalls
 

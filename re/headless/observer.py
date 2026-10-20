@@ -25,6 +25,7 @@ from unicorn import UC_HOOK_CODE
 from unicorn import x86_const as X
 
 import calllog
+from resource_history import ResourceHistory
 
 THREAD_RUN = 0x420FF0
 NATIVE_PRE_SITES = (0x42007E, 0x42008C, 0x4200A2, 0x4200B7)
@@ -133,6 +134,7 @@ class Observer:
         self.first_loop_icount = None
         self.loop_iterations = 0
         self.install()
+        self.resource_history = ResourceHistory(self)
 
     # ------------------------------------------------------------- plumbing
     def hook(self, address, callback):
@@ -627,6 +629,7 @@ class Observer:
             "thread_run_first_entries": self.thread_runs,
             "native_counts": dict(sorted(self.native_counts.items())),
             "resource_creations": self.creations,
+            "resource_history": self.resource_history.sidecar(),
             "boot_function": getattr(self, "boot", None),
             "snapshots": self.snapshots,
             "main_loop_calls": self.loop,

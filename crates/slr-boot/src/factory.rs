@@ -16,6 +16,28 @@ struct World {
     library: Root,
     game: Root,
     materialisation: Vec<(u32, String)>,
+    resources: Vec<RuntimeResource>,
+}
+
+/// Identity/ownership projection of a headless engine resource. The retained
+/// template link models the factory's embedded resource reference; payload
+/// decoding, renderer objects and physics bodies remain engine boundaries.
+#[derive(Debug)]
+pub struct RuntimeResource {
+    pub container: u32,
+    pub id: u32,
+    pub kind: i32,
+    pub parent: Option<u32>,
+    pub template_link: Option<u32>,
+    pub name: String,
+}
+
+pub struct ResourceDescriptor<'a> {
+    pub kind: i32,
+    pub flags: u32,
+    pub parent: Option<u32>,
+    pub template: Option<u32>,
+    pub name: &'a str,
 }
 thread_local! { static WORLD: RefCell<Option<World>> = const { RefCell::new(None) }; }
 
@@ -48,6 +70,7 @@ pub fn configure(config: Option<u32>, init: Option<u32>) {
         *w.borrow_mut() = Some(World {
             factory,
             materialisation: vec![],
+            resources: vec![],
             ids,
             library: Root {
                 resource_id: 1,
@@ -65,8 +88,15 @@ pub fn write_trace(output: &std::path::Path) -> Result<(), String> {
     WORLD.with(|w| {
         let w = w.borrow();
         let Some(w) = w.as_ref() else { return Ok(()); };
+        let identities = node::with_res(|h| w.resources.iter().map(|r| {
+            let parent = r.parent.and_then(|p| h.container(p)).map_or(0, |p| p.id);
+            let template = r.template_link.and_then(|p| h.node(p)).map_or(0, |p| p.id);
+            format!("{}\t{}\t{}\t{}\n", r.id, r.kind, parent, template)
+        }).collect::<String>());
+        std::fs::write(output.join("resource-identities.tsv"), identities)
+            .map_err(|e| format!("ResourceIdentityTraceBoundary: {e}"))?;
         std::fs::write(output.join("factory-operations.txt"), format!(
-            "CONTROLLED loaded fresh-empty game parent; external descriptors supplied in RPK inheritance order; no general package manager parity\nmaterialisation={:#?}\nCONTROLLED seed=1; supplied Config/Init IDs reserved; original pre-Config allocation history not replayed\nroots replay-local system.rpk:1/type8 and system.rpk:4/type1\n{:#?}\ninstances={:#?}\n", w.materialisation,w.factory.events, w.factory.instances))
+            "CONTROLLED loaded fresh-empty game parent; external descriptors supplied in RPK inheritance order; no general package manager parity\nmaterialisation={:#?}\nCONTROLLED seed=1; supplied Config/Init IDs reserved; original pre-Config allocation history not replayed\nroots replay-local system.rpk:1/type8 and system.rpk:4/type1\n{:#?}\ninstances={:#?}\nresources={}\n", w.materialisation,w.factory.events, w.factory.instances, w.resources.iter().map(|r| format!("id={:#010x} container={:#x} kind={} parent={:?} template_link={:?} name={:?}",r.id,r.container,r.kind,r.parent,r.template_link,r.name)).collect::<Vec<_>>().join("\n")))
             .map_err(|e| format!("FactoryTraceBoundary: {e}"))
     })
 }
@@ -226,6 +256,61 @@ pub fn create_native_instance(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u3
         vm.native_failure = Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
     }
     None
+}
+
+/// Headless identity part of FUN_00538d60: a type-0x12 resource, using the
+/// same allocator as GameType templates/instances. Renderer registration and
+/// virtual materialisation are not implemented by this resource model.
+pub fn create_viewport(handle: u32) -> Result<u32, String> {
+    let container = create_resource(ResourceDescriptor {
+        kind: 0x12,
+        flags: 0,
+        parent: None,
+        template: None,
+        name: "<viewport>",
+    })?;
+    node::with_res(|h| h.bind_created(handle, container))?;
+    Ok(container)
+}
+
+/// Register a fresh headless resource with real identity, parent/child links
+/// and a retained template. The descriptor flags and allocation order follow
+/// 538d60/539500/539880/539fe0/545230; this does not execute their payload tails.
+pub fn create_resource(descriptor: ResourceDescriptor<'_>) -> Result<u32, String> {
+    WORLD.with(|world| {
+        let mut world = world.borrow_mut();
+        let world = world.as_mut().ok_or("factory world is not installed")?;
+        node::with_res(|h| {
+            for container in [descriptor.parent, descriptor.template]
+                .into_iter()
+                .flatten()
+            {
+                h.container(container)
+                    .ok_or("resource parent/template missing")?;
+            }
+            let id = world.ids.allocate();
+            let mut resource = Container::new(descriptor.kind, id);
+            resource.flags = descriptor.flags;
+            let container = h.add_container(resource);
+            h.bind_id(id, container);
+            if let Some(parent) = descriptor.parent {
+                h.append_child(parent, container)?;
+            }
+            let template_link = descriptor.template.map(|template| {
+                let id = h.container(template).unwrap().id;
+                h.add_bound_node(id, template)
+            });
+            world.resources.push(RuntimeResource {
+                container,
+                id,
+                kind: descriptor.kind,
+                parent: descriptor.parent,
+                template_link,
+                name: descriptor.name.into(),
+            });
+            Ok(container)
+        })
+    })
 }
 
 /// Original creation uses the same game-root owner for Config and GameInit.
