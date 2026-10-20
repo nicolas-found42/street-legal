@@ -4,6 +4,7 @@ mod factory;
 mod materialise;
 mod missing_rows;
 mod sched;
+mod viewport;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{
@@ -207,9 +208,15 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
             info.class, info.name, info.sig
         );
     }
-    if info.class.starts_with("java.render.")
-        || info.class.starts_with("java.sound.")
-        || ["java.io.Input", "java.io.MouseCursor", "java.io.Controller"].contains(&info.class)
+    // The render/sound/input capture hosts record their own calls; natives the
+    // driver overrides in those classes are recorded here instead.
+    let driver_owned = (info.class == "java.render.Viewport"
+        && !matches!(info.name, "activate" | "deactivate"))
+        || (info.class == "java.io.Input" && info.name == "getDeviceName");
+    if !driver_owned
+        && (info.class.starts_with("java.render.")
+            || info.class.starts_with("java.sound.")
+            || ["java.io.Input", "java.io.MouseCursor", "java.io.Controller"].contains(&info.class))
     {
         return;
     }
@@ -407,10 +414,57 @@ fn array_copy(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     }
     None
 }
+/// `java.io.File` natives over real VM objects and Strings. The file layer
+/// keeps its own object table (name, handle) and string words, so the VM's
+/// values are mirrored into it before each call and String results are
+/// re-interned as VM Strings afterwards.
+fn file_native(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+    use slr_io::file as f;
+    let address = vm.natives.resolve(info.class, info.name, info.sig)?;
+    let mut w = [0u32; 3];
+    let _ = slr_vm::host::marshal_args(info, &mut w);
+    let text = |vm: &VmHost, word: u32| vm.string_bytes(word).map(<[u8]>::to_vec);
+    match address {
+        f::FILE_OPEN => {
+            let name = vm
+                .read_field(w[0], "name")
+                .ok()
+                .and_then(|v| text(vm, v.payload))
+                .unwrap_or_default();
+            f::with_files(|files| files.set_name(w[0], &String::from_utf8_lossy(&name)));
+        }
+        f::FILE_WRITE_STRING => {
+            if let Some(bytes) = text(vm, w[1]) {
+                f::with_files(|files| files.set_string(w[1], &bytes));
+            }
+        }
+        f::FILE_COPY | f::FILE_MOVE => {
+            for word in [w[1], w[2]] {
+                if let Some(bytes) = text(vm, word) {
+                    f::with_files(|files| files.set_string(word, &bytes));
+                }
+            }
+        }
+        _ => {}
+    }
+    let result = f::bridge(vm, info);
+    if address == f::FILE_READ_STRING {
+        let word = result?;
+        if word == 0 {
+            return Some(0);
+        }
+        let bytes = f::with_files(|files| files.string(word).map(<[u8]>::to_vec));
+        return Some(match bytes {
+            Some(bytes) => vm.intern_string(Some(&bytes)).ok()?,
+            None => word,
+        });
+    }
+    result
+}
 /// Declared scenario: the DirectInput devices the headless machine reports,
 /// keyboard and mouse only (the oracle's platform profile). Names are the
 /// scenario's, not observed instance names.
-const INPUT_DEVICES: [&str; 2] = ["Keyboard", "Mouse"];
+const INPUT_DEVICES: [&str; 2] = ["SysKeyboard", "SysMouse"];
 
 /// `java.io.Input.getDeviceName(I)String` (`LAB_0047c9c0`): the declared
 /// device's name, or null past the last device (the loop terminator scripts
@@ -453,6 +507,10 @@ fn install(vm: &mut VmHost) {
     vm.native_impls
         .insert(slr_resource::node::SET_ID, resource_set);
     engine::install(vm);
+    viewport::install(vm);
+    for row in slr_io::file::FILE_NATIVE_BINDINGS {
+        vm.native_impls.insert(row.impl_addr, file_native);
+    }
     vm.native_impls
         .insert(slr_io::input::INPUT_GET_DEVICE_NAME, input_device_name);
     vm.native_impls
@@ -477,7 +535,11 @@ fn install(vm: &mut VmHost) {
     ] {
         vm.native_impls.insert(address, materialise::load_like);
     }
-    slr_lang::seam::with_lang_host(|h| h.clock_source = Some(sched::clock_f32));
+    slr_lang::seam::with_lang_host(|h| {
+        h.clock_source = Some(sched::clock_f32);
+        // Observed in the original run: the first `System.timeWarp(0.0)` answers 1.0.
+        h.time_warp = 1.0;
+    });
     vm.native_impls
         .insert(slr_lang::thread::THREAD_START, sched::thread_start);
     vm.native_thread_hook = Some(sched::hook);
@@ -759,6 +821,8 @@ fn execute() -> Result<(), String> {
     sched::configure_clock(clock_step);
     engine::configure(engine::FrameConfig::default());
     let mut vm = VmHost::new();
+    vm.call_trace = std::env::var_os("SLR_TRACE_CALLS").is_some();
+    slr_vm::interp::set_step_trace(std::env::var_os("SLR_TRACE_STEPS").is_some());
     let outcome = run(
         &root,
         &mut vm,
@@ -784,18 +848,36 @@ fn execute() -> Result<(), String> {
         format!("{:#?}", vm.constructor_calls),
     )
     .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
-    let file = std::fs::File::create(output.join("runtime.calllog"))
-        .map_err(|e| format!("CallLogBoundary: {e}"))?;
-    let mut writer =
-        slr_calllog::LogWriter::create(file).map_err(|e| format!("CallLogBoundary: {e}"))?;
-    for record in slr_calllog::headless::take_records() {
+    // Two streams: `runtime.calllog` carries the classes the oracle's passive
+    // observer records (the render/sound/input capture hosts keep their own
+    // records out, as `observe` does); `runtime-all.calllog` carries every
+    // script-to-native call including those hosts.
+    let records = slr_calllog::headless::take_records();
+    for (name, only_observed) in [("runtime.calllog", true), ("runtime-all.calllog", false)] {
+        let file = std::fs::File::create(output.join(name))
+            .map_err(|e| format!("CallLogBoundary: {e}"))?;
+        let mut writer =
+            slr_calllog::LogWriter::create(file).map_err(|e| format!("CallLogBoundary: {e}"))?;
+        for record in &records {
+            if only_observed {
+                if let slr_calllog::LogRecord::NativeCall { class, .. } = record {
+                    if class.starts_with("java.render.")
+                        || class.starts_with("java.sound.")
+                        || ["java.io.Input", "java.io.MouseCursor", "java.io.Controller"]
+                            .contains(&class.as_str())
+                    {
+                        continue;
+                    }
+                }
+            }
+            writer
+                .record(record)
+                .map_err(|e| format!("CallLogBoundary: {e}"))?;
+        }
         writer
-            .record(&record)
+            .flush()
             .map_err(|e| format!("CallLogBoundary: {e}"))?;
     }
-    writer
-        .flush()
-        .map_err(|e| format!("CallLogBoundary: {e}"))?;
     outcome.map_err(|error| {
         if let Some(failure) = vm.native_failure {
             return format!("{error}; NativeBackendBoundary: {failure}");

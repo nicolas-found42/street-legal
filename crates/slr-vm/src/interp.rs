@@ -402,6 +402,11 @@ pub trait Host {
         Err(VmError::Unsupported(0x401c))
     }
 
+    /// Human label of a body for diagnostics (`class.method(sig)`).
+    fn body_label(&self, body: BodyId) -> String {
+        format!("body{}", body.0)
+    }
+
     /// A delegated operation (see [`ExternKind`]). The default stops the
     /// thread with [`VmError::Unsupported`].
     fn extern_op(&mut self, _thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
@@ -470,6 +475,15 @@ impl Default for Thread {
     fn default() -> Self {
         Self::new()
     }
+}
+
+thread_local! {
+    static STEP_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Print every executed node to stderr (diagnostic).
+pub fn set_step_trace(on: bool) {
+    STEP_TRACE.with(|t| t.set(on));
 }
 
 /// What a step decided.
@@ -747,6 +761,16 @@ impl Thread {
                 .get(pc.idx)
                 .ok_or(VmError::PcOutOfRange)?;
             self.line = node.operand;
+            if STEP_TRACE.with(std::cell::Cell::get) {
+                eprintln!(
+                    "STEP {} idx={} op={:04x} imm={} line={}",
+                    host.body_label(pc.body),
+                    pc.idx,
+                    node.opword,
+                    node.imm,
+                    node.operand
+                );
+            }
             let next = match self.step(host, pc, node) {
                 Ok(n) => n,
                 Err(e) => {
@@ -901,6 +925,9 @@ impl Thread {
             0x1014 => self.jump(pc, node.imm),
             0x1015 | 0x1016 => {
                 let mut c = self.pop_deref_with(host)?;
+                if STEP_TRACE.with(std::cell::Cell::get) {
+                    eprintln!("  COND value tag={:?} payload={:#x}", c.tag, c.payload);
+                }
                 boolean_convert(&mut c);
                 self.release();
                 if (c.payload == 0) == (node.opword == 0x1015) {

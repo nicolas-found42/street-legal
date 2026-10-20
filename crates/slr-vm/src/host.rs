@@ -552,6 +552,8 @@ pub struct VmHost {
     /// install the caller and fold flag changes the native made (sleep, wait)
     /// back into the interpreter thread before its loop-tail check.
     pub native_thread_hook: Option<fn(&mut Thread, bool)>,
+    /// Print every method dispatch to stderr (diagnostic).
+    pub call_trace: bool,
     /// Embedding boundary for implementations whose required engine/runtime is
     /// unavailable. Checked before invoking a native, preserving named stops.
     pub native_boundary: Option<NativeBoundary>,
@@ -665,6 +667,7 @@ impl VmHost {
             missing_native: None,
             native_observer: None,
             native_thread_hook: None,
+            call_trace: false,
             native_boundary: None,
             native_failure: None,
             initializer_failure: None,
@@ -1414,6 +1417,23 @@ impl Host for VmHost {
     }
     fn body(&self, id: BodyId) -> &[Node] {
         self.loader.body(id).unwrap_or(&[])
+    }
+
+    fn body_label(&self, body: BodyId) -> String {
+        let Some(owner) = self.loader.body_owner(body) else {
+            return format!("body{}", body.0);
+        };
+        let Some(class) = self.loader.find_by_id(owner) else {
+            return format!("body{}", body.0);
+        };
+        let method = class
+            .methods
+            .iter()
+            .find(|m| !m.is_native && self.loader.body_id_of(owner, m.body as usize) == Some(body));
+        match method {
+            Some(m) => format!("{}.{}{}", class.name, m.name, m.sig),
+            None => format!("{}.<field init body{}>", class.name, body.0),
+        }
     }
 
     fn read_cell(&mut self, slot: HeapSlot) -> Result<Value, VmError> {
@@ -2186,6 +2206,12 @@ impl VmHost {
         let receiver = if method.flags & 8 != 0 { 0 } else { receiver };
         if method.flags & 8 == 0 && receiver == 0 {
             return Err(VmError::InstanceMethodWithoutReceiver);
+        }
+        if self.call_trace {
+            eprintln!(
+                "CALL {}.{}{} receiver={receiver:#x}",
+                method.class, method.name, method.sig
+            );
         }
         if method.is_native {
             return self.invoke_method_native_id(thread, method, defining, receiver);
