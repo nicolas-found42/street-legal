@@ -562,6 +562,22 @@ name = "slr-audio"
 version = "0.1.0"
 
 [[package]]
+name = "slr-boot"
+version = "0.1.0"
+dependencies = [
+ "slr-calllog",
+ "slr-fmt-rpak",
+ "slr-input",
+ "slr-io",
+ "slr-lang",
+ "slr-render-natives",
+ "slr-resource",
+ "slr-sound",
+ "slr-vm",
+ "slr-x87",
+]
+
+[[package]]
 name = "slr-calllog"
 version = "0.1.0"
 dependencies = [

@@ -497,6 +497,10 @@ pub struct VmHost {
     pub resource_resolver: Option<ResourceResolver>,
     /// Original log-and-continue method resolution diagnostics.
     pub method_diagnostics: Vec<&'static str>,
+    /// Last unavailable native, including its exact descriptor.
+    pub missing_native: Option<String>,
+    /// Optional observer of actual native calls in dispatch order.
+    pub native_observer: Option<fn(&CallInfo<'_>, Option<u32>)>,
     /// Original diagnostic-only conditions during field/class initialization.
     pub initialization_diagnostics: Vec<InitializationDiagnostic>,
     /// Embedding guard for nested initializer bodies (default32). This is a
@@ -600,6 +604,8 @@ impl VmHost {
             native_impls: HashMap::new(),
             resource_resolver: None,
             method_diagnostics: vec![],
+            missing_native: None,
+            native_observer: None,
             initialization_diagnostics: vec![],
             initializer_depth_limit: 32,
             initializer_depth: 0,
@@ -629,6 +635,26 @@ impl VmHost {
     /// Boot (`FUN_0040fe70` substring table + primitive binds).
     pub fn boot(&mut self) {
         self.loader.boot();
+    }
+
+    /// Enter an externally requested method through the same overload and frame
+    /// dispatch as bytecode calls. Arguments are in declaration order.
+    pub fn enter_method(
+        &mut self,
+        thread: &mut Thread,
+        class: crate::vmclass::ClassId,
+        receiver: u32,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Flow, VmError> {
+        if thread.frames.is_empty() {
+            thread.frames.push(crate::interp::Frame::new(None, 0));
+        }
+        for &arg in args {
+            thread.push_new(arg)?;
+        }
+        thread.push_new(Value::int(args.len() as i32))?;
+        self.call_dynamic_id(thread, class, receiver, name)
     }
 
     /// Resolve the opaque interned-name handle carried by a local variable.
@@ -905,11 +931,19 @@ impl VmHost {
             // does not impose a corresponding hard-rejection check.
             let base = metadata.base.as_deref().filter(|base| *base != "V");
             let base_id = match base {
-                Some(base) => Some(self.loader.lookup(base).ok_or(HostError::MissingMember)?),
+                Some(base) => Some(
+                    self.loader
+                        .request(base)
+                        .map_err(|_| HostError::MissingMember)?
+                        .ok_or(HostError::MissingMember)?,
+                ),
                 None => None,
             };
             let mut interface_ids = Vec::with_capacity(metadata.interfaces.len());
             for interface in &metadata.interfaces {
+                self.loader
+                    .request(interface)
+                    .map_err(|_| HostError::MissingMember)?;
                 let dependency = self
                     .loader
                     .find(interface)
@@ -1155,7 +1189,11 @@ impl VmHost {
     /// lookups below carry the retained record ID.
     /// exe: FUN_00407da0
     pub fn alloc_object(&mut self, class: &str) -> Result<u32, HostError> {
-        let id = self.loader.lookup(class).ok_or(HostError::BadCast)?;
+        let id = self
+            .loader
+            .request(class)
+            .map_err(|_| HostError::BadCast)?
+            .ok_or(HostError::BadCast)?;
         self.alloc_object_id(id)
     }
 
@@ -1531,8 +1569,14 @@ impl VmHost {
                     let name = self
                         .loader
                         .pool_text_of(owner, component.imm)
-                        .map_err(|_| HostError::UnresolvedName)?;
-                    let id = self.loader.lookup(name).ok_or(HostError::UnresolvedName)?;
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .to_owned();
+                    let id = self
+                        .loader
+                        .request(&name)
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .ok_or(HostError::UnresolvedName)?;
+                    self.initialize_class_id(id)?;
                     qualified = Some(id);
                 }
                 0x1001 => {
@@ -1905,8 +1949,14 @@ impl VmHost {
                     let name = self
                         .loader
                         .pool_text_of(owner, component.imm)
-                        .map_err(|_| HostError::UnresolvedName)?;
-                    class = self.loader.lookup(name).ok_or(HostError::UnresolvedName)?;
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .to_owned();
+                    class = self
+                        .loader
+                        .request(&name)
+                        .map_err(|_| HostError::UnresolvedName)?
+                        .ok_or(HostError::UnresolvedName)?;
+                    self.initialize_class_id(class)?;
                     receiver = 0;
                 }
                 0x1001 => {
@@ -1992,6 +2042,18 @@ impl VmHost {
             .loader
             .body_id_of(defining, method.body as usize)
             .ok_or(HostError::NoBody)?;
+        // TREE slots with a null node list take 41fbc0's immediate-return
+        // path: consume arguments without installing a script frame.
+        if self.loader.body(body).is_some_and(<[Node]>::is_empty) {
+            for _ in parameter_types(&method.sig)? {
+                thread.pop_deref_with(self)?;
+                thread.release();
+            }
+            if return_type(&method.sig).is_some() {
+                thread.push_new(Value::int(0))?;
+            }
+            return Ok(Flow::Advance);
+        }
         let target = crate::interp::ScriptMethod {
             body,
             class_ctx: defining.get(),
@@ -2059,14 +2121,23 @@ impl VmHost {
         if method.flags & 8 == 0 && receiver == 0 {
             return Err(VmError::InstanceMethodWithoutReceiver);
         }
-        let implementation = self
+        let Some(implementation) = self
             .natives
             .resolve(&method.class, &method.name, &method.sig)
-            .ok_or(HostError::MissingMethod)?;
-        let native = *self
-            .native_impls
-            .get(&implementation)
-            .ok_or(HostError::NoBody)?;
+        else {
+            self.missing_native = Some(format!(
+                "{}.{}{} (unregistered)",
+                method.class, method.name, method.sig
+            ));
+            return Err(HostError::NoBody.into());
+        };
+        let Some(&native) = self.native_impls.get(&implementation) else {
+            self.missing_native = Some(format!(
+                "{}.{}{} @ {implementation:#010x}",
+                method.class, method.name, method.sig
+            ));
+            return Err(HostError::NoBody.into());
+        };
         let return_tag = if method.sig.ends_with(')') {
             None
         } else {
@@ -2102,7 +2173,11 @@ impl VmHost {
             name: &method.name,
             sig: &method.sig,
         };
-        let payload = native(self, &info).unwrap_or(0);
+        let result = native(self, &info);
+        if let Some(observe) = self.native_observer {
+            observe(&info, result);
+        }
+        let payload = result.unwrap_or(0);
         if let Some(tag) = return_tag {
             thread.push_new(Value {
                 tag,
@@ -2124,8 +2199,13 @@ impl VmHost {
         let name = self
             .loader
             .pool_text_of(owner, token.imm)
-            .map_err(|_| HostError::BadCast)?;
-        let class = self.loader.lookup(name).ok_or(HostError::BadCast)?;
+            .map_err(|_| HostError::BadCast)?
+            .to_owned();
+        let class = self
+            .loader
+            .request(&name)
+            .map_err(|_| HostError::BadCast)?
+            .ok_or(HostError::BadCast)?;
         let word = self.alloc_object_id(class)?;
         let tag_name = self
             .loader

@@ -160,7 +160,7 @@ pub struct Field {
     pub name: String,
     /// Type descriptor (`I`, `F`, `Ljava.lang...;`, ...).
     pub ty: String,
-    /// Static (`0x28` first word) vs instance (`0`).
+    /// Static flag (bit0x08), independent of public/final modifiers.
     pub is_static: bool,
 }
 
@@ -1827,7 +1827,7 @@ fn link_fields(
     class: &str,
 ) -> Result<Vec<Field>, LoadError> {
     // FILD: two arrays of `(flags, name_idx, type_idx, serial)`; arr0 holds
-    // the `0x28` static records, arr1 the instance fields.
+    // static records (including 0x29 public statics), arr1 the instance fields.
     let mut out = Vec::new();
     let arrays = module
         .fields(data)
@@ -1852,7 +1852,7 @@ fn link_field(
         class: class.to_owned(),
         name,
         ty,
-        is_static: rec[0] == 0x28,
+        is_static: rec[0] & 8 != 0,
     })
 }
 
@@ -2428,5 +2428,16 @@ mod tests {
         assert_eq!(loader.lookup("ab.a"), Some(ba));
         assert_eq!(loader.len(), 5);
         assert_eq!(loader.unique_name_count(), 3);
+    }
+    #[test]
+    fn public_static_field_keeps_static_storage() {
+        let pool = vec![
+            PoolEntry::Str("CHANNEL_EFFECTS".into()),
+            PoolEntry::Str("I".into()),
+        ];
+        let field = link_field(&[0x29, 0, 1, 0], &pool, &[], "java.sound.Sound").unwrap();
+        assert!(field.is_static);
+        let instance = link_field(&[0x21, 0, 1, 0], &pool, &[], "example.Instance").unwrap();
+        assert!(!instance.is_static);
     }
 }

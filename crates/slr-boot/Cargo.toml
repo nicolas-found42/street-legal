@@ -1,0 +1,17 @@
+[package]
+name = "slr-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slr-vm = { path = "../slr-vm" }
+slr-calllog = { path = "../slr-calllog" }
+slr-fmt-rpak = { path = "../slr-fmt-rpak" }
+slr-lang = { path = "../slr-lang" }
+slr-io = { path = "../slr-io" }
+slr-resource = { path = "../slr-resource" }
+slr-render-natives = { path = "../slr-render-natives" }
+slr-input = { path = "../slr-input" }
+slr-sound = { path = "../slr-sound" }
+slr-x87 = { path = "../slr-x87" }

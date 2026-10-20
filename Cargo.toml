@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/slr-audio",
+    "crates/slr-boot",
     "crates/slr-calllog",
     "crates/slr-core",
     "crates/slr-d3d9",
