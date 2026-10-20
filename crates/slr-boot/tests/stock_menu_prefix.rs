@@ -19,17 +19,24 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
         .env("SLR_TRACE_CALLS", "1")
         .output()
         .expect("run local stock boot");
-    // The driver deliberately retains a nonzero acceptance boundary until its
-    // MainMenu observer and oracle comparison both establish acceptance.
-    assert_eq!(result.status.code(), Some(1));
+    // Runtime success is separate from the original native-log comparison.
+    assert!(result.status.success());
     let stdout = String::from_utf8(result.stdout).unwrap();
     let trace = String::from_utf8(result.stderr).unwrap();
     assert!(stdout.contains("BOOT scheduler frames=600 ticks=600"));
     let stops: Vec<_> = trace.lines().filter(|l| l.starts_with("STOP ")).collect();
-    assert_eq!(
-        stops,
-        ["STOP MainMenuBoundary: frame budget exhausted before MainMenu was observed"]
-    );
+    assert!(stops.is_empty());
+    assert!(stdout.contains("BOOT MainMenu dialog complete at frame "));
+    let idle = stdout
+        .split("idle frames=")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(idle >= 300);
     assert!(trace.contains("CALL java.io.Controller.setcontrol()V"));
     for method in [
         "java.game.MainMenuDialog.show()V",
@@ -50,4 +57,22 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
         6,
         "driver-owned String mode results must still be captured"
     );
+
+    let short = Command::new(env!("CARGO_BIN_EXE_slr-boot"))
+        .current_dir(&root)
+        .args([
+            "stock",
+            "--config-instance-id",
+            "0xffff0080",
+            "--game-init-instance-id",
+            "0xffff007f",
+            "--frames",
+            "200",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(short.status.code(), Some(1));
+    assert!(String::from_utf8(short.stderr).unwrap().contains(
+        "MainMenuBoundary: frame budget exhausted; observed idle frames=20, require 300"
+    ));
 }

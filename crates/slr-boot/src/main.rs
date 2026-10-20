@@ -707,6 +707,9 @@ fn run(
         .map_err(|e| format!("GameInit retained link release: {e}"))?;
     println!("BOOT GameInit constructor returned; pumping scheduler for {frames} frames");
     let mut pump = sched::Pump::new();
+    let mut menu = None;
+    let mut menu_since = 0;
+    let mut menu_idle_frames = 0;
     for frame in 0..frames {
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
         pump.tick(vm).map_err(|f| {
@@ -719,6 +722,14 @@ fn run(
         })?;
         sched::advance_ms(1000.0 / 60.0);
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        let active_menu = active_main_menu(vm).filter(|_| !sched::pending_menu_call(vm));
+        if active_menu.is_some() && active_menu == menu {
+            menu_idle_frames += 1;
+        } else {
+            menu = active_menu;
+            menu_since = frame;
+            menu_idle_frames = 0;
+        }
     }
     println!(
         "BOOT scheduler frames={frames} ticks={} thread runs={} simulated ms={:.3}",
@@ -726,7 +737,27 @@ fn run(
         pump.runs,
         sched::now_ms()
     );
-    Err("MainMenuBoundary: frame budget exhausted before MainMenu was observed".into())
+    if menu.is_some() && menu_idle_frames >= 300 {
+        println!("BOOT MainMenu dialog complete at frame {menu_since}; idle frames={menu_idle_frames}; native-log parity remains a separate comparison");
+        Ok(())
+    } else {
+        Err(format!("MainMenuBoundary: frame budget exhausted; observed idle frames={menu_idle_frames}, require 300"))
+    }
+}
+
+/// Inspect the authoritative script field after all callbacks for a frame.
+/// This observer performs no script calls or state transitions.
+fn active_main_menu(vm: &mut VmHost) -> Option<u32> {
+    let index = vm
+        .objects
+        .iter()
+        .position(|object| object.class_name(&vm.loader) == "java.game.GameLogic")?;
+    let state = vm
+        .read_field(index as u32 + 0x1000, "actualState")
+        .ok()?
+        .payload;
+    let object = vm.objects.get(state.checked_sub(0x1000)? as usize)?;
+    (object.class_name(&vm.loader) == "java.game.MainMenu").then_some(state)
 }
 /// Fresh writable filesystem projection. No script I/O points at stock.
 fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {

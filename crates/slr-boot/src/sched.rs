@@ -82,6 +82,28 @@ pub fn now_ms() -> f64 {
     CLOCK.with(|c| c.get().0)
 }
 
+/// Read-only acceptance observer: a blocked menu construction must not count
+/// as idle merely because GameLogic has already stored its new state.
+pub fn pending_menu_call(vm: &VmHost) -> bool {
+    INTERP.with(|threads| {
+        threads.borrow().values().any(|thread| {
+            thread.frames.iter().any(|frame| {
+                vm.loader
+                    .context_id(frame.class_ctx)
+                    .and_then(|id| vm.loader.class_name(id))
+                    .is_some_and(|name| {
+                        matches!(
+                            name,
+                            "java.game.MainMenu"
+                                | "java.game.MainMenuDialog"
+                                | "java.game.OptionsDialog"
+                        )
+                    })
+            })
+        })
+    })
+}
+
 fn mirror(thread: &mut Thread, before: bool) {
     let Some(id) = CURRENT.with(Cell::get) else {
         return;

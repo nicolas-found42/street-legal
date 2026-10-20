@@ -15,9 +15,12 @@ re/boot-compare.sh [original.slrlog]     # boot + call-log diff against the orac
 
 Unchanged stock scripts execute Config and GameInit, enter MainMenu at frame
 179, finish the formerly failing OptionsDialog path, and run all 600 scheduler
-frames without a script/native stop. The driver still returns its conservative
-`MainMenuBoundary` at the frame budget; automatic completed-dialog/idle detection
-has not been implemented. This is runtime progress, not boot parity acceptance.
+frames without a script/native stop. A read-only observer checks the actual
+`GameLogic.actualState` class and excludes pending MainMenu, MainMenuDialog or
+OptionsDialog calls. It observes completed menu construction at frame 179 and
+420 subsequent idle frames at frame 600. The driver exits successfully only
+after >=300 idle frames; a 200-frame run rejects its 20 idle frames.
+This is runtime progress, not boot parity acceptance.
 Parity is still 0/30.
 
 ## Definition of done
@@ -31,7 +34,8 @@ listed here. A clean test suite alone does not satisfy this definition.
 
 * **Original oracle (strongest available):** the stock exe under Unicorn with declared
   Win32/D3D9/DirectSound/DirectInput scenario shims (`re/headless/`, branch
-  `worktree-agent-a20d568c5b681332f`, preserved at `33d8aa8`; merge approved). It executes the original
+  `worktree-agent-a20d568c5b681332f`, preserved at `33d8aa8` and merged
+  into `exact-port` by approved merge `f144ecc`). It executes the original
   `Thread::run` over the same stock scripts and records the script-to-native call
   log. Run with `re/headless/run-boot.sh`; log at
   `re/out/headless/boot/observed/script-natives.slrlog`, facts in `original-facts.json`.
@@ -46,8 +50,9 @@ listed here. A clean test suite alone does not satisfy this definition.
   divergence is #204: `Controller.user_Add` answers 0 rather than mapping ID 1.
   The earlier device-name and Viewport frontiers have been superseded.
 * **Validation:** oracle branch Python suite: 169 tests, no failures/skips.
-  Rust workspace tests and clippy pass at the command/display/token checkpoint;
-  array overload regression and final workspace recheck run before commit.
+  Rust workspace tests, clippy and the pre-commit hook passed for checkpoint
+  `2541b33` (including array and command-mask regressions). Observer verification
+  receipts are listed below.
   `String.token` now has a real unchanged stock script-wrapper regression:
   earlier native-only tests supplied the argument cells in the wrong order.
 * The scheduler, `Thread.start`, event/timer model, resource instance creation, header
@@ -77,15 +82,13 @@ listed here. A clean test suite alone does not satisfy this definition.
 
 ## Frontier (next stops, in order)
 
-1. Implement acceptance observation (completed MainMenu dialog + >=300 idle
-   frames); the driver currently reports only budget exhaustion after 600 frames.
-2. Filtered native record #167: render-created resource IDs and original allocation
+1. Filtered native record #167: render-created resource IDs and original allocation
    history. Do not mask these primitive ID results to manufacture acceptance.
-3. Unfiltered #204: controller device mapping creation (`user_Add` currently
+2. Unfiltered #204: controller device mapping creation (`user_Add` currently
    follows the no-device branch). Native player `device` commands remain capture-only.
-4. Node #19458: vehicle-type enumeration order; determine its resource/package
+3. Node #19458: vehicle-type enumeration order; determine its resource/package
    ordering before changing filesystem enumeration.
-5. General interface-array conversion remains an explicit VM boundary. The
+4. General interface-array conversion remains an explicit VM boundary. The
    class/primitive-array candidate path now rejects unrelated class overloads
    rather than trying to load an array as a class file (original array CCDs have
    Object as their base). This is not general array covariance support.
@@ -119,14 +122,26 @@ listed here. A clean test suite alone does not satisfy this definition.
 Ignored `re/out/boot/steps-port-command.txt` reproduces node prefix improvement;
 `steps-port-token.txt` records the next array-overload stop;
 `array-stop.txt` records 600 completed frames after the array fix.
+`menu-observer.txt` records frame 179 completion +420 idle frames;
+`menu-observer-test.txt` records the positive/short-budget regression.
 `token-red.txt` / `token-green.txt` show the argument-order regression and fix.
 Oracle `re/out/headless/suite-accepted.txt` records the 169-test pass in its
-worktree. That worktree and its derived captures must be retained.
+worktree. That worktree and its derived captures must be retained. A second
+ignored copy of the four comparison inputs is at
+`re/out/headless/oracle-33d8aa8/observed/`; pass its `script-natives.slrlog` to
+`re/boot-compare.sh` to reproduce this checkpoint without relying on a worktree path.
 
 No per-function oracle vector yet covers synchronous command dispatch; its
 current regression evidence is the integrated node/native comparison and
 `cargo test -p slr-boot --test stock_menu_prefix`. That regression checks
 Controller.setcontrol, both menu methods returning, and 600 completed frames;
-it intentionally does not claim original parity. Native
+it also rejects a short run, and intentionally does not claim original parity. Native
 player mask initializes to observed EVENT_COMMAND (0x10) and uses script
 set/clear operations; native object deletion/lifetime remains incomplete.
+
+Review checkpoint: independent Standards review found no documented violations;
+Spec review's command-mask bypass was fixed and re-reviewed. The final Jev gate
+verified all three bounded runtime/test/gap claims without contradictions. Its
+patch review still escalated (safe-to-apply 0.38, low test-gap confidence 0.07),
+so this is not automatic quality approval or parity acceptance. Interface-array
+coverage and the native-log mismatches remain explicit follow-up work.
