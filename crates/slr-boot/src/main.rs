@@ -116,6 +116,49 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
         }),
     });
 }
+fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> String {
+    let mut frames = Vec::new();
+    for (index, frame) in thread.frames.iter().enumerate() {
+        let pc = if index + 1 == thread.frames.len() {
+            thread.pc
+        } else {
+            frame.saved_pc
+        };
+        let Some(pc) = pc else { continue };
+        let Some(owner) = vm.loader.body_owner(pc.body) else {
+            continue;
+        };
+        let Some(class) = vm.loader.find_by_id(owner) else {
+            continue;
+        };
+        let method = class.methods.iter().find(|m| {
+            !m.is_native && vm.loader.body_id_of(owner, m.body as usize) == Some(pc.body)
+        });
+        frames.push(format!(
+            "{}.{}{} node{}",
+            class.name,
+            method.map_or("<field>", |m| m.name.as_str()),
+            method.map_or("", |m| m.sig.as_str()),
+            pc.idx
+        ));
+    }
+    format!(
+        "{phase}: {error:?}; script frames [{}]; source line {}",
+        frames.join(" -> "),
+        thread.line
+    )
+}
+
+fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
+    if info.class == "java.lang.GameType" {
+        return Err("GameType engine collaborator is not installed".into());
+    }
+    if info.class == "java.lang.Thread" && info.name == "start" {
+        return Err("Thread.start target/frame/scheduler bridge is not installed".into());
+    }
+    Ok(())
+}
+
 fn install(vm: &mut VmHost) {
     let mut table = slr_lang::NativeTable::new();
     slr_lang::math::install(&mut table);
@@ -135,6 +178,7 @@ fn install(vm: &mut VmHost) {
     slr_input::install_headless(vm);
     slr_sound::install_headless(vm);
     vm.native_observer = Some(observe);
+    vm.native_boundary = Some(native_boundary);
 }
 struct ConfigSource<'a> {
     vm: &'a mut VmHost,
@@ -185,6 +229,7 @@ fn run(
     vm: &mut VmHost,
     config_instance_id: Option<u32>,
     output: &Path,
+    game_init_instance_id: Option<u32>,
 ) -> Result<(), String> {
     RES.with(|r| {
         let mut r = r.borrow_mut();
@@ -233,6 +278,9 @@ fn run(
     println!("BOOT Config object={object:#x}");
     let created=config_instance_id.ok_or("ResourceCreationBoundary: Config created resource ID is not pinned; supply --config-instance-id for controlled script replay")?;
     println!("CONTROLLED Config created resource ID={created:#010x}; original startup allocation history not replayed");
+    let link = slr_resource::node::link_created_script(vm, object, created)
+        .map_err(|e| format!("ConfigNativeLinkBoundary: {e}"))?;
+    println!("BOOT Config native link {link:?}");
     let mut thread = Thread::new();
     vm.enter_method(
         &mut thread,
@@ -244,7 +292,15 @@ fn run(
     .map_err(|e| format!("Config constructor dispatch: {e:?}"))?;
     thread
         .run(vm, 0.0, &mut || X87::from_f64(0.0))
-        .map_err(|e| format!("Config constructor: {e:?} pc={:?}", thread.pc))?;
+        .map_err(|e| script_stop(vm, &thread, "Config constructor", e))?;
+    let retained = slr_resource::node::link_created_script(vm, object, created)
+        .map_err(|e| format!("Config constructor changed native link: {e}"))?;
+    if retained != link {
+        return Err("Config constructor replaced native link".into());
+    }
+    slr_resource::node::finish_created_script(link)
+        .map_err(|e| format!("Config retained link release: {e}"))?;
+    println!("BOOT Config constructor retained native resource link");
     let mut settings = apply_settings(vm, object, output)?;
     println!(
         "BOOT settings global words={} final refresh requested",
@@ -259,7 +315,33 @@ fn run(
     println!("BOOT Config.init={init:#010x}");
     let script = RES.with(|r| r.borrow().script(init))?;
     println!("BOOT GameInit resource={init:#010x} class={script}");
-    Err("GameInitCreationBoundary: Config/settings completed in controlled headless profile; GameInit created resource ID and native link are not installed".into())
+    let created = game_init_instance_id.ok_or("GameInitCreationBoundary: supply --game-init-instance-id for controlled creation replay; original allocation history remains unpinned")?;
+    let class = vm
+        .loader
+        .request(&script)
+        .map_err(|e| format!("GameInit class: {e:?}"))?
+        .ok_or("GameInit class missing")?;
+    let object = vm
+        .alloc_object_id(class)
+        .map_err(|e| format!("GameInit allocation: {e:?}"))?;
+    let link = slr_resource::node::link_created_script(vm, object, created)
+        .map_err(|e| format!("GameInitNativeLinkBoundary: {e}"))?;
+    println!("CONTROLLED GameInit created ID={created:#010x}; native link {link:?}");
+    let mut thread = Thread::new();
+    vm.enter_method(
+        &mut thread,
+        class,
+        object,
+        "<init>",
+        &[Value::int(created as i32)],
+    )
+    .map_err(|e| format!("GameInit constructor dispatch: {e:?}"))?;
+    thread
+        .run(vm, 0.0, &mut || X87::from_f64(0.0))
+        .map_err(|e| script_stop(vm, &thread, "GameInit constructor", e))?;
+    slr_resource::node::finish_created_script(link)
+        .map_err(|e| format!("GameInit retained link release: {e}"))?;
+    Err("SchedulerBoundary: GameInit constructor returned; frame/native thread scheduling is not installed".into())
 }
 /// Fresh writable filesystem projection. No script I/O points at stock.
 fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -306,9 +388,10 @@ fn execute() -> Result<(), String> {
         return Err("ProjectionBoundary: canonical output is inside the source install".into());
     }
     let mut config_instance_id = None;
+    let mut game_init_instance_id = None;
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
-        if arg == "--config-instance-id" {
+        if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
             let text = args
                 .next()
                 .ok_or("ArgumentBoundary: --config-instance-id needs a value")?;
@@ -318,7 +401,11 @@ fn execute() -> Result<(), String> {
                 text.parse()
             }
             .map_err(|e| format!("ArgumentBoundary: invalid instance ID: {e}"))?;
-            config_instance_id = Some(value);
+            if arg == "--config-instance-id" {
+                config_instance_id = Some(value);
+            } else {
+                game_init_instance_id = Some(value);
+            }
         } else {
             return Err(format!("ArgumentBoundary: unknown argument {arg}"));
         }
@@ -332,7 +419,13 @@ fn execute() -> Result<(), String> {
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
     let mut vm = VmHost::new();
-    let outcome = run(&root, &mut vm, config_instance_id, &output);
+    let outcome = run(
+        &root,
+        &mut vm,
+        config_instance_id,
+        &output,
+        game_init_instance_id,
+    );
     let file = std::fs::File::create(output.join("runtime.calllog"))
         .map_err(|e| format!("CallLogBoundary: {e}"))?;
     let mut writer =
@@ -346,6 +439,9 @@ fn execute() -> Result<(), String> {
         .flush()
         .map_err(|e| format!("CallLogBoundary: {e}"))?;
     outcome.map_err(|error| {
+        if let Some(failure) = vm.native_failure {
+            return format!("{error}; NativeBackendBoundary: {failure}");
+        }
         if let Some(native) = vm.missing_native {
             format!("{error}; NoBody: {native}")
         } else {

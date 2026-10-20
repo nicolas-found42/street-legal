@@ -461,6 +461,9 @@ pub fn collect_args_with<H: Host>(
 /// return) and `None` for `void`.
 pub type NativeFn = fn(&mut VmHost, &CallInfo<'_>) -> Option<u32>;
 
+/// Embedding check before a native requires its runtime collaborator.
+pub type NativeBoundary = fn(&CallInfo<'_>) -> Result<(), String>;
+
 /// Resource table boundary used by literal100e's4122b0 call. A missing backend
 /// is unsupported; the VM never fabricates a global resource identifier.
 pub type ResourceResolver = fn(&mut VmHost, Option<&str>, u32) -> Result<u32, VmError>;
@@ -501,6 +504,10 @@ pub struct VmHost {
     pub missing_native: Option<String>,
     /// Optional observer of actual native calls in dispatch order.
     pub native_observer: Option<fn(&CallInfo<'_>, Option<u32>)>,
+    /// Embedding boundary for implementations whose required engine/runtime is
+    /// unavailable. Checked before invoking a native, preserving named stops.
+    pub native_boundary: Option<NativeBoundary>,
+    pub native_failure: Option<String>,
     /// Original diagnostic-only conditions during field/class initialization.
     pub initialization_diagnostics: Vec<InitializationDiagnostic>,
     /// Embedding guard for nested initializer bodies (default32). This is a
@@ -606,6 +613,8 @@ impl VmHost {
             method_diagnostics: vec![],
             missing_native: None,
             native_observer: None,
+            native_boundary: None,
+            native_failure: None,
             initialization_diagnostics: vec![],
             initializer_depth_limit: 32,
             initializer_depth: 0,
@@ -2173,6 +2182,13 @@ impl VmHost {
             name: &method.name,
             sig: &method.sig,
         };
+        if let Some(boundary) = self.native_boundary {
+            if let Err(error) = boundary(&info) {
+                self.native_failure =
+                    Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
+                return Err(VmError::Unsupported(0x0024));
+            }
+        }
         let result = native(self, &info);
         if let Some(observe) = self.native_observer {
             observe(&info, result);

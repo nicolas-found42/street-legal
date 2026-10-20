@@ -80,6 +80,7 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-resource", "script_link", vec![("created_script_link_original_rows", vec!["FUN_0053a5e0"])]),
         (
             "slr-boot", "settings_oracle", vec![
                 ("settings_original_rows", vec!["FUN_00427bf0"]),

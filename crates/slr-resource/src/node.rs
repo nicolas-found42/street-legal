@@ -344,6 +344,113 @@ const fn row(name: &'static str, sig: &'static str, impl_addr: u32) -> ResBindin
     }
 }
 
+/// Retained identities installed before an original creation constructor runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptLink {
+    pub node: u32,
+    pub container: u32,
+    pub resource_id: u32,
+    pub script: u32,
+}
+
+/// Install the known projection of original53a5e0's script creation branch:
+/// type1 resource container, script back-reference and Native.ptr linked node.
+/// The caller supplies the created resource ID; this does not allocate engine
+/// objects, infer GameRef.getInfo results or replay prior resource allocations.
+/// A consistent existing link is a side-effect-free hit; conflicts fail closed.
+/// exe: FUN_0053a5e0
+pub fn link_created_script(
+    vm: &mut VmHost,
+    object: u32,
+    resource_id: u32,
+) -> Result<ScriptLink, String> {
+    if resource_id == 0 {
+        return Err("created resource ID is zero".into());
+    }
+    let ptr = vm
+        .read_field(object, "ptr")
+        .map_err(|e| format!("Native.ptr: {e:?}"))?;
+    if ptr.tag != slr_vm::values::TypeTag::Int {
+        return Err("Native.ptr is not I".into());
+    }
+    let link = with_res(|host| -> Result<ScriptLink, String> {
+        if ptr.payload != 0 {
+            let node = host
+                .nodes
+                .get(&ptr.payload)
+                .ok_or("Native.ptr has no resource node")?;
+            let container = host
+                .containers
+                .get(&node.container)
+                .ok_or("Native.ptr has no resource container")?;
+            if node.id != resource_id
+                || container.id != resource_id
+                || container.type_id != 1
+                || container.instance.as_ref().map(|i| i.script) != Some(object)
+                || host.object_node(object) != ptr.payload
+            {
+                return Err("existing script link conflicts with creation".into());
+            }
+            return Ok(ScriptLink {
+                node: ptr.payload,
+                container: node.container,
+                resource_id,
+                script: object,
+            });
+        }
+        if host.container_for_id(resource_id).is_some() || host.object_node(object) != 0 {
+            return Err("created resource ID or script object already registered".into());
+        }
+        let mut container = Container::new(1, resource_id);
+        container.instance = Some(GameInstance {
+            script: object,
+            ..GameInstance::default()
+        });
+        let container = host.add_container(container);
+        host.bind_id(resource_id, container);
+        // The original local retained link remains the successor while the
+        // constructor executes; 53a5e0 releases it before returning.
+        let temporary = host.add_bound_node(resource_id, container);
+        let node = host.add_bound_node(resource_id, container);
+        host.creation_retains.insert(node, temporary);
+        host.bind_object(object, node);
+        Ok(ScriptLink {
+            node,
+            container,
+            resource_id,
+            script: object,
+        })
+    })?;
+    if ptr.payload == 0 {
+        vm.write_field(object, "ptr", slr_vm::values::Value::int(link.node as i32))
+            .map_err(|e| format!("Native.ptr store: {e:?}"))?;
+    }
+    Ok(link)
+}
+
+/// Release the creation operation's temporary retained link after dispatch/run
+/// returns. The script's Native.ptr node and resource identity remain installed.
+/// The caller keeps the retain while inspecting a stopped constructor.
+pub fn finish_created_script(link: ScriptLink) -> Result<(), String> {
+    with_res(|host| {
+        let node = host
+            .nodes
+            .get(&link.node)
+            .ok_or("creation node disappeared")?;
+        if node.id != link.resource_id
+            || node.container != link.container
+            || host.object_node(link.script) != link.node
+        {
+            return Err("creation node changed during constructor".into());
+        }
+        if let Some(temporary) = host.creation_retains.remove(&link.node) {
+            host.unlink(temporary);
+            host.nodes.remove(&temporary);
+        }
+        Ok(())
+    })
+}
+
 // --------------------------------------------------------------------------
 // The object model
 // --------------------------------------------------------------------------
@@ -580,6 +687,7 @@ pub struct ResHost {
     vectors: HashMap<u32, [u32; 3]>,
     spatial: HashMap<u32, [[u32; 3]; 3]>,
     next_node: u32,
+    creation_retains: HashMap<u32, u32>,
     next_container: u32,
     ground_precache: i32,
     gate_refused: bool,
@@ -639,6 +747,11 @@ impl ResHost {
     /// Allocate a node with the given id, bound to `container` — the seam a
     /// replay test or a driver uses to reach a known state.
     pub fn add_node_for_test(&mut self, id: u32, container: u32) -> u32 {
+        self.add_bound_node(id, container)
+    }
+
+    /// Allocate and attach one native handle to an already registered resource.
+    pub fn add_bound_node(&mut self, id: u32, container: u32) -> u32 {
         let word = self.next_node;
         self.next_node = self.next_node.wrapping_add(0x10);
         self.nodes.insert(
