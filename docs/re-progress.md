@@ -54,6 +54,18 @@ implementation.
 
 ## Current frontier
 
+- **Request-driven loader:** the recovered original-executable selection oracle
+  now replays all 13 path/directory/direct-file rows (5/6/2) against unchanged
+  stock class bytes. Lazy requests compare compile/read event order, diagnostics,
+  registration counts and selected record identities. Package nodes and basenames
+  match exact case; the first matching directory wins, a stale first entry never
+  falls back, and cache hits cause no read, registration, event or diagnostic.
+  Direct-file rows deliberately bypass the request cache and register all 12
+  records across the two Dialog file orders. Stock directory enumeration and
+  successful compiler checks remain explicit seams, matching the controlled
+  original oracle's boundary; this is not original filesystem, compiler,
+  complete boot or MainMenu evidence. Fixtures remain ignored in `re/out/`.
+
 - **#35 / M1-08:** all 40 Object/System/GameType registrations are bound. Fresh executable vectors cover language wrappers, array payload/type behavior and Thread init/start/stop queue state. Compiler, package manager, timers and callback engines are explicit required collaborators; their implementation remains subsystem work. Class has no registered native. Independent review caught and corrected zero-length arraycopy handling with negative indices and strengthened ordinary timer-delay inputs.
   The final per-file Jev gate verified all five scoped claims but escalated
   (composite 0.6832; safe-to-apply 0.33), chiefly on review confidence.

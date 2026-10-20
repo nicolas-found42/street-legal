@@ -309,31 +309,35 @@ pub struct Loader {
     packages: Vec<(String, String)>,
     booted: bool,
     body_owners: Vec<ClassId>,
-    /// Package cache (`FUN_0041d290`): `(directory, basename)` entries in
+    /// Package cache (`FUN_0041d290`): `(package, directory, basename)` entries in
     /// walk order. Built by [`Loader::build_package_cache`] over the real
     /// `stock/` tree (explicit seam for the unrecovered original
     /// package-tree construction + OS enumeration).
-    package_entries: Vec<(String, String)>,
+    package_entries: Vec<(String, String, String)>,
+    request_events: Vec<RequestEvent>,
     /// Original log-and-continue diagnostics (`loadClass failed`, `Class
     /// not found`, `JVM::getClass ... not found`, package conflicts).
     diagnostics: Vec<String>,
     /// Read seam (`FUN_00410430` + `FUN_0054c300`): maps the logical
     /// `directory\basename.class` request to file bytes. Defaults to the
-    /// real `stock/` tree; tests override it to count reads, serve
+    /// configured `stock/` tree; tests override it to count reads, serve
     /// controlled bytes, or force failures.
     reader: FileReader,
 }
 
-/// The original 403a90/411610 class cache: 512 buckets holding stable
-/// arena record IDs in registration-chain order. Head retention and
-/// insert-after-head placement live here, so selection reproduces the
-/// observed duplicate-winner topology without redirecting issued IDs.
-///
+/// Observable request boundaries. Compile checks model the oracle's
+/// supplied-success compiler seam, not compilation or freshness validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestEvent {
+    CompileCheck { directory: String, basename: String },
+    ReadRequest(String),
+}
+
 /// The `FUN_00410430` + `FUN_0054c300` file-read seam: maps the original's
 /// logical `directory\basename.class` request to exact stock bytes.
 /// `None` is the original failed read (log `loadClass failed`, return
-/// null, no fallback filename, no second directory). The default reads
-/// the real `stock/` tree with `/` for `\`; tests override it.
+/// null, no fallback filename, no second directory). Without an explicit
+/// stock root or overlay, reads fail; construction never assumes a cwd.
 #[derive(Clone, Debug, Default)]
 pub struct FileReader {
     stock_root: Option<std::path::PathBuf>,
@@ -588,6 +592,15 @@ impl Loader {
         };
         let basename = name.rsplit('.').next().unwrap_or(name);
         let logical = format!("{directory}\\{basename}.class");
+        // Compilation/freshness remains an explicit supplied-success seam,
+        // as in the original-executable path oracle; unchanged class bytes
+        // are consumed below. Recording is not a Java compiler claim.
+        self.request_events.push(RequestEvent::CompileCheck {
+            directory: directory.clone(),
+            basename: basename.to_owned(),
+        });
+        self.request_events
+            .push(RequestEvent::ReadRequest(logical.clone()));
         let Some(bytes) = self.reader.read(&logical) else {
             self.diagnostics
                 .push(format!("!JavaMachine::loadClass: failed to load {logical}"));
@@ -601,53 +614,26 @@ impl Loader {
         // name (post-load `FUN_0041cfe0` package check omitted: the port
         // cache carries no package-conflict topology yet).
         self.load_file(&bytes)?;
-        Ok(self.lookup(name))
+        let selected = self.lookup(name);
+        if selected.is_none() {
+            self.diagnostics.push(format!(
+                "!JVM::getClass: class \"{name}\" not found in file \"controlled-class-cache\" at line 0"
+            ));
+        }
+        Ok(selected)
     }
 
-    /// `FUN_0041d290`: select the package-cache directory for the
-    /// requested exact-case basename. The dotted prefix must first walk
-    /// through a known package: some boot `PACKAGES` package is an
-    /// exact-case prefix of the request with a `.` boundary (the
-    /// `JVM+0x7c` root walk — `java.Render...` matches no package node,
-    /// so rows select nothing and read nothing). When several entries
-    /// list the basename, the deepest directory wins (most backslash
-    /// components; ties keep walk order): the probe's controlled cache
-    /// selects `system\Scripts\render\osd\dialog` for `Dialog`, not the
-    /// shallower `system\Scripts\render\osd` that also lists a (stale,
-    /// old-format) `Dialog`. A stale selected entry (name listed but
-    /// read fails) does NOT fall back — the caller logs and returns null
-    /// after the single failed read. Absent basenames and case
-    /// mismatches select nothing and read nothing.
+    /// Exact package-node lookup followed by the first directory entry
+    /// listing the final component (`FUN_0041d290`). Enumeration is a seam;
+    /// neither a deeper unrelated directory nor a stale entry is a fallback.
     ///
     /// exe: FUN_0041d290
     fn select_directory(&self, name: &str) -> Option<String> {
-        let basename = name.rsplit('.').next()?;
-        if basename.is_empty() || !name.contains('.') {
-            return None;
-        }
-        let known_package = self.packages.iter().any(|(_, package)| {
-            name.len() > package.len()
-                && name.as_bytes()[package.len()] == b'.'
-                && name.starts_with(package.as_str())
-        });
-        if !known_package {
-            return None;
-        }
+        let (package, basename) = name.rsplit_once('.')?;
         self.package_entries
             .iter()
-            .filter(|(_, entry)| *entry == *basename)
-            .max_by_key(|(directory, _)| {
-                (
-                    directory.chars().filter(|c| *c == '\\').count(),
-                    std::cmp::Reverse(
-                        self.package_entries
-                            .iter()
-                            .position(|entry| entry.0 == **directory && entry.1 == *basename)
-                            .unwrap_or(usize::MAX),
-                    ),
-                )
-            })
-            .map(|(directory, _)| directory.clone())
+            .find(|(entry_package, _, entry)| entry_package == package && entry == basename)
+            .map(|(_, directory, _)| directory.clone())
     }
 
     /// `FUN_00410430`'s logical filename for a request: the selected
@@ -668,26 +654,30 @@ impl Loader {
         std::mem::take(&mut self.diagnostics)
     }
 
-    /// Observe the package cache (diagnostics, directory-order tests).
-    #[must_use]
-    pub fn package_cache(&self) -> &[(String, String)] {
-        &self.package_entries
+    /// Drain request-boundary observations. A cache hit emits no events.
+    pub fn take_request_events(&mut self) -> Vec<RequestEvent> {
+        std::mem::take(&mut self.request_events)
     }
 
-    /// Inject a controlled package cache (tests: the probe's two-entry
-    /// directory cache). Each `(directory, basenames)` pair expands to
-    /// one `(directory, basename)` entry per basename, in order.
-    pub fn set_package_cache(&mut self, directories: Vec<(String, Vec<String>)>) {
-        self.package_entries.clear();
+    /// Number of actual file-read seam calls, independent of observations.
+    #[must_use]
+    pub fn read_count(&self) -> usize {
+        self.reader.reads()
+    }
+
+    /// Inject the original oracle's controlled directory/name entries for
+    /// one exact package node. Entries retain caller order.
+    pub fn set_package_cache(&mut self, package: &str, directories: Vec<(String, Vec<String>)>) {
+        self.package_entries.retain(|(node, _, _)| node != package);
         for (directory, basenames) in directories {
             for basename in basenames {
-                self.package_entries.push((directory.clone(), basename));
+                self.package_entries
+                    .push((package.to_owned(), directory.clone(), basename));
             }
         }
     }
 
-    /// Override the file-read seam (tests: read counting, controlled
-    /// bytes, forced failures). The stock-tree reader stays the default.
+    /// Configure the file-read seam (stock root, controlled bytes, failures).
     pub fn set_reader(&mut self, reader: FileReader) {
         self.reader = reader;
     }
@@ -710,7 +700,7 @@ impl Loader {
     pub fn build_package_cache(&mut self, root: &std::path::Path) {
         self.package_entries.clear();
         let packages = self.packages.clone();
-        for (directory, _) in &packages {
+        for (directory, package) in &packages {
             // Locate the package root on disk by exact-case walk, with a
             // one-component case-insensitive fallback for the `scripts`
             // folder: the logical spelling (`system\scripts\...`,
@@ -745,9 +735,9 @@ impl Loader {
             if !located {
                 continue;
             }
-            let mut found: Vec<(String, String)> = Vec::new();
-            let mut stack = vec![(absolute.clone(), directory.clone())];
-            while let Some((dir, logical)) = stack.pop() {
+            let mut found: Vec<(String, String, String)> = Vec::new();
+            let mut stack = vec![(absolute.clone(), directory.clone(), package.clone())];
+            while let Some((dir, logical, node)) = stack.pop() {
                 let Ok(read_dir) = std::fs::read_dir(&dir) else {
                     continue;
                 };
@@ -763,7 +753,11 @@ impl Loader {
                             .and_then(|name| name.to_str())
                             .map(str::to_owned);
                         if let Some(name) = name {
-                            stack.push((child, format!("{logical}\\{name}")));
+                            stack.push((
+                                child,
+                                format!("{logical}\\{name}"),
+                                format!("{node}.{name}"),
+                            ));
                         }
                     } else if child.extension().is_some_and(|ext| ext == "class") {
                         let Some(stem) = child
@@ -773,7 +767,7 @@ impl Loader {
                         else {
                             continue;
                         };
-                        found.push((logical.clone(), stem));
+                        found.push((node.clone(), logical.clone(), stem));
                     }
                 }
             }
