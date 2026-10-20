@@ -199,3 +199,46 @@ execution has not reached it.
 All these original-function probes ran under Unicorn. Their JSONL and repeat
 outputs are ignored under `re/out/boot/`. None runs whole-game startup, supplies
 an original script-native trace, or establishes MainMenu.
+
+## Bounded continuation evidence
+
+These fresh original-function probes prepare the next boot boundaries; their
+results do not establish original startup or a stock-script call-log prefix.
+
+- `re/oracle/vminit_constructor_probe.py`: four static/instance initializer
+  cases with zero or one integer constructor argument. Original initializer,
+  argument collector and null-body constructor dispatcher execute. Allocation,
+  pool/type identity, method lookup and cached argument signature are supplied.
+  Passive observations check the actual argument `17`, receiver identity and
+  immediate return `1`; no constructor script body is executed by these rows.
+- `re/oracle/thread_start_continuation_probe.py`: original `Thread.start`,
+  typed target read and constructor-independent call-by-name dispatch, with
+  field/type/method lookup and native handle storage supplied. A null body
+  returns `1`, kills the thread and clears its script and handle. A controlled
+  void-return body instead returns `0` from dispatch with a pending frame and
+  retained handle/script. A later original interpreter pump executes it. The
+  existing `RunFailed` name alone cannot distinguish this pending continuation.
+- `re/oracle/resource_header_registration_probe.py`: three actual frontend
+  headers (3, 210, 168), through original header conversion, registration,
+  constructors and inactive-list insertion, followed by reference binding.
+  RID mapping, parent/container lookup, foreign root and queue anchor are
+  supplied. Binding the loading-image reference changes the retained-reference
+  head without materializing its descriptor; setting the same ID has no lookup.
+- `re/oracle/resource_package_registration_probe.py`: all 279 actual frontend
+  headers, in file order, through the same original registration path. Every
+  sibling chain is checked after each insertion. Type 3 and type 5 constructors
+  add `0x100` to descriptor flags; every registered entry has load-state `0x40`
+  before materialization. The eight foreign system roots are real empty
+  constructors with declared identities. This does not execute original package
+  file loading, foreign-root hierarchy loading or sourcefile parsing.
+- `re/oracle/boot_pacing_probe.py`: original `FUN_00551730`, real `__ftol`
+  and CRT wrapper with only the Sleep import supplied. Seven float bit patterns
+  check the requested integer milliseconds. The default `10.0f` requests
+  `Sleep(10)`, while `10.9f` truncates to `10`. This measures conversion and the
+  API request, not actual host waiting or whole-loop timing.
+
+Each probe ran under Unicorn and repeated byte-identically in ignored
+`re/out/boot/`. The constructor, Thread and resource probes also received an
+independent ABI/source review and fresh replay. Low-confidence Jev results
+were manually checked against those strict original-execution assertions;
+none certifies an end-to-end boot comparison.
