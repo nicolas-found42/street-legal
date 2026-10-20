@@ -114,6 +114,16 @@ execution has not reached it.
   Pre-Config allocation history remains unpinned; this does not determine the
   Config instance's ID during original startup.
 
+- `re/oracle/boot_settings_probe.py`: original `FUN_00427bf0`, two supplied
+  Config-getter profiles, recording exact arithmetic/global writes and final
+  refresh request. The port replays getter/write order and bits; this does not
+  establish missing-field diagnostics or whole renderer settings behavior.
+- `re/oracle/boot_refresh_probe.py`: original `FUN_004fc590`, four declared
+  backend/retained-handle profiles. An absent backend executes without helper
+  hooks and preserves both handle words. Present-backend profiles record
+  release/free calls and virtual slot `0x134` with supplied results; no GPU
+  work executes. The Rust headless profile implements only the absent branch.
+
 All these original-function probes ran under Unicorn. Their JSONL and repeat
 outputs are ignored under `re/out/boot/`. None runs whole-game startup, supplies
 an original script-native trace, or establishes MainMenu.
