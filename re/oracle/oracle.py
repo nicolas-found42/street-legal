@@ -127,8 +127,8 @@ class Oracle:
         self._setup_teb()
         self.uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
                          self._on_unmapped)
-        self.uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
-        self.uc.hook_add(UC_HOOK_CODE, self._on_code)
+        self._write_hook = self.uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
+        self._code_hook = self.uc.hook_add(UC_HOOK_CODE, self._on_code)
 
     # ---------------------------------------------------------------- loading
     def _load_pe(self, stub_imports: bool):

@@ -450,6 +450,8 @@ class Desktop:
             "class": entry["name"],
             "title": text,
             "instance": instance,
+            "style": style,
+            "visible": bool(style & 0x10000000),  # WS_VISIBLE
             "creation": "pending_WM_NCCREATE",
         }
         self.last_call.update(
