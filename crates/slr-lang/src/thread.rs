@@ -67,12 +67,10 @@
 //! the words the natives see: [`ThreadHost::script_object`] is `+0x18`,
 //! [`ThreadHost::object`] is the handle field.
 //!
-//! Name: the exe `strcpy`s the bytes at the parameter's payload word into
-//! `thread+0x1c`. The port has no word -> text map yet (the string rows own
-//! it), so [`ThreadHost::set_name_source`] is the hook: with no source
-//! installed the copy has no bytes and the name stays empty, the same
-//! convention the port's other "the exe reads a pointer the port does not
-//! have" sites use (they read 0 instead of faulting).
+//! Name: the exe copies the C string marshalled from the String parameter
+//! into `thread+0x1c`. [`thread_init_vm`] reads the loaded String's actual
+//! `ptr` bytes. The raw language-only probe seam retains
+//! [`ThreadHost::set_name_source`] for synthetic pointer inputs.
 //!
 //! Row **T8** ports `java.lang.Thread.start` `()V` at [`THREAD_START`], the
 //! exe's `LAB_0047c570` (it takes no parameters, so `FUN_0045d910` marshals
@@ -682,7 +680,13 @@ impl ThreadHost {
     /// reads a stale slot).
     pub fn init(&mut self, receiver: u32, name_word: u32) -> ThreadId {
         let name = self.resolve_name(name_word);
-        let id = self.queues.spawn(INIT_PRIORITY, CREATED, &name);
+        self.init_named(receiver, &name)
+    }
+
+    /// Build the original queue/handle identity with an already resolved name.
+    /// VM callers resolve the String ptr before borrowing this thread host.
+    fn init_named(&mut self, receiver: u32, name: &str) -> ThreadId {
+        let id = self.queues.spawn(INIT_PRIORITY, CREATED, name);
         self.scripts.insert(id, receiver);
         self.objects
             .insert(receiver, ThreadObject { handle: Some(id) });
@@ -1007,6 +1011,27 @@ pub fn thread_init(_host: &mut LangHost, args: &[Value]) -> NativeResult {
     None
 }
 
+/// `LAB_0047c510` through the VM String object model. The original marshaler
+/// passes the String's character pointer to `FUN_0041f340`, which copies through
+/// its first NUL. No String object, buffer, or clock read is created by the copy.
+pub fn thread_init_vm(vm: &mut VmHost, info: &slr_vm::host::CallInfo<'_>) -> NativeResult {
+    let receiver = receiver_of(info.args);
+    let name_word = param_of(info.args, 1);
+    let Some(bytes) = vm.string_bytes(name_word) else {
+        vm.native_failure = Some(format!(
+            "Thread.init: name {name_word:#x} has no readable String ptr"
+        ));
+        return None;
+    };
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    let name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    with_threads(|threads| threads.init_named(receiver, &name));
+    None
+}
+
 /// exe: LAB_0047c570 (as a `LangNative`)
 ///
 /// The seam hands the already-marshalled container: `start` takes no
@@ -1192,6 +1217,7 @@ pub fn install(vm: &mut VmHost) {
     // through `with_native_table` itself.
     let mut table = NativeTable::new();
     table.set(THREAD_INIT, thread_init);
+    table.set_vm(THREAD_INIT, thread_init_vm);
     table.set(THREAD_START, thread_start);
     table.set(THREAD_STOP, thread_stop);
     table.set(THREAD_SLEEP, thread_sleep);
@@ -2370,7 +2396,11 @@ mod tests {
             name: "init",
             sig: "(Ljava.lang.String;)V",
         };
-        assert_eq!(seam::bridge(&mut vm, &info), None, "V: no return cell");
+        assert_eq!(
+            seam::dispatch(THREAD_INIT, info.args),
+            Ok(None),
+            "raw probe seam retains its synthetic pointer source"
+        );
         seam::with_lang_host(|host| assert_eq!(host.last_error, None));
         with_threads(|threads| {
             assert_eq!(threads.queues().run_order(), vec![0]);
@@ -2382,6 +2412,48 @@ mod tests {
 
         install(&mut vm);
         with_threads(|threads| assert_eq!(threads.queues().threads().len(), 1));
+        reset();
+        seam::reset();
+    }
+
+    /// Native47c510 marshals the String ptr; ctor41f340 copies until NUL.
+    /// The preserved original boot clock context independently observes the
+    /// generated LoadingScreen descriptor name, rather than an empty name.
+    #[test]
+    fn vm_init_copies_string_ptr_into_thread_name_without_allocating() {
+        seam::reset();
+        reset();
+        let mut vm = crate::test_strings::vm();
+        install(&mut vm);
+        with_threads(|threads| threads.set_name_source(test_name));
+        let name = vm
+            .intern_string(Some(b"Ljava.render.LoadingScreen;<202acf80>\0ignored"))
+            .unwrap();
+        // Keep the String object and character-buffer namespaces distinct.
+        assert_ne!(vm.read_field(name, "ptr").unwrap().payload, name);
+        let objects = vm.objects.len();
+        let args = [Value::reference(name), Value::reference(0x2000_0007)];
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            args: &args,
+            class: "java.lang.Thread",
+            name: "init",
+            sig: "(Ljava.lang.String;)V",
+        };
+        assert_eq!(seam::bridge(&mut vm, &info), None);
+        assert_eq!(vm.native_failure, None);
+        assert_eq!(vm.objects.len(), objects);
+        with_threads(|threads| {
+            assert_eq!(
+                threads.queues().get(0).name,
+                "Ljava.render.LoadingScreen;<202acf80>"
+            );
+            assert_eq!(threads.queues().get(0).flags, CREATED);
+            assert_eq!(threads.queues().get(0).priority, INIT_PRIORITY);
+            assert_eq!(threads.script_object(0), Some(0x2000_0007));
+            assert_eq!(threads.object(0x2000_0007).handle, Some(0));
+        });
         reset();
         seam::reset();
     }

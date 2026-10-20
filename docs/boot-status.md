@@ -449,3 +449,24 @@ runtime/runner exit distinction and both complete raw-log comparisons were
 checked directly. These advisory results are retained in
 `diagnostics-root-{gate,verify}.json`; they are not automatic quality approval.
 The diagnostic milestone is distinct from boot parity, which remains unaccepted.
+
+### Thread-name and full-clock continuation (2026-10-20)
+
+The preserved raw replay exposed an empty LoadingScreen thread name. The VM
+Thread.init bridge now reads the real String.ptr bytes, copying through the
+first NUL as the original constructor41f340 does. It retains the existing raw
+pointer seam for controlled function probes. The focused regression checks the
+name, queue flags/priority, script/handle identity and unchanged allocation count.
+Receipts `re/out/boot/thread-name-{tests,lang-tests,clippy}.txt` record 36 focused
+tests, 222 complete slr-lang tests and successful clippy. The bounded Jev gate
+verified the implementation claim (0.92) but escalated test-gap confidence;
+the literal test result counts were independently summed from all suite results.
+This checkpoint does not claim boot parity.
+
+The full raw tape also includes the earlier Config/initializer phase. Activating
+strict replay there reveals its first actual mismatch: original startup uses
+x87 control0x23f (53-bit), before device initialization switches to0x3f (24-bit).
+The port currently starts every interpreter at24-bit. The diagnostic bundle is
+`re/out/boot/runs/20261020T184427.970981Z-a32ecd9a60ef/`. Model the startup/device
+precision boundary from execution evidence before consuming those early inputs;
+never take precision or results from the tape to bypass a mismatch.
