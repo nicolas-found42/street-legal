@@ -10,7 +10,9 @@ dynamically. No Wine.
 1. `WinMain` `0x58c700`: CD check `FUN_00401000` (not ported; checksummed `stock/`
    replaces it), RPK load `FUN_00538380` (`s_system_rpk`), settings, then
    `FUN_00427980()`.
-2. `FUN_00427980(param)`: allocate the 0x80-byte JVM (`FUN_0054f560`),
+2. `FUN_00427980(param)`: first resolve `system.rpk` local IDs 1 and 4
+   into the gametype-library handle (`0x62f260`, type 8) and game-root handle
+   (`0x636460`, type 1). Then allocate the 0x80-byte JVM (`FUN_0054f560`),
    construct it into the existing system context at `param+0xe4`
    (`FUN_0040fb50`), then in order:
    - `FUN_0040fe70` loader boot: 8 package roots, 5 primitive descriptors,
@@ -19,7 +21,8 @@ dynamically. No Wine.
    - `FUN_00487f20`, `FUN_0046b530`, `FUN_004427e0`: the three native
      registration batches (all 353 rows).
    - Load `system.rpk` type `0x47` as a gametype, create the `Config` instance
-     through `FUN_0053a5e0`, retain its script object at context `+0x100`, then
+     through `FUN_0053a5e0`, retain its resource ID at context `+0x100` and
+     its native node at `+0x104`, then
      apply native settings through `FUN_00427bf0`.
 3. `FUN_00428960`, before its `do` loop: resolve the Config `init` field,
    load its resource link with `FUN_00546070`, then call
@@ -69,8 +72,8 @@ The evidence is in ignored `re/out/boot/bridge-checked.jsonl`. Reproduce:
 
 This is a controlled function oracle, not headless-original startup or actual
 script-body execution. The controlled Rust replay now resolves Config's `init` and its RPK script
-class; original startup allocation history, native/script links and execution
-comparison remain open. The previous note's
+class and installs the measured native/script links before unchanged constructors.
+Original startup allocation history and execution comparison remain open. The previous note's
 claim that static evidence ended at list linking omitted the resolver's script
 branch. The separate headless-original oracle still stops before script boot.
 
@@ -147,6 +150,45 @@ execution has not reached it.
   this branch. Zero requested/allocated IDs return null. Resource constructors,
   virtual loads/refcounts and event/physics callbacks remain controlled seams;
   this does not validate a complete native factory backend.
+
+- `re/oracle/boot_order_probe.py`: original `FUN_00427980` orchestration,
+  with supplied resource/JVM/loader/native-registration/Config/settings seams.
+  It records the root resource links before JVM construction, the three native
+  batch addresses in order, other root links, Config creation, and settings.
+  Original context stores retain Config's resource ID at `+0x100` and its
+  native node pointer at `+0x104`; neither word is the script object pointer.
+  Package-index translation is explicitly supplied by this probe.
+- `re/oracle/resource_constructor_probe.py`: original type-8 `FUN_00546ae0`
+  and type-1 `FUN_0053e6e0` with their base constructors and supplied descriptors,
+  starting from poisoned object storage. Fresh type-8 data has null compiled
+  constructor/class and words `+0x18 = 0x3f800000`, `+0x1c = 0`. The class is
+  installed later by `FUN_0053a1a0`. Fresh type-1 bounds kind is 2; its child
+  sentinel is empty, script back-reference and physics owner are null. In this
+  precise state, real `FUN_004988a0`, `FUN_00498b10` and `FUN_0048ae40` make no
+  object writes, and the latter two return zero. Resource manager registration
+  and nonempty/spatial/physics cases are outside this probe.
+
+- `re/oracle/boot_native_factory_fresh_probe.py`: real type-1 constructor
+  followed by the original native factory and all three empty post-create
+  helpers. The constructor's flags `0x21` survive the factory's OR with `0x200`,
+  yielding `0x221`. The older controlled zero-initial-flags case yielding
+  `0x200` is insufficient evidence for a fresh runtime instance.
+- `re/oracle/gametype_materialize_probe.py`: real type-8 constructor and
+  `FUN_005461a0` parser on actual read-only `system.rpk` text: root 1's
+  `lod_amp 1.000` and Dummy `0x1b`'s `script java.util.resource.Dummy`.
+  With the class-request identity supplied at `FUN_00410890`, the parser stores
+  that class at data `+0x10`, leaves the compiled constructor null, and retains
+  words `+0x18 = 0x3f800000`, `+0x1c = 0`. These are two supplied parser phases;
+  package inheritance and original class loading are not executed.
+
+- `re/oracle/boot_native_factory_child_probe.py`: the fresh native factory
+  with real type-1 parent/child constructors, a declared already-materialized
+  empty parent, original inherited-range setters and empty post-create helpers.
+  A supplied child-registration boundary retains the parent pointer. Parent and
+  child range words are `[0, 0]` and final instance flags are `0x221`. This
+  does not execute parent loading or parent-child list registration. The current
+  production checkpoint rejects parented native creation until its measured
+  profile and remaining topology are explicitly implemented.
 
 All these original-function probes ran under Unicorn. Their JSONL and repeat
 outputs are ignored under `re/out/boot/`. None runs whole-game startup, supplies
