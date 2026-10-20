@@ -75,5 +75,5 @@ constructor and empty lifecycle case), and `FUN_00536ed0`/`FUN_00536f90`
 (two 130-allocation/recycle sequences) under Unicorn. Fresh instance flags are
 0x221, template flags2, and gametype words start at 1.0f/0. The class cache uses
 retained ClassId identity. Tests preserve the receiver's existing Native.ptr
-while attaching the new container and script back-reference. This does not
-establish external resource inheritance or parent child-list parity.
+while attaching the new container and script back-reference. Parented native creation fails closed until parent inheritance is implemented.
+This does not establish external resource inheritance or parent child-list parity.

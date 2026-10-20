@@ -209,6 +209,9 @@ impl Factory {
         if template.compiled_constructor {
             return Err("compiled GameType constructor is not installed".into());
         }
+        if root.container.is_some() {
+            return Err("parented native instance inheritance is not installed".into());
+        }
         self.events.push(Event::Call("0x536ed0"));
         let id = allocate();
         if id == 0 {

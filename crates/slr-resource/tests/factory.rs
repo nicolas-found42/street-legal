@@ -181,8 +181,22 @@ fn default_cache_and_script_identity() {
     let script = vm.alloc_object(n::GAME_REF_CLASS).unwrap();
     let linked = n::link_created_script(&mut vm, script, 123).unwrap();
     n::finish_created_script(linked).unwrap();
+    assert!(f
+        .create_instance(root, t.id, script, "Dummy", &mut || panic!(
+            "parent inheritance allocated"
+        ))
+        .is_err());
     let instance = f
-        .create_instance(root, t.id, script, "Dummy", &mut || ids.allocate())
+        .create_instance(
+            Root {
+                resource_id: 77,
+                container: None,
+            },
+            t.id,
+            script,
+            "Dummy",
+            &mut || ids.allocate(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(instance.flags, 0x221);
