@@ -412,10 +412,10 @@ pub fn to_string(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     // The exe reads `[[obj+0xc]+8]` directly off the receiver; an unknown
     // word dereferences unmapped memory. The port returns the null String
     // instead of inventing a class name.
-    let name = vm
-        .objects
-        .get(object_index(word)?)
-        .map(|o| o.class_name(&vm.loader).to_owned());
+    let name = vm.objects.get(object_index(word)?).map(|o| match &o.class {
+        slr_vm::vmclass::ClassRef::Loaded(_) => format!("L{};", o.class_name(&vm.loader)),
+        slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
+    });
     let Some(name) = name else {
         return Some(0);
     };
@@ -427,6 +427,7 @@ pub fn to_string(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 /// exe: LAB_0047c8c0
 pub fn disable_gc(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let word = receiver(info);
+    vm.gc.disable(word);
     if let Some(class) = class_name(vm, word) {
         let class = class.to_owned();
         with_gc_lists(|lists| lists.disable(&class, word));
@@ -439,6 +440,7 @@ pub fn disable_gc(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 /// exe: LAB_0047c8e0
 pub fn enable_gc(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let word = receiver(info);
+    vm.gc.enable(word);
     if let Some(class) = class_name(vm, word) {
         let class = class.to_owned();
         with_gc_lists(|lists| lists.enable(&class, word));
@@ -534,16 +536,16 @@ mod tests {
             .expect("an L return");
         assert_eq!(
             vm.strings
-                .lookup(format!("java.game.Car<{word:x}>").as_bytes())
+                .lookup(format!("Ljava.game.Car;<{word:x}>").as_bytes())
                 .map(|r| r.bytes.clone()),
-            Some(format!("java.game.Car<{word:x}>").into_bytes())
+            Some(format!("Ljava.game.Car;<{word:x}>").into_bytes())
         );
         let index = (ret - 0x1000) as usize;
         assert_eq!(vm.objects[index].class_name(&vm.loader), "java.lang.String");
         assert_eq!(
             vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
-            19,
-            "java.game.Car<1000>"
+            21,
+            "Ljava.game.Car;<1000>"
         );
     }
 
@@ -812,7 +814,7 @@ mod tests {
         assert_ne!(s, 0);
         assert!(vm
             .strings
-            .lookup(format!("java.game.Car<{word:x}>").as_bytes())
+            .lookup(format!("Ljava.game.Car;<{word:x}>").as_bytes())
             .is_some());
 
         // `disableGC` end to end, then the list state is visible.

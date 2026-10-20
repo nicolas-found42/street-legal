@@ -13,6 +13,14 @@ cargo run -p slr-boot -- stock --config-instance-id 0xffff0080 --game-init-insta
 re/boot-compare.sh re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog
 ```
 
+Diagnostics now use unique run bundles; see [diagnostics.md](diagnostics.md).
+`re/boot-compare.sh` invokes the fail-closed diagnostic runner. It returns
+nonzero for the still-open parity divergence and prints the new bundle path.
+The earlier fixed-path receipts below remain historical evidence, not the
+output location of a new run. Direct `slr-boot` executions also select a unique
+runtime directory unless `--output` is supplied; existing capture files are
+never overwritten.
+
 Unchanged stock scripts execute Config and GameInit, enter MainMenu at frame
 179, finish the formerly failing OptionsDialog path, and run all 600 scheduler
 frames without a script/native stop. A read-only observer checks the actual
@@ -91,10 +99,13 @@ listed here. A clean test suite alone does not satisfy this definition.
    The original uses the declared instruction-count-driven QPC scenario;
    the port still uses a per-read clock and fixed 1/60 frame interval. Resolve
    the actual time inputs and scheduling behavior before altering ordering.
-2. Original finalizer calls start near filtered #451 in the preserved trace;
-   the port's finalizer queues are empty. Full object/resource lifetime remains
-   unaccepted. Do not drop finalizers or mask primitive IDs to force acceptance.
-3. Unfiltered #646: original `Input.getInput` versus port `Object.wait`.
+2. Incremental GC and finalizer queues now run. The first 317 queued allocation
+   identities/classes/order and the first four finalizations match the original
+   captures. Full object/resource lifetime, physical destruction and later
+   collections remain unaccepted. Do not drop finalizers or mask primitive IDs
+   to force acceptance.
+3. Unfiltered #646: original `Input.lastKey` versus port `Object.wait` in the
+   current accepted-log comparison (earlier receipts named `getInput`).
    The original input poll and native player `device` commands remain gaps.
 4. General interface-array conversion remains an explicit VM boundary. The
    class/primitive-array candidate path now rejects unrelated class overloads
@@ -109,7 +120,8 @@ listed here. A clean test suite alone does not satisfy this definition.
 * Physics world, render/audio/input behaviour, SDAT saves, general descriptor parsing.
 * `FUN_00428960` frame work not run: input poll, object-list step, `FUN_004277f0`
   reaping, camera/listener setup, render pass, pacing.
-* GC/finalizers (`FinalizerQueues` empty), callback block of `FUN_00418d10`.
+* GC/finalizer lifetime beyond the measured first sweep/drain; physical resource
+  destruction and reaping remain incomplete.
 
 ## Tooling added for this work
 
@@ -269,9 +281,10 @@ The first continuation task is the filtered native mismatch in Frontier. Read `A
 for constraints and implementation context. The temporary session handoff is
 only an index to this canonical state.
 
-`re/boot-compare.sh` prints the runtime's exit status and both comparisons but
-its own shell exit status is not an acceptance gate. Read `compare.txt` and
-`compare-all.txt`; runtime exit 0 currently coexists with native divergence.
+The historical comparison wrapper printed runtime status without reliably
+propagating failure. Its replacement now records build/runtime/compare outcomes
+and requires complete equality of both native logs. Read the bundle's
+`report.json`; runtime exit 0 can still coexist with native divergence.
 `re/step-compare.py` compares only the common prefix, skips field initializers
 unless `KEEP_FI=1`, and must use the documented DROP setting when reproducing
 node #19458. Equal common prefixes alone do not establish complete trace parity.
@@ -286,9 +299,8 @@ missing local inputs can skip tests, so inspect its summary.
 
 Runtime acceptance regression:
 `cargo test -p slr-boot --test stock_menu_prefix`.
-It runs both 600-frame success and 200-frame rejection and overwrites the
-standard `re/out/boot/runtime*.calllog` outputs. Run the boot comparison again
-after tests before interpreting those outputs.
+It runs both 600-frame success and 200-frame rejection using unique output
+directories. Its evidence no longer overwrites the standard historical logs.
 
 ### Package registration and controller mapping checkpoint (2026-10-20)
 
@@ -364,3 +376,76 @@ current comparison inputs; their digests and source-run limits are recorded in
 that verification file. Completed stock menu-construction return nodes corroborate
 the observer in `menu-node-bounds.json`. This establishes the original endpoint,
 not port parity. Keep all earlier captures; no oracle inputs were changed.
+
+### Diagnostic history and replay checkpoint (2026-10-20)
+
+The five observability recommendations are implemented in the diagnostic runner
+and runtime; [diagnostics.md](diagnostics.md) documents commands, schemas,
+retention and limits. Every new run has a unique directory, frozen oracle and
+replay inputs, source/binary/input identities, explicit lifecycle, streamed native
+and causal events, frame/failure state and machine-readable regression cases.
+Offline analysis verifies retained artifacts; unfinished wrappers expose only
+diagnostic prefixes with explicit unverified status. The comparison wrapper now
+fails closed on build/runtime/evidence problems and complete-trace differences.
+
+Original overload descriptors are trusted only after reconstructing the entire
+selected original native stream from their captured argument/result words.
+The current 9,209-record all-log reconstruction passes. Primitive IDs remain
+significant; only declared references and the explicitly recorded legacy clock
+policy are normalized. Historical replay freezes the effective trace environment
+and preserves relative input provenance, including the external frame-timer
+companion references. A changed implementation binary is reported, rather than
+silently treated as the old run.
+
+The VM's tracing records actual interpreter metadata without additional clock
+reads. GC uses the measured 250-object incremental budget, allocation/write
+barriers, queued-String revival, original root ordering and scoped finalizer
+threads. The stock regression checks the 1,196 pre-frame classes/String contents,
+317 first-sweep identities/classes/order, and first four finalizations. Mixed
+String/number concatenation now performs the concatenation after conversion;
+its four original probe rows also check allocation counts. Loaded Object.toString
+uses the class descriptor; older function probes that directly supplied bare
+name pointers retain those original inputs and check the formatter separately.
+This is measured first-cycle progress, not full lifetime or boot parity.
+
+The final verified legacy bundle is
+`re/out/boot/runs/20261020T182738.219377Z-c150efb2a778/`.
+Runtime exit is zero, while the runner correctly exits 2 for the existing native
+differences: one-based filtered record 447 and unfiltered 647 (the earlier
+zero-based frontiers 446/646). Its 91,278 events and 602 state checkpoints have
+valid completion counts and no parse/missing-stream errors. The first divergence
+maps to native call 647, `GameLogic.run`, source line 565/node 4, calling
+`Object.wait`. The automatic rerun reproduces both complete raw native logs
+byte-for-byte and captures the current/parked threads, native argument objects,
+resources and recent events at that exact boundary. Offline inventory checking
+and separate executable assertions verify these facts; see
+`re/out/boot/diagnostics-smoke-verification.json`.
+
+Raw clock replay has explicit request identities and computes time from raw
+counter/frequency words, including the independently captured Timer7 frame-end
+inputs. Its current embedding starts after GameInit. It stops on the actual
+LoadingScreen thread-name disagreement: original `Ljava.render.LoadingScreen;`
+versus an empty port name. Earlier pre-boundary legacy time readings also differ
+under strict clock-result comparison. The paired negative diagnostic receipt is
+`re/out/boot/runs/20261020T182115.340678Z-793ead4cd097/`; it retains the native
+prefix and failure state. Resolve these actual metadata/timing differences next;
+never scan ahead or substitute native results to consume the input tape.
+
+Validation receipts under `re/out/boot/`: `diagnostics-workspace-tests.txt`
+(969 Rust tests, no failures/ignored), `diagnostics-workspace-clippy.txt`,
+`diagnostics-headless-tests.txt` (190 tests, no skips), and
+`diagnostics-runner-tests.txt` (20 tests). Real process tests verify killed-child
+capture survival, immutable output rejection, failure state, GC timeline events
+and targeted-snapshot noninterference. Independent reviews found and corrected
+missing timeline acceptance, wrong earliest-stream selection, inherited trace
+configuration, descendant cleanup, overload masking and snapshot omissions.
+
+The final Jev gate remains a low-confidence quality escalation (safe-to-apply
+0.21). Its compact claim check initially contradicted the deliberately failing
+parity run and lacked source evidence for two implementation claims. Direct
+executable assertions and a separate source/receipt verification resolved those
+bounded claims: four verified, none contradicted or unsupported. The literal
+runtime/runner exit distinction and both complete raw-log comparisons were
+checked directly. These advisory results are retained in
+`diagnostics-root-{gate,verify}.json`; they are not automatic quality approval.
+The diagnostic milestone is distinct from boot parity, which remains unaccepted.

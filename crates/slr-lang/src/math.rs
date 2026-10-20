@@ -53,7 +53,10 @@ const RANDOM_SCALE: u32 = 0x3800_0100;
 /// `rand` word, so both mirrors of `[ptd+0x14]` update:
 /// [`LangHost::rng`] and [`slr_platform::seed_current_thread`].
 pub fn randomize(host: &mut LangHost, _args: &[Value]) -> NativeResult {
-    let seed = X87::from_f32(host.read_clock()).to_i32(Rounding::Zero) as u32;
+    let clock = slr_vm::clock::with_site(slr_vm::clock::ClockSite::MathRandomize, || {
+        host.read_clock()
+    });
+    let seed = X87::from_f32(clock).to_i32(Rounding::Zero) as u32;
     host.rng.reseed(seed);
     seed_current_thread(seed);
     None

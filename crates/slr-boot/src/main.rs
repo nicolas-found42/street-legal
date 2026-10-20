@@ -1,10 +1,12 @@
 //! Headless stock bootstrap. All script bodies come from the read-only install.
 mod engine;
 mod factory;
+mod gc_runtime;
 mod materialise;
 mod missing_rows;
 mod resource_identity;
 mod sched;
+mod telemetry;
 mod viewport;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
@@ -323,6 +325,12 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
     });
 }
 pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmError) -> String {
+    slr_vm::diagnostics::with_context(slr_vm::diagnostics::thread_context(thread, vm), || {
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::Failure {
+            error: format!("{phase}: {error:?}"),
+            snapshot: slr_vm::diagnostics::failure_snapshot(vm, thread),
+        });
+    });
     let mut frames = Vec::new();
     for (index, frame) in thread.frames.iter().enumerate() {
         let pc = if index + 1 == thread.frames.len() {
@@ -722,6 +730,8 @@ fn run(
         .alloc_object_id(config_class)
         .map_err(|e| format!("Config allocation: {e:?}"))?;
     println!("BOOT Config object={object:#x}");
+    let config_object = object;
+    telemetry::anchor("Config", object);
     let created=config_instance_id.ok_or("ResourceCreationBoundary: Config created resource ID is not pinned; supply --config-instance-id for controlled script replay")?;
     println!("CONTROLLED Config created resource ID={created:#010x}; original startup allocation history not replayed");
     let link = slr_resource::node::link_created_script(vm, object, created)
@@ -772,6 +782,7 @@ fn run(
         .map_err(|e| format!("GameInitNativeLinkBoundary: {e}"))?;
     factory::attach_created(link).map_err(|e| format!("GameInitChildRegistrationBoundary: {e}"))?;
     println!("CONTROLLED GameInit created ID={created:#010x}; native link {link:?}");
+    telemetry::anchor("GameInit", object);
     sched::run_created(
         vm,
         "THRD-CREATE",
@@ -784,11 +795,37 @@ fn run(
     slr_resource::node::finish_created_script(link)
         .map_err(|e| format!("GameInit retained link release: {e}"))?;
     println!("BOOT GameInit constructor returned; pumping scheduler for {frames} frames");
+    gc_runtime::configure_roots(config_object, object, None)?;
+    sched::begin_replay_after_game_init()?;
+    vm.runtime_clock = Some(sched::clock_ms);
+    if sched::replaying() {
+        engine::begin_replayed_frames();
+    }
+    std::fs::write(
+        output.join("objects-before-frames.tsv"),
+        vm.objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                format!(
+                    "{}\t{}\t{:?}\n",
+                    index + 1,
+                    object.class_name(&vm.loader),
+                    vm.string_bytes(index as u32 + 0x1000)
+                        .map(String::from_utf8_lossy)
+                )
+            })
+            .collect::<String>(),
+    )
+    .map_err(|e| format!("ObjectTraceBoundary: {e}"))?;
     let mut pump = sched::Pump::new();
     let mut menu = None;
     let mut menu_since = 0;
     let mut menu_idle_frames = 0;
+    telemetry::snapshot(vm, "before-frames", None)?;
     for frame in 0..frames {
+        slr_vm::diagnostics::set_frame(Some(frame));
+        telemetry::detail("frame-enter", vec![("frame".into(), frame.to_string())]);
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
         pump.tick(vm).map_err(|f| {
             script_stop(
@@ -799,7 +836,19 @@ fn run(
             )
         })?;
         sched::advance_ms(1000.0 / 60.0);
+        if sched::replaying() {
+            engine::sample_replayed_animation_time();
+        }
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        if let Some(seconds) = sched::replayed_frame_dt(frame + 1)? {
+            engine::set_frame_dt(seconds);
+        }
+        telemetry::detail("frame-exit", vec![("frame".into(), frame.to_string())]);
+        telemetry::snapshot(vm, "frame-end", None)?;
+        telemetry::check()?;
+        if let Some(error) = sched::replay_error() {
+            return Err(error);
+        }
         let active_menu = active_main_menu(vm).filter(|_| !sched::pending_menu_call(vm));
         if active_menu.is_some() && active_menu == menu {
             menu_idle_frames += 1;
@@ -816,6 +865,7 @@ fn run(
         sched::now_ms()
     );
     if menu.is_some() && menu_idle_frames >= 300 {
+        sched::finish_accepted()?;
         println!("BOOT MainMenu dialog complete at frame {menu_since}; idle frames={menu_idle_frames}; native-log parity remains a separate comparison");
         Ok(())
     } else {
@@ -870,24 +920,46 @@ fn execute() -> Result<(), String> {
         .map_err(|e| format!("StockBoundary: {e}"))?;
     // Validate before creating any projection or output directories.
     slr_io::stock::verify_stock(&root).map_err(|e| format!("StockBoundary: {e}"))?;
-    let output = repository.join("re/out/boot");
-    if output.starts_with(&root) {
-        return Err("ProjectionBoundary: output would be inside the source install".into());
-    }
-    std::fs::create_dir_all(&output).map_err(|e| format!("OutputBoundary: {e}"))?;
-    let output = output
-        .canonicalize()
-        .map_err(|e| format!("OutputBoundary: {e}"))?;
-    if output.starts_with(&root) {
-        return Err("ProjectionBoundary: canonical output is inside the source install".into());
-    }
+    let mut output = None;
+    let mut run_id = None;
+    let mut trace_level = "metadata".to_owned();
+    let mut event_ring = 4096usize;
+    let mut snapshot_native = None;
     let mut config_instance_id = None;
     let mut game_init_instance_id = None;
     let mut frames = 600u64;
     let mut clock_step = 0.01f64;
+    let mut clock_replay = None;
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
-        if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
+        if arg == "--snapshot-native" {
+            snapshot_native = Some(
+                args.next()
+                    .ok_or("ArgumentBoundary: --snapshot-native needs an ID")?
+                    .parse::<u64>()
+                    .map_err(|e| format!("ArgumentBoundary: invalid native call ID: {e}"))?,
+            );
+        } else if matches!(
+            arg.as_str(),
+            "--output" | "--run-id" | "--trace-level" | "--event-ring"
+        ) {
+            let value = args
+                .next()
+                .ok_or_else(|| format!("ArgumentBoundary: {arg} needs a value"))?;
+            match arg.as_str() {
+                "--output" => output = Some(PathBuf::from(value)),
+                "--run-id" => run_id = Some(value),
+                "--trace-level" if matches!(value.as_str(), "metadata" | "full") => {
+                    trace_level = value
+                }
+                "--event-ring" => {
+                    event_ring = value
+                        .parse()
+                        .map_err(|e| format!("ArgumentBoundary: invalid ring capacity: {e}"))?
+                }
+                _ => return Err("ArgumentBoundary: trace level must be metadata or full".into()),
+            }
+        } else if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
             let text = args
                 .next()
                 .ok_or("ArgumentBoundary: --config-instance-id needs a value")?;
@@ -902,6 +974,11 @@ fn execute() -> Result<(), String> {
             } else {
                 game_init_instance_id = Some(value);
             }
+        } else if arg == "--clock-replay" {
+            clock_replay = Some(
+                args.next()
+                    .ok_or("ArgumentBoundary: --clock-replay needs a path")?,
+            );
         } else if arg == "--frames" || arg == "--clock-step" {
             let text = args
                 .next()
@@ -923,26 +1000,74 @@ fn execute() -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("ProjectionBoundary: {e}"))?
         .as_nanos();
+    let run_id = run_id.unwrap_or_else(|| format!("{}-{stamp}", std::process::id()));
+    if matches!(run_id.as_str(), "" | "." | "..")
+        || run_id.len() > 128
+        || !run_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err("ArgumentBoundary: run ID must contain 1..128 ASCII letters, digits, dots, hyphens or underscores and cannot be . or ..".into());
+    }
+    if event_ring == 0 || event_ring > 1_000_000 {
+        return Err("ArgumentBoundary: event ring capacity must be 1..1000000".into());
+    }
+    let output = output.unwrap_or_else(|| {
+        repository
+            .join("re/out/boot/runs")
+            .join(&run_id)
+            .join("runtime")
+    });
+    if output.starts_with(&root) {
+        return Err("ProjectionBoundary: output would be inside the source install".into());
+    }
+    std::fs::create_dir_all(&output).map_err(|e| format!("OutputBoundary: {e}"))?;
+    let output = output
+        .canonicalize()
+        .map_err(|e| format!("OutputBoundary: {e}"))?;
+    if output.starts_with(&root) {
+        return Err("ProjectionBoundary: canonical output is inside the source install".into());
+    }
+    telemetry::configure(&output, &run_id, event_ring, trace_level == "full")?;
+    telemetry::target_native(snapshot_native);
+    println!("BOOT diagnostics {}", output.display());
     let files = output.join(format!("files/{}-{stamp}", std::process::id()));
     project_stock(&root, &files).map_err(|e| format!("ProjectionBoundary: {e}"))?;
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
     factory::configure(config_instance_id, game_init_instance_id);
     sched::configure_clock(clock_step);
+    if let Some(path) = clock_replay {
+        sched::configure_replay(Path::new(&path))?;
+    }
     engine::configure(engine::FrameConfig::default());
     viewport::configure_display();
     let mut vm = VmHost::new();
+    vm.native_diagnostics = Some(telemetry::native_snapshot);
     vm.call_trace = std::env::var_os("SLR_TRACE_CALLS").is_some();
     slr_vm::interp::set_step_trace(std::env::var_os("SLR_TRACE_STEPS").is_some());
-    let outcome = run(
-        &root,
-        &mut vm,
-        config_instance_id,
-        &output,
-        game_init_instance_id,
-        frames,
-    );
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(
+            &root,
+            &mut vm,
+            config_instance_id,
+            &output,
+            game_init_instance_id,
+            frames,
+        )
+    }))
+    .unwrap_or_else(|panic| {
+        Err(format!(
+            "RuntimePanic: {}",
+            panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string payload")
+        ))
+    });
     factory::write_trace(&output)?;
+    gc_runtime::write_trace(&output)?;
     RES.with(|r| r.borrow().write_trace(&output))?;
     std::fs::write(
         output.join("engine-events.txt"),
@@ -959,36 +1084,12 @@ fn execute() -> Result<(), String> {
         format!("{:#?}", vm.constructor_calls),
     )
     .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
-    // Two streams: `runtime.calllog` carries the classes the oracle's passive
-    // observer records (the render/sound/input capture hosts keep their own
-    // records out, as `observe` does); `runtime-all.calllog` carries every
-    // script-to-native call including those hosts.
-    let records = slr_calllog::headless::take_records();
-    for (name, only_observed) in [("runtime.calllog", true), ("runtime-all.calllog", false)] {
-        let file = std::fs::File::create(output.join(name))
-            .map_err(|e| format!("CallLogBoundary: {e}"))?;
-        let mut writer =
-            slr_calllog::LogWriter::create(file).map_err(|e| format!("CallLogBoundary: {e}"))?;
-        for record in &records {
-            if only_observed {
-                if let slr_calllog::LogRecord::NativeCall { class, .. } = record {
-                    if class.starts_with("java.render.")
-                        || class.starts_with("java.sound.")
-                        || ["java.io.Input", "java.io.MouseCursor", "java.io.Controller"]
-                            .contains(&class.as_str())
-                    {
-                        continue;
-                    }
-                }
-            }
-            writer
-                .record(record)
-                .map_err(|e| format!("CallLogBoundary: {e}"))?;
-        }
-        writer
-            .flush()
-            .map_err(|e| format!("CallLogBoundary: {e}"))?;
+    if let Err(error) = &outcome {
+        telemetry::snapshot(&vm, "failure", Some(error))?;
+    } else {
+        telemetry::snapshot(&vm, "completed", None)?;
     }
+    telemetry::finish(outcome.as_ref().err().map(String::as_str))?;
     outcome.map_err(|error| {
         if let Some(failure) = vm.native_failure {
             return format!("{error}; NativeBackendBoundary: {failure}");

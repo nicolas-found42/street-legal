@@ -404,6 +404,13 @@ impl ThreadQueues {
         self.notify.unlink(&mut self.threads, id, Queue::Notify);
     }
 
+    /// The queue unlink of `FUN_0041f4d0`. The arena identity is retained,
+    /// but an immediately destroyed scoped thread must never be scheduled.
+    pub fn remove(&mut self, id: ThreadId) {
+        self.detach(id);
+        self.threads[id].flags |= flags::DEAD;
+    }
+
     /// Run-queue thread ids in scheduling order.
     #[must_use]
     pub fn run_order(&self) -> Vec<ThreadId> {

@@ -522,6 +522,13 @@ pub struct ConstructorCall {
 }
 
 /// The object model over a loaded world.
+/// Read-only observation of the actual interpreter caller at a native boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativePhase {
+    Enter,
+    Return,
+}
+
 pub struct VmHost {
     /// Loaded classes and packages.
     pub loader: Loader,
@@ -531,6 +538,10 @@ pub struct VmHost {
     pub strings: Strings,
     /// Heap objects by word (`0x1000 + index`; 0 = null).
     pub objects: Vec<Object>,
+    /// Original object marking state; value-cell releases are independent.
+    pub gc: crate::gc::Collector,
+    /// Embedding clock for transient field-initializer interpreter threads.
+    pub runtime_clock: Option<fn() -> slr_x87::X87>,
     /// Ported native implementations by exe address (`record+8`): the
     /// registry maps `(class, name, sig)` to the address, this maps the
     /// address to the port. Empty until the native slices land; an address
@@ -546,6 +557,8 @@ pub struct VmHost {
     pub missing_native: Option<String>,
     /// Optional observer of actual native calls in dispatch order.
     pub native_observer: Option<fn(&CallInfo<'_>, Option<u32>)>,
+    /// Called with the live interpreter thread; observing must not re-enter execution.
+    pub native_diagnostics: Option<fn(&VmHost, &Thread, &CallInfo<'_>, NativePhase)>,
     /// Embedding hook around every native call, with the calling script
     /// thread (`CallInfo+4` in the exe). Called with `true` just before the
     /// native runs and `false` right after it returns, so a runtime can
@@ -584,6 +597,188 @@ pub struct VmHost {
 }
 
 impl VmHost {
+    fn diagnostic_reference_words(&self, thread: &Thread) -> std::collections::BTreeSet<u32> {
+        let mut words = std::collections::BTreeSet::new();
+        for frame in thread.frames.iter().rev().take(16) {
+            if frame.receiver != 0 {
+                words.insert(frame.receiver);
+            }
+            for id in frame.locals.iter().take(64) {
+                if let Some(var) = thread.vars.try_get(*id) {
+                    if var.value.tag.is_ref() && var.value.payload != 0 {
+                        words.insert(var.value.payload);
+                    }
+                }
+            }
+            for slot in frame.stack.iter().rev().take(64) {
+                let value = match slot {
+                    Slot::Value(v) => Some(*v),
+                    Slot::Var(id) => thread.vars.try_get(*id).map(|v| v.value),
+                    Slot::Heap(slot) => self.diagnostic_cell(*slot),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    if value.tag.is_ref() && value.payload != 0 {
+                        words.insert(value.payload);
+                    }
+                }
+            }
+        }
+        words
+    }
+
+    /// Bounded, read-only heap projection; never loads classes or dereferences native handles.
+    pub fn diagnostic_snapshot(&self) -> Vec<crate::diagnostics::ObjectSnapshot> {
+        (0..self.objects.len().min(64))
+            .filter_map(|index| self.diagnostic_object(0x1000 + index as u32))
+            .collect()
+    }
+    pub fn diagnostic_object(&self, word: u32) -> Option<crate::diagnostics::ObjectSnapshot> {
+        let object = self.objects.get(word.checked_sub(0x1000)? as usize)?;
+        let elements = self.array_cells.get(&word);
+        let bytes = self.string_bytes(word);
+        Some(crate::diagnostics::ObjectSnapshot {
+            word,
+            class: object.class_name(&self.loader).to_owned(),
+            fields: object
+                .fields
+                .iter()
+                .take(64)
+                .copied()
+                .map(Into::into)
+                .collect(),
+            fields_total: object.fields.len(),
+            field_names: match &object.class {
+                crate::vmclass::ClassRef::Loaded(id) => self
+                    .instance_fields_id(*id)
+                    .map(|fields| {
+                        fields
+                            .into_iter()
+                            .take(64)
+                            .map(|field| format!("{}.{}", field.class, field.name))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                crate::vmclass::ClassRef::Array(_) => vec!["length".into()],
+            },
+            elements: elements
+                .into_iter()
+                .flatten()
+                .take(64)
+                .copied()
+                .map(Into::into)
+                .collect(),
+            elements_total: elements.map_or(0, Vec::len),
+            string_bytes: bytes.map(|b| b.iter().take(256).copied().collect()),
+            string_bytes_total: bytes.map(<[u8]>::len),
+        })
+    }
+
+    fn gc_edges(
+        objects: &[Object],
+        arrays: &HashMap<u32, Vec<Value>>,
+        word: u32,
+    ) -> crate::gc::Edges {
+        let references = |values: &[Value]| {
+            values
+                .iter()
+                .filter(|value| value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0)
+                .map(|value| value.payload)
+                .collect()
+        };
+        if let Some(values) = arrays.get(&word) {
+            return crate::gc::Edges::Array(references(values));
+        }
+        let values = word
+            .checked_sub(0x1000)
+            .and_then(|index| objects.get(index as usize))
+            .map_or(&[][..], |object| object.fields.as_slice());
+        crate::gc::Edges::Object(references(values))
+    }
+
+    /// Reference-assignment barrier (`FUN_004198b0`), including native stores.
+    pub fn gc_mark_reference(&mut self, value: Value) {
+        if value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0 {
+            let objects = &self.objects;
+            let arrays = &self.array_cells;
+            self.gc.mark(value.payload, &mut |word| {
+                Self::gc_edges(objects, arrays, word)
+            });
+        }
+    }
+
+    /// Class-cache bucket/chain order, with each static variable table reversed.
+    pub fn gc_static_roots(&self) -> Vec<u32> {
+        let mut roots = Vec::new();
+        for bucket in 0..crate::vmclass::CLASS_CACHE_BUCKETS {
+            for class in self.loader.cache_chain(bucket) {
+                if let Some(values) = self.static_cells.get(&class.get()) {
+                    roots.extend(
+                        values
+                            .iter()
+                            .rev()
+                            .filter(|value| {
+                                value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0
+                            })
+                            .map(|value| value.payload),
+                    );
+                }
+            }
+        }
+        roots
+    }
+
+    /// Frame tables and operand/local cells in original root-discovery order.
+    pub fn gc_thread_roots(&mut self, thread: &Thread) -> Result<Vec<u32>, VmError> {
+        let mut roots = Vec::new();
+        for frame in thread.frames.iter().rev() {
+            for slot in frame.stack.iter().rev() {
+                let value = self.borrow_slot(thread, *slot)?;
+                if value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0 {
+                    roots.push(value.payload);
+                }
+            }
+            for local in frame.locals.iter().rev() {
+                let value = thread.vars.get(*local).value;
+                if value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0 {
+                    roots.push(value.payload);
+                }
+            }
+        }
+        Ok(roots)
+    }
+
+    /// One original incremental mark/sweep opportunity; finalizer execution is
+    /// owned by the embedding scheduler, after this operation returns its IDs.
+    pub fn gc_step(&mut self, roots: impl IntoIterator<Item = u32>) -> crate::gc::Step {
+        let objects = &self.objects;
+        let arrays = &self.array_cells;
+        self.gc
+            .step(roots, &mut |word| Self::gc_edges(objects, arrays, word))
+    }
+
+    /// After finalize, the original clears reference payloads in the object.
+    pub fn gc_clear_references(&mut self, word: u32) {
+        if let Some(index) = word.checked_sub(0x1000) {
+            if let Some(object) = self.objects.get_mut(index as usize) {
+                for value in &mut object.fields {
+                    if matches!(value.tag, TypeTag::Ref(_)) && value.tag.name() != "V" {
+                        value.payload = 0;
+                    }
+                }
+            }
+        }
+        if let Some(values) = self.array_cells.get_mut(&word) {
+            values.clear();
+            if let Some(object) = word
+                .checked_sub(0x1000)
+                .and_then(|index| self.objects.get_mut(index as usize))
+            {
+                object.fields[0].payload = 0;
+            }
+        }
+    }
+
     /// Retained hierarchy IDs installed by the last successful
     /// initialization of one record (403e80 binding-time policy): the base
     /// and interface IDs as selected at install time. `None` while the
@@ -617,6 +812,7 @@ impl VmHost {
             .lookup("java.lang.String")
             .ok_or(HostError::BadCast)?;
         if let Some(word) = self.strings.lookup(bytes).and_then(|record| record.object) {
+            self.gc.revive(word);
             return Ok(word);
         }
         let slot = self.instance_field_slot_id(string_id, "ptr")?;
@@ -660,12 +856,15 @@ impl VmHost {
             natives: Natives::new(),
             strings: Strings::new(),
             objects: Vec::new(),
+            gc: crate::gc::Collector::new(),
+            runtime_clock: None,
             native_impls: HashMap::new(),
             resource_resolver: None,
             method_diagnostics: vec![],
             constructor_calls: vec![],
             missing_native: None,
             native_observer: None,
+            native_diagnostics: None,
             native_thread_hook: None,
             call_trace: false,
             native_boundary: None,
@@ -764,6 +963,7 @@ impl VmHost {
             class: crate::vmclass::ClassRef::Array(array),
             fields: vec![Value::int(length as i32)],
         });
+        self.gc.allocated(word);
         self.array_cells.insert(
             word,
             vec![
@@ -1085,6 +1285,7 @@ impl VmHost {
                             ))
                         })?;
                     self.static_cells.get_mut(&context).unwrap()[static_index] = value;
+                    self.gc_mark_reference(value);
                 }
             }
             Ok(())
@@ -1144,12 +1345,23 @@ impl VmHost {
         mut destination: Value,
     ) -> Result<Value, HostError> {
         let mut thread = Thread::new();
+        thread.clock_name = Some(
+            if receiver == 0 {
+                "THRD-CLASSVAR-INI"
+            } else {
+                "THRD-INSTVAR-INI"
+            }
+            .into(),
+        );
         let pc = Some(crate::interp::Pc { body, idx: 0 });
         let mut frame = crate::interp::Frame::new(pc, receiver);
         frame.class_ctx = context;
         thread.frames.push(frame);
         thread.pc = pc;
-        let outcome = thread.run(self, 0.0, &mut || slr_x87::X87::from_f64(0.0));
+        let source = self.runtime_clock;
+        let outcome = thread.run(self, 0.0, &mut || {
+            source.map_or_else(|| slr_x87::X87::from_f64(0.0), |clock| clock())
+        });
         self.initialization_diagnostics.extend(
             thread
                 .alu
@@ -1280,6 +1492,7 @@ impl VmHost {
             class: crate::vmclass::ClassRef::Loaded(class),
             fields,
         });
+        self.gc.allocated(word);
         for (index, field) in metadata.iter().enumerate() {
             self.objects[(word - 0x1000) as usize].fields.push(Value {
                 tag: TypeTag::intern(&field.ty),
@@ -1305,6 +1518,7 @@ impl VmHost {
                     self.objects[(word - 0x1000) as usize].fields[index],
                 )?;
                 self.objects[(word - 0x1000) as usize].fields[index] = value;
+                self.gc_mark_reference(value);
             }
         }
         Ok(word)
@@ -1399,6 +1613,31 @@ impl VmHost {
 }
 
 impl Host for VmHost {
+    fn diagnostic_cell(&self, slot: HeapSlot) -> Option<Value> {
+        match slot {
+            HeapSlot::Object { word, slot } => self
+                .objects
+                .get(word.checked_sub(0x1000)? as usize)?
+                .fields
+                .get(slot)
+                .copied(),
+            HeapSlot::Static { context, slot } => {
+                self.static_cells.get(&context)?.get(slot).copied()
+            }
+            HeapSlot::Array { word, index } => self.array_cells.get(&word)?.get(index).copied(),
+        }
+    }
+    fn diagnostic_objects_total(&self, thread: &Thread) -> usize {
+        self.diagnostic_reference_words(thread).len()
+    }
+    fn diagnostic_objects(&self, thread: &Thread) -> Vec<crate::diagnostics::ObjectSnapshot> {
+        self.diagnostic_reference_words(thread)
+            .into_iter()
+            .take(16)
+            .filter_map(|word| self.diagnostic_object(word))
+            .collect()
+    }
+
     fn receiver_value(&mut self, word: u32) -> Result<Value, VmError> {
         let class = self
             .reference_class(Value::reference(word))
@@ -1460,7 +1699,13 @@ impl Host for VmHost {
     }
 
     fn write_cell(&mut self, slot: HeapSlot, value: Value) -> Result<(), VmError> {
-        match slot {
+        let before = if crate::diagnostics::enabled() {
+            self.read_cell(slot).ok()
+        } else {
+            None
+        };
+        self.gc_mark_reference(value);
+        let result = match slot {
             HeapSlot::Object { word, slot } => {
                 *self
                     .objects
@@ -1485,7 +1730,21 @@ impl Host for VmHost {
                     .ok_or(HostError::MissingMember)? = value;
                 Ok(())
             }
+        };
+        if result.is_ok() {
+            if let Some(before) = before {
+                crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
+                    destination: format!("{slot:?}"),
+                    before: before.into(),
+                    after: value.into(),
+                });
+            }
         }
+        result
+    }
+
+    fn on_reference_store(&mut self, value: Value) {
+        self.gc_mark_reference(value);
     }
 
     fn store_value(
@@ -1553,14 +1812,21 @@ impl Host for VmHost {
             (false, false) => None,
             _ => {
                 // Convert the non-String side toward String.
-                let (target, val) = if l_str { (left, right) } else { (right, left) };
+                let (target, val) = if l_str {
+                    (&mut *left, &mut *right)
+                } else {
+                    (&mut *right, &mut *left)
+                };
                 let name = target.tag.name();
                 // `loader_convert` reads `LoaderConvert` from `self`.
                 let res = {
                     let host: &mut dyn LoaderConvert = self;
                     crate::values::loader_convert(host, val, name)
                 };
-                Some(res.map_err(|_| VmError::Unsupported(0x1007)))
+                Some(
+                    res.map_err(|_| VmError::Unsupported(0x1007))
+                        .and_then(|_| self.join_strings(left, right)),
+                )
             }
         }
     }
@@ -2376,35 +2642,99 @@ impl VmHost {
             name: &method.name,
             sig: &method.sig,
         };
-        if let Some(boundary) = self.native_boundary {
-            if let Err(error) = boundary(&info) {
-                self.native_failure =
-                    Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
+        let native_return_emitted = std::cell::Cell::new(false);
+        let invoke = |host: &mut Self, thread: &mut Thread| {
+            if let Some(boundary) = host.native_boundary {
+                if let Err(error) = boundary(&info) {
+                    host.native_failure =
+                        Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
+                    return Err(VmError::Unsupported(0x0024));
+                }
+            }
+            host.native_failure = None;
+            if let Some(hook) = host.native_thread_hook {
+                hook(thread, true);
+            }
+            if let Some(observe) = host.native_diagnostics {
+                observe(host, thread, &info, NativePhase::Enter);
+            }
+            let result = native(host, &info);
+            if let Some(hook) = host.native_thread_hook {
+                hook(thread, false);
+            }
+            if crate::diagnostics::enabled() {
+                crate::diagnostics::emit(crate::diagnostics::EventKind::NativeReturn {
+                    result,
+                    error: host.native_failure.clone(),
+                });
+                native_return_emitted.set(true);
+            }
+            if host.native_failure.is_some() {
                 return Err(VmError::Unsupported(0x0024));
             }
+            if let Some(observe) = host.native_observer {
+                observe(&info, result);
+            }
+            let payload = result.unwrap_or(0);
+            if let Some(tag) = return_tag {
+                thread.push_new(Value {
+                    tag,
+                    payload: if tag.name() == "V" { 0 } else { payload },
+                })?;
+            }
+            if let Some(observe) = host.native_diagnostics {
+                observe(host, thread, &info, NativePhase::Return);
+            }
+            Ok(Flow::Advance)
+        };
+        if crate::diagnostics::enabled() {
+            let identity = crate::diagnostics::NativeIdentity {
+                call_id: crate::diagnostics::next_call_id(),
+                class: method.class.clone(),
+                name: method.name.clone(),
+                signature: method.sig.clone(),
+                implementation: Some(implementation),
+            };
+            crate::diagnostics::with_context(
+                crate::diagnostics::Context {
+                    native: Some(identity),
+                    ..Default::default()
+                },
+                || {
+                    let parent_sequence =
+                        crate::diagnostics::emit(crate::diagnostics::EventKind::NativeEnter {
+                            args: args.iter().copied().map(Into::into).collect(),
+                        });
+                    crate::diagnostics::with_context(
+                        crate::diagnostics::Context {
+                            parent_sequence,
+                            ..Default::default()
+                        },
+                        || {
+                            let result = invoke(self, thread);
+                            match &result {
+                                Err(error) if !native_return_emitted.get() => {
+                                    crate::diagnostics::emit(
+                                        crate::diagnostics::EventKind::NativeReturn {
+                                            result: None,
+                                            error: Some(
+                                                self.native_failure
+                                                    .clone()
+                                                    .unwrap_or_else(|| format!("{error:?}")),
+                                            ),
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
+                            result
+                        },
+                    )
+                },
+            )
+        } else {
+            invoke(self, thread)
         }
-        self.native_failure = None;
-        if let Some(hook) = self.native_thread_hook {
-            hook(thread, true);
-        }
-        let result = native(self, &info);
-        if let Some(hook) = self.native_thread_hook {
-            hook(thread, false);
-        }
-        if self.native_failure.is_some() {
-            return Err(VmError::Unsupported(0x0024));
-        }
-        if let Some(observe) = self.native_observer {
-            observe(&info, result);
-        }
-        let payload = result.unwrap_or(0);
-        if let Some(tag) = return_tag {
-            thread.push_new(Value {
-                tag,
-                payload: if tag.name() == "V" { 0 } else { payload },
-            })?;
-        }
-        Ok(Flow::Advance)
     }
 
     fn new_object(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
@@ -2655,6 +2985,89 @@ mod tests {
     use crate::interp::{Frame, Pc};
     use slr_fmt_tufa::Node;
 
+    #[test]
+    fn diagnostics_read_string_ptr_and_expose_byte_limits_without_mutation() {
+        let mut host = host_with_class();
+        host.loader.insert_test_class(crate::vmclass::Class {
+            kind: 0,
+            name: "java.lang.String".into(),
+            base: Some("java.lang.Object".into()),
+            interfaces: vec![],
+            fields: vec![crate::vmclass::Field {
+                class: "java.lang.String".into(),
+                name: "ptr".into(),
+                ty: "I".into(),
+                is_static: false,
+            }],
+            methods: vec![],
+            bodies: vec![],
+        });
+        let bytes = vec![0xff; 300];
+        let word = host.intern_string(Some(&bytes)).unwrap();
+        let count = host.objects.len();
+        let allocations = host.gc.allocation_counter();
+        let snapshot = host.diagnostic_object(word).unwrap();
+        assert_eq!(snapshot.string_bytes, Some(bytes[..256].to_vec()));
+        assert_eq!(snapshot.string_bytes_total, Some(300));
+        assert_eq!(snapshot.field_names, vec!["java.lang.String.ptr"]);
+        assert_eq!(host.string_bytes(word), Some(bytes.as_slice()));
+        assert_eq!(host.objects.len(), count);
+        assert_eq!(host.gc.allocation_counter(), allocations);
+    }
+
+    #[test]
+    fn string_numeric_add_finishes_original_concatenation_after_conversion() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/headless/finalizer-investigation/string-add.json");
+        let rows: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path).expect("generate re/oracle/string_add_probe.py vectors first"),
+        )
+        .unwrap();
+        for row in rows["cases"].as_array().unwrap() {
+            let mut host = host_with_class();
+            host.loader.insert_test_class(crate::vmclass::Class {
+                kind: 0,
+                name: "java.lang.String".into(),
+                base: Some("java.lang.Object".into()),
+                interfaces: vec![],
+                fields: vec![crate::vmclass::Field {
+                    class: "java.lang.String".into(),
+                    name: "ptr".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                }],
+                methods: vec![],
+                bodies: vec![],
+            });
+
+            let mut value = |input: &serde_json::Value| match input[0].as_str().unwrap() {
+                "S" => Value::reference_named(
+                    host.intern_string(input[1].as_str().map(str::as_bytes))
+                        .unwrap(),
+                    TypeTag::STRING,
+                ),
+                "I" => Value::int(input[1].as_i64().unwrap() as i32),
+                "F" => Value::float(input[1].as_f64().unwrap() as f32),
+                other => panic!("unsupported probe type {other}"),
+            };
+            let mut left = value(&row["left"]);
+            let mut right = value(&row["right"]);
+            let before = host.objects.len();
+            host.operator_on_refs(RefOperator::Add, &mut left, &mut right)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                host.string_bytes(left.payload),
+                Some(row["result"].as_str().unwrap().as_bytes())
+            );
+            assert_eq!(
+                host.objects.len() - before,
+                row["allocated_during_add"].as_u64().unwrap() as usize
+            );
+            assert_eq!(left.tag.name(), TypeTag::STRING);
+        }
+    }
+
     fn host_with_class() -> VmHost {
         let mut h = VmHost::new();
         h.boot();
@@ -2690,6 +3103,176 @@ mod tests {
         fn body(&self, _id: BodyId) -> &[Node] {
             &self.0
         }
+    }
+
+    #[test]
+    fn diagnostics_close_failed_native_with_actual_result_and_error() {
+        use crate::diagnostics::{self, EventKind};
+        fn failed(host: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
+            host.native_failure = Some("typed backend failure".into());
+            Some(0xffc01234)
+        }
+        let mut host = host_with_class();
+        let defining = host.loader.lookup("java.lang.Object").unwrap();
+        host.natives
+            .register("java.lang.Object", "failed", "()F", 0x12345678);
+        host.native_impls.insert(0x12345678, failed);
+        let method = crate::vmclass::Method {
+            class: "java.lang.Object".into(),
+            name: "failed".into(),
+            sig: "()F".into(),
+            flags: 0x49,
+            static_vector: true,
+            is_native: true,
+            body: 0,
+            is_abstract: false,
+            extra: 0,
+        };
+        let (mut thread, _) = thread_with_frame(vec![]);
+        diagnostics::configure("failed-native".into(), 16, None);
+        assert_eq!(
+            host.invoke_method_native_id(&mut thread, &method, defining, 0),
+            Err(VmError::Unsupported(0x0024))
+        );
+        assert_eq!(
+            host.native_failure.as_deref(),
+            Some("typed backend failure")
+        );
+        let events = diagnostics::recent();
+        let enter = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::NativeEnter { .. }))
+            .unwrap();
+        let returns: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::NativeReturn { .. }))
+            .collect();
+        assert_eq!(
+            returns.len(),
+            1,
+            "failed native must close its entry exactly once"
+        );
+        let returned = returns[0];
+        assert!(
+            matches!(&returned.kind, EventKind::NativeReturn { result: Some(0xffc01234), error: Some(error) } if error == "typed backend failure")
+        );
+        assert_eq!(
+            returned.context.native.as_ref().unwrap().call_id,
+            enter.context.native.as_ref().unwrap().call_id
+        );
+        assert_eq!(returned.context.parent_sequence, Some(enter.sequence));
+        assert!(returned.sequence > enter.sequence);
+        assert!(
+            thread.frames[0].stack.is_empty(),
+            "failed return must not enter script stack"
+        );
+        diagnostics::configure(String::new(), 0, None);
+    }
+
+    #[test]
+    fn diagnostics_correlate_real_native_callback_and_field_store() {
+        use crate::diagnostics::{self, EventKind};
+        fn native(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
+            Some(0x80000000)
+        }
+        fn observer(_: &CallInfo<'_>, _: Option<u32>) {
+            diagnostics::emit(EventKind::External {
+                category: "native_observer".into(),
+                fields: vec![],
+            });
+        }
+        fn snapshot(host: &VmHost, thread: &Thread, _: &CallInfo<'_>, phase: NativePhase) {
+            if phase == NativePhase::Return {
+                let snapshot = crate::diagnostics::failure_snapshot(host, thread);
+                assert_eq!(
+                    snapshot.frames[0].stack[0]
+                        .value
+                        .as_ref()
+                        .unwrap()
+                        .float_bits,
+                    Some(0x80000000)
+                );
+                diagnostics::emit(EventKind::External {
+                    category: "native_snapshot".into(),
+                    fields: vec![],
+                });
+            }
+        }
+        let mut host = host_with_class();
+        host.native_diagnostics = Some(snapshot);
+        let defining = host.loader.lookup("java.lang.Object").unwrap();
+        host.natives
+            .register("java.lang.Object", "observed", "()F", 0x12345678);
+        host.native_impls.insert(0x12345678, native);
+        host.native_observer = Some(observer);
+        let method = crate::vmclass::Method {
+            class: "java.lang.Object".into(),
+            name: "observed".into(),
+            sig: "()F".into(),
+            flags: 0x49,
+            static_vector: true,
+            is_native: true,
+            body: 0,
+            is_abstract: false,
+            extra: 0,
+        };
+        let (mut thread, _) = thread_with_frame(vec![]);
+        diagnostics::configure("native".into(), 16, None);
+        host.invoke_method_native_id(&mut thread, &method, defining, 0)
+            .unwrap();
+        let events = diagnostics::recent();
+        let enter = events
+            .iter()
+            .find(|e| matches!(e.kind, EventKind::NativeEnter { .. }))
+            .unwrap();
+        let observed=events.iter().find(|e|matches!(&e.kind,EventKind::External{category,..} if category=="native_observer")).unwrap();
+        assert_eq!(
+            enter.context.native.as_ref().unwrap().call_id,
+            observed.context.native.as_ref().unwrap().call_id
+        );
+        assert_eq!(observed.context.parent_sequence, Some(enter.sequence));
+        assert_eq!(
+            enter.context.native.as_ref().unwrap().implementation,
+            Some(0x12345678)
+        );
+        let captured=events.iter().find(|e|matches!(&e.kind,EventKind::External{category,..} if category=="native_snapshot")).unwrap();
+        assert_eq!(
+            captured.context.native.as_ref().unwrap().call_id,
+            enter.context.native.as_ref().unwrap().call_id
+        );
+        assert!(captured.sequence > observed.sequence);
+
+        assert!(diagnostics::current_context().native.is_none());
+        let array = host.alloc_array("F", 1).unwrap();
+        host.write_cell(
+            HeapSlot::Array {
+                word: array,
+                index: 0,
+            },
+            Value {
+                tag: TypeTag::Float,
+                payload: 0xffc01234,
+            },
+        )
+        .unwrap();
+        let events = diagnostics::recent();
+        let event = events
+            .iter()
+            .find(|e| matches!(e.kind, EventKind::Store { .. }))
+            .unwrap();
+        let EventKind::Store { before, after, .. } = &event.kind else {
+            unreachable!()
+        };
+        assert_eq!(before.float_bits, Some(0));
+        assert_eq!(after.float_bits, Some(0xffc01234));
+        let before = host.objects.len();
+        let snapshot = host.diagnostic_snapshot();
+        assert_eq!(host.objects.len(), before);
+        assert_eq!(
+            snapshot.iter().find(|o| o.word == array).unwrap().elements[0].float_bits,
+            Some(0xffc01234)
+        );
+        diagnostics::configure(String::new(), 0, None);
     }
 
     #[test]

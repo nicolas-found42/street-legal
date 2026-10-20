@@ -101,6 +101,21 @@ pub fn write_trace(output: &std::path::Path) -> Result<(), String> {
     })
 }
 
+/// Snapshot the identities and ownership actually modeled by this headless host.
+pub fn diagnostic_state() -> serde_json::Value {
+    WORLD.with(|world| {
+        let Ok(world)=world.try_borrow() else{return serde_json::json!({"unavailable":"factory mutation in progress"})};
+        let Some(world)=world.as_ref() else{return serde_json::Value::Null};
+        node::try_observe(|host|serde_json::json!({"projection":"headless-identity",
+            "resources":world.resources.iter().map(|resource| {
+                let container=host.container(resource.container);
+                serde_json::json!({"container":resource.container,"id":resource.id,"type":resource.kind,
+                    "parent":container.map(|c|c.parent),"head":container.map(|c|c.head),
+                    "template_link":resource.template_link,"name":resource.name})
+            }).collect::<Vec<_>>()})).unwrap_or_else(||serde_json::json!({"unavailable":"resource mutation in progress"}))
+    })
+}
+
 fn string(vm: &VmHost, word: u32) -> Result<Option<String>, String> {
     if word == 0 {
         return Ok(None);

@@ -180,6 +180,7 @@ use std::collections::VecDeque;
 
 use slr_x87::{Precision, Rounding, X87};
 
+use crate::clock::{read as read_clock, ClockSite};
 use crate::interp::{flags, SCRIPT_PRECISION};
 use crate::threads::{ThreadId, ThreadQueues, SLEEPING};
 
@@ -305,6 +306,11 @@ impl FinalizerQueues {
         self.held.iter().copied().collect()
     }
 
+    /// Remove revived entries before the next quota-consuming pop.
+    pub fn retain_queued(&mut self, keep: impl FnMut(&FinalizerId) -> bool) {
+        self.queued.retain(keep);
+    }
+
     /// exe: FUN_00418290
     ///
     /// The append at `0x418553` that `FUN_00408500` makes.
@@ -327,6 +333,40 @@ impl FinalizerQueues {
     /// The `+0x2c` append (the GC's queueing, no ported caller yet).
     pub fn push_held(&mut self, id: FinalizerId) {
         self.held.push_back(id);
+    }
+}
+
+/// A drain cursor permits real finalizers to mutate queues between pops.
+/// The quota counter and early-empty splice rule match `FUN_00418c20`.
+pub struct FinalizerDrain {
+    remaining: i32,
+    probe_empty: bool,
+    done: bool,
+}
+
+impl FinalizerDrain {
+    /// Pop the next record; callers may remove revived queued strings first.
+    pub fn next(&mut self, finals: &mut FinalizerQueues) -> Option<FinalizerId> {
+        if self.done {
+            return None;
+        }
+        let Some(id) = finals.queued.pop_front() else {
+            self.probe_empty = true;
+            self.done = true;
+            return None;
+        };
+        self.probe_empty = false;
+        let left = self.remaining;
+        self.remaining = self.remaining.wrapping_sub(1);
+        self.done = left == 0;
+        Some(id)
+    }
+
+    /// Finish the original early-empty spare-to-held splice.
+    pub fn finish(self, finals: &mut FinalizerQueues) {
+        if self.remaining != 0 && self.probe_empty {
+            finals.held.append(&mut finals.spare);
+        }
     }
 }
 
@@ -456,7 +496,11 @@ impl Scheduler {
         // 0x416943-0x416974: the entry flag is `budget == 0.0f`, and the
         // deadline is the f32 `clock() + budget`.
         let timed = budget != 0.0;
-        let mut deadline = clock().add(X87::from_f32(budget), pc, RC).to_f32(pc, RC);
+        let mut deadline = crate::clock::with_driver_cursor(self.cursor, || {
+            read_clock(clock, ClockSite::DriveEnter)
+        })
+        .add(X87::from_f32(budget), pc, RC)
+        .to_f32(pc, RC);
         // 0x416978-0x416997: 10.0, shortened to a smaller budget (never
         // touched when the budget is zero).
         let mut slice_unit = SLICE_UNIT;
@@ -470,7 +514,10 @@ impl Scheduler {
             // C0 (CF) set for `clock < deadline`, so a clear C0 is the exe's
             // `je` back to the caller.
             if timed {
-                let (cc, _) = clock().fcom(X87::from_f32(deadline));
+                let (cc, _) = crate::clock::with_driver_cursor(self.cursor, || {
+                    read_clock(clock, ClockSite::DriveLoop)
+                })
+                .fcom(X87::from_f32(deadline));
                 if !cc.c0 {
                     return SchedExit::TimeUp;
                 }
@@ -497,7 +544,10 @@ impl Scheduler {
                     // 0x416a05-0x416a16: wake a sleeping thread whose
                     // deadline is older than the clock (`test ah,0x41`).
                     if f & SLEEPING != 0 {
-                        let (cc, _) = clock().fcom(X87::from_f32(queues.get(t).sleep_deadline));
+                        let (cc, _) = crate::clock::with_driver_cursor(self.cursor, || {
+                            read_clock(clock, ClockSite::DriveSleepProbe)
+                        })
+                        .fcom(X87::from_f32(queues.get(t).sleep_deadline));
                         if !cc.c0 && !cc.c3 {
                             queues.get_mut(t).flags &= !SLEEPING;
                         }
@@ -509,7 +559,7 @@ impl Scheduler {
                             .sub(X87::from_f32(slice_unit), pc, RC)
                             .add(X87::from_f32(slice), pc, RC)
                             .to_f32(pc, RC);
-                        run(queues, t, slice, clock);
+                        crate::clock::with_driver_cursor(Some(t), || run(queues, t, slice, clock));
                         ran = true;
                     }
                 }
@@ -540,6 +590,16 @@ impl Scheduler {
     /// The quota update needs `queued` to be non-empty; a run whose quota is
     /// reached exactly, or misses it by one, does not splice.
     pub fn fairness(&mut self, finals: &mut FinalizerQueues, finalize: &mut Finalizer<'_>) {
+        let mut drain = self.begin_fairness(finals);
+        while let Some(id) = drain.next(finals) {
+            finalize(id);
+        }
+        drain.finish(finals);
+    }
+
+    /// Begin the same quota calculation as `fairness`, allowing the embedding
+    /// to execute finalizers and update queues between individual pops.
+    pub fn begin_fairness(&mut self, finals: &FinalizerQueues) -> FinalizerDrain {
         // 0x418c23: `mov al, byte ptr [esi+0x40]` — only the tick counter's
         // low byte gates the update, and `FUN_00418d10` has already
         // incremented it.
@@ -558,35 +618,10 @@ impl Scheduler {
             // observing the field in between that is one clamp.
             self.divisor = quota.clamp(DIVISOR_MIN, DIVISOR_MAX);
         }
-        // 0x418c8c-0x418cb7: `ebx` counts the remaining pops, `edi` holds
-        // the record the last probe found (0 when it found none), and
-        // `0x418c94` sends a zero quota straight past the loop.
-        let quota = self.divisor;
-        let mut remaining = quota.wrapping_sub(1);
-        let mut probe_empty = true;
-        if quota != 0 {
-            loop {
-                let Some(id) = finals.queued.pop_front() else {
-                    // 0x418cb9: the empty probe leaves `edi` zero, whatever
-                    // the previous iteration found.
-                    probe_empty = true;
-                    break;
-                };
-                probe_empty = false;
-                finalize(id);
-                // 0x418cb0: `eax = ebx; ebx -= 1` and the loop ends when the
-                // pre-decrement value was zero.
-                let left = remaining;
-                remaining = remaining.wrapping_sub(1);
-                if left == 0 {
-                    break;
-                }
-            }
-        }
-        // 0x418cbb-0x418cc2: splice only when the counter did not reach zero
-        // and the last probe found nothing.
-        if remaining != 0 && probe_empty {
-            finals.held.append(&mut finals.spare);
+        FinalizerDrain {
+            remaining: self.divisor.wrapping_sub(1),
+            probe_empty: true,
+            done: self.divisor == 0,
         }
     }
 
@@ -614,23 +649,35 @@ impl Scheduler {
         callbacks: &mut Callbacks<'_>,
         run: &mut Runner<'_>,
     ) -> SchedExit {
-        let pc = SCRIPT_PRECISION;
-        // 0x418d18-0x418d20: `[edi+0x40] += 1`.
-        self.ticks = self.ticks.wrapping_add(1);
-        // 0x418d23: the drain, before either clock read.
+        self.begin_tick();
         self.fairness(finals, finalize);
+        self.callbacks_phase(clock, callbacks);
+        self.drive(queues, budget, 0, clock, run)
+    }
+
+    /// Tick counter update, before the finalizer drain and all clock reads.
+    pub fn begin_tick(&mut self) {
+        self.ticks = self.ticks.wrapping_add(1);
+    }
+
+    /// Original clocked callback phase, between the drain and scheduler drive.
+    pub fn callbacks_phase(
+        &mut self,
+        clock: &mut dyn FnMut() -> X87,
+        callbacks: &mut Callbacks<'_>,
+    ) {
+        let pc = SCRIPT_PRECISION;
         // 0x418d28-0x418d2d: `t0` is stored as f32.
-        let t0 = clock().to_f32(pc, RC);
+        let t0 = read_clock(clock, ClockSite::TickEnter).to_f32(pc, RC);
         // 0x418d31-0x418e1a: the callback block, while `+0x34 > +0x38`.
         if self.callback_ticks > self.callback_period && callbacks() == CallbackRun::Consumed {
             // 0x418e57-0x418e5f: `[+0x34] -= [+0x38]`.
             self.callback_ticks = self.callback_ticks.wrapping_sub(self.callback_period);
         }
         // 0x418e62-0x418e90: the 80/20 smoothing of the frame time.
-        let elapsed = clock().sub(X87::from_f32(t0), pc, RC);
+        let elapsed =
+            read_clock(clock, ClockSite::TickAfterCallbacks).sub(X87::from_f32(t0), pc, RC);
         self.elapsed_ms = frame_ms(self.elapsed_ms, elapsed, pc);
-        // 0x418e93: `FUN_00416940(this, budget, 0)`.
-        self.drive(queues, budget, 0, clock, run)
     }
 
     /// exe: FUN_00416940
@@ -735,6 +782,33 @@ mod tests {
             log.borrow_mut().push((id, slice));
             queues.get_mut(id).flags |= after;
         }
+    }
+
+    #[test]
+    fn interleaved_drain_revival_preserves_quota_and_spare_order() {
+        let mut scheduler = Scheduler::new();
+        let mut finals = FinalizerQueues::new();
+        for word in 1..=5 {
+            finals.push_queued(word);
+        }
+        finals.push_spare(99);
+        let mut drain = scheduler.begin_fairness(&finals);
+        assert_eq!(drain.next(&mut finals), Some(1));
+        // The first finalizer revives the next string before another pop.
+        finals.retain_queued(|word| *word != 2);
+        finals.push_spare(1);
+        for word in [3, 4, 5] {
+            assert_eq!(drain.next(&mut finals), Some(word));
+        }
+        assert_eq!(drain.next(&mut finals), None);
+        drain.finish(&mut finals);
+        assert_eq!(finals.spare(), vec![99, 1]);
+        assert!(finals.held().is_empty());
+        let mut drain = scheduler.begin_fairness(&finals);
+        assert_eq!(drain.next(&mut finals), None);
+        drain.finish(&mut finals);
+        assert!(finals.spare().is_empty());
+        assert_eq!(finals.held(), vec![99, 1]);
     }
 
     #[test]

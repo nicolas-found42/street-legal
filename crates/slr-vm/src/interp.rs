@@ -32,6 +32,7 @@
 use slr_fmt_tufa::Node;
 use slr_x87::{Precision, Rounding, X87};
 
+use crate::clock::{read as read_clock, ClockSite};
 use crate::ops::{Alu, OpError};
 use crate::values::{boolean_convert, TypeTag, Value};
 
@@ -383,6 +384,18 @@ pub enum RefOperator {
 
 /// The object-model side of the interpreter.
 pub trait Host {
+    fn diagnostic_objects_total(&self, thread: &Thread) -> usize {
+        self.diagnostic_objects(thread).len()
+    }
+    fn diagnostic_cell(&self, _slot: HeapSlot) -> Option<Value> {
+        None
+    }
+
+    /// Read-only, bounded object inspection for diagnostics.
+    fn diagnostic_objects(&self, _thread: &Thread) -> Vec<crate::diagnostics::ObjectSnapshot> {
+        Vec::new()
+    }
+
     /// The node array of a body.
     fn body(&self, id: BodyId) -> &[Node];
 
@@ -455,6 +468,10 @@ pub trait Host {
 /// A thread: frames, pc, flags and the cell accounting.
 #[derive(Clone, Debug)]
 pub struct Thread {
+    /// Stable diagnostic identity for clock requests; snapshots retain it.
+    pub clock_identity: u64,
+    /// Original engine thread role assigned by its real creator.
+    pub clock_name: Option<String>,
     /// Frame stack, bottom first; the last is the current frame.
     pub frames: Vec<Frame>,
     /// `thread+0x24`.
@@ -500,6 +517,8 @@ impl Thread {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            clock_identity: crate::clock::ephemeral_identity(),
+            clock_name: None,
             frames: Vec::new(),
             pc: None,
             flags: 0,
@@ -507,6 +526,41 @@ impl Thread {
             live: 0,
             alu: Alu::default(),
             line: 0,
+        }
+    }
+
+    /// Current metadata is derived from the running port, not a replay tape.
+    #[must_use]
+    pub fn clock_context<H: Host>(&self, host: &H) -> crate::clock::ThreadContext {
+        let mut class = None;
+        let mut method = None;
+        if let Some(body) = self
+            .frames
+            .last()
+            .and_then(|f| f.saved_pc)
+            .map(|pc| pc.body)
+        {
+            let label = host.body_label(body);
+            let prefix = label.split('(').next().unwrap_or(&label);
+            if let Some((owner, name)) = prefix.rsplit_once('.') {
+                class = Some(owner.to_owned());
+                method = Some(if name.starts_with("<field init body") {
+                    match self.clock_name.as_deref() {
+                        Some("THRD-CLASSVAR-INI") => "<static field init>".to_owned(),
+                        Some("THRD-INSTVAR-INI") => "<instance field init>".to_owned(),
+                        _ => name.to_owned(),
+                    }
+                } else {
+                    name.to_owned()
+                });
+            }
+        }
+        crate::clock::ThreadContext {
+            id: self.clock_identity,
+            name: self.clock_name.clone(),
+            class,
+            method,
+            node_index: self.pc.map(|pc| pc.idx as u64),
         }
     }
 
@@ -602,7 +656,16 @@ impl Thread {
     ) -> Result<(), VmError> {
         match lv {
             Lvalue::Local(id) => {
-                self.vars.checked(id)?.value = value;
+                let destination = self.vars.checked(id)?;
+                let before = destination.value;
+                destination.value = value;
+                if crate::diagnostics::enabled() {
+                    crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
+                        destination: format!("local:{id:?}"),
+                        before: before.into(),
+                        after: value.into(),
+                    });
+                }
                 Ok(())
             }
             Lvalue::Heap(slot) => host.write_cell(slot, value),
@@ -741,6 +804,37 @@ impl Thread {
         budget: f32,
         clock: &mut dyn FnMut() -> X87,
     ) -> Result<X87, VmError> {
+        if !crate::diagnostics::enabled() {
+            return self.run_observed(host, budget, clock);
+        }
+        let context = crate::diagnostics::thread_context(self, host);
+        crate::diagnostics::with_context(context, || {
+            crate::diagnostics::emit(crate::diagnostics::EventKind::ThreadRun {
+                budget_bits: budget.to_bits(),
+            });
+            let result = self.run_observed(host, budget, clock);
+            if let Err(error) = &result {
+                let context = crate::diagnostics::thread_context(self, host);
+                crate::diagnostics::with_context(context, || {
+                    crate::diagnostics::emit(crate::diagnostics::EventKind::Failure {
+                        error: format!("{error:?}"),
+                        snapshot: crate::diagnostics::failure_snapshot(host, self),
+                    });
+                });
+            }
+            crate::diagnostics::emit(crate::diagnostics::EventKind::ThreadReturn {
+                error: result.as_ref().err().map(|e| format!("{e:?}")),
+            });
+            result
+        })
+    }
+
+    fn run_observed<H: Host>(
+        &mut self,
+        host: &mut H,
+        budget: f32,
+        clock: &mut dyn FnMut() -> X87,
+    ) -> Result<X87, VmError> {
         if self.pc.is_none() {
             return Err(VmError::EmptyThread);
         }
@@ -749,7 +843,20 @@ impl Thread {
         }
         let pc24 = self.alu.precision;
         let timed = budget != 0.0;
-        let t0 = clock();
+        let t0 = crate::clock::with_interpreter_context(
+            self.clock_context(host),
+            self.alu.precision,
+            || {
+                if crate::diagnostics::enabled() {
+                    crate::diagnostics::with_context(
+                        crate::diagnostics::thread_context(self, host),
+                        || read_clock(clock, ClockSite::ThreadEnter),
+                    )
+                } else {
+                    read_clock(clock, ClockSite::ThreadEnter)
+                }
+            },
+        );
         let deadline = t0.add(X87::from_f32(budget), pc24, RC).to_f32(pc24, RC);
         self.pc = self.frame()?.saved_pc;
         self.flags |= flags::RUNNING;
@@ -771,7 +878,31 @@ impl Thread {
                     node.operand
                 );
             }
-            let next = match self.step(host, pc, node) {
+            let next = match crate::clock::with_interpreter_context(
+                self.clock_context(host),
+                self.alu.precision,
+                || {
+                    if crate::diagnostics::enabled() {
+                        let context = crate::diagnostics::thread_context(self, host);
+                        crate::diagnostics::with_context(context, || {
+                            let parent_sequence =
+                                crate::diagnostics::emit(crate::diagnostics::EventKind::Step {
+                                    opcode: node.opword,
+                                    immediate: node.imm,
+                                });
+                            crate::diagnostics::with_context(
+                                crate::diagnostics::Context {
+                                    parent_sequence,
+                                    ..Default::default()
+                                },
+                                || self.step(host, pc, node),
+                            )
+                        })
+                    } else {
+                        self.step(host, pc, node)
+                    }
+                },
+            ) {
                 Ok(n) => n,
                 Err(e) => {
                     // Stopped by a script error: leave the running state so
@@ -795,7 +926,20 @@ impl Thread {
                 let first = counter == 0;
                 counter = counter.wrapping_add(1);
                 if first {
-                    let now = clock();
+                    let now = crate::clock::with_interpreter_context(
+                        self.clock_context(host),
+                        self.alu.precision,
+                        || {
+                            if crate::diagnostics::enabled() {
+                                crate::diagnostics::with_context(
+                                    crate::diagnostics::thread_context(self, host),
+                                    || read_clock(clock, ClockSite::ThreadPoll),
+                                )
+                            } else {
+                                read_clock(clock, ClockSite::ThreadPoll)
+                            }
+                        },
+                    );
                     let (cc, _) = X87::from_f32(deadline).fcom(now);
                     if !cc.c2 && (cc.c0 || cc.c3) {
                         break;
@@ -812,7 +956,20 @@ impl Thread {
         if let Some(f) = self.frames.last_mut() {
             f.saved_pc = pc;
         }
-        let t_end = clock();
+        let t_end = crate::clock::with_interpreter_context(
+            self.clock_context(host),
+            self.alu.precision,
+            || {
+                if crate::diagnostics::enabled() {
+                    crate::diagnostics::with_context(
+                        crate::diagnostics::thread_context(self, host),
+                        || read_clock(clock, ClockSite::ThreadExit),
+                    )
+                } else {
+                    read_clock(clock, ClockSite::ThreadExit)
+                }
+            },
+        );
         Ok(X87::from_f32(deadline).sub(t_end, pc24, RC))
     }
 

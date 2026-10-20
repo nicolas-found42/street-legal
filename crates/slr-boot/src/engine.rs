@@ -92,6 +92,7 @@ struct State {
     world_acc: f32,
     control_acc: f32,
     config: FrameConfig,
+    previous_animation_time: f32,
     /// Event dispatches and callback passes, for inspection.
     pub trace: Vec<String>,
 }
@@ -116,6 +117,55 @@ pub fn configure(config: FrameConfig) {
 
 pub fn take_trace() -> Vec<String> {
     with(|s| std::mem::take(&mut s.trace))
+}
+
+/// `428a5b/428a77`: initialize the two independent frame-loop clock readings.
+pub fn begin_replayed_frames() {
+    use slr_vm::clock::{with_site, ClockSite};
+    use slr_x87::{Precision, Rounding, X87};
+    let seconds = |site| {
+        with_site(site, sched::clock_ms)
+            .mul(X87::from_f32(0.001), Precision::F32, Rounding::NearestEven)
+            .to_f32(Precision::F32, Rounding::NearestEven)
+    };
+    let epoch = seconds(ClockSite::FramePhysicsEpoch);
+    slr_lang::seam::with_lang_host(|host| {
+        host.time_warp_rate = epoch;
+        host.sim_time = 0.0;
+    });
+    let previous = seconds(ClockSite::FramePreviousTime);
+    with(|state| {
+        state.sim_time = 0.0;
+        state.previous_animation_time = previous;
+        state.config.frame_dt = 0.0;
+        state.config.max_step = 0.02;
+    });
+}
+
+/// `428ad5`: sample animation time independently of the previous frame timer.
+pub fn sample_replayed_animation_time() {
+    use slr_x87::{Precision, Rounding, X87};
+    let seconds = slr_vm::clock::with_site(
+        slr_vm::clock::ClockSite::FrameAnimationDelta,
+        sched::clock_ms,
+    )
+    .mul(X87::from_f32(0.001), Precision::F32, Rounding::NearestEven);
+    with(|state| {
+        let elapsed = seconds
+            .sub(
+                X87::from_f32(state.previous_animation_time),
+                Precision::F32,
+                Rounding::NearestEven,
+            )
+            .to_f32(Precision::F32, Rounding::NearestEven);
+        let elapsed = if elapsed > 0.1 { 0.1 } else { elapsed };
+        state.previous_animation_time = seconds.to_f32(Precision::F32, Rounding::NearestEven);
+        state.trace.push(format!("animation elapsed={elapsed:?}"));
+    });
+}
+
+pub fn set_frame_dt(seconds: f32) {
+    with(|state| state.config.frame_dt = seconds);
 }
 
 /// The native player starts with EVENT_COMMAND subscribed. Observed at

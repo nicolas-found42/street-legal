@@ -231,9 +231,12 @@ fn object_natives_match_oracle_vectors() {
                     &object_info(&args, "()Ljava.lang.String;", "toString"),
                 )
                 .expect("String return");
-                let text = object_text(class, word);
-                // The exe's text is the same rule over its own arena word, so
-                // compare the rule on each side: `name<lowercase-hex-word>`.
+                // This function probe supplies the CCD's name pointer directly,
+                // with arbitrary bare text; it does not execute class loading.
+                // Preserve that oracle input when checking the formatter. Real
+                // loaded CCDs carry L...; descriptors (also checked by the stock
+                // allocation/String-content prefix regression).
+                let text = object_text(&format!("L{class};"), word);
                 let row_word = row["object_word"].as_u64().expect("object word") as u32;
                 assert_eq!(
                     row["text"].as_str().expect("text"),
@@ -241,7 +244,7 @@ fn object_natives_match_oracle_vectors() {
                     "{} (exe word)",
                     row["id"]
                 );
-                assert_eq!(text, format!("{class}<{word:x}>"), "{}", row["id"]);
+                assert_eq!(text, format!("L{class};<{word:x}>"), "{}", row["id"]);
                 assert!(
                     vm.strings.lookup(text.as_bytes()).is_some(),
                     "{} interns the text",

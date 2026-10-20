@@ -1,9 +1,21 @@
 //! Integrated runtime regression, not original-oracle parity acceptance.
 use std::process::Command;
+#[path = "support/gc_prefix.rs"]
+mod gc_prefix;
+#[path = "support/object_prefix.rs"]
+mod object_prefix;
 
 #[test]
 fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = root.join(format!(
+        "re/out/boot/test-runs/stock-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let result = Command::new(env!("CARGO_BIN_EXE_slr-boot"))
         .current_dir(&root)
         .args([
@@ -15,12 +27,15 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
             "--frames",
             "600",
         ])
+        .args(["--output", output.to_str().unwrap()])
         .env("SLR_TRACE_STEPS", "1")
         .env("SLR_TRACE_CALLS", "1")
         .output()
         .expect("run local stock boot");
     // Runtime success is separate from the original native-log comparison.
     assert!(result.status.success());
+    object_prefix::assert_original_object_prefix(&root, &output);
+    gc_prefix::assert_original_first_sweep(&root, &output);
     let stdout = String::from_utf8(result.stdout).unwrap();
     let trace = String::from_utf8(result.stderr).unwrap();
     assert!(stdout.contains("BOOT scheduler frames=600 ticks=600"));
@@ -49,7 +64,7 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
             "stock menu method did not finish: {method}"
         );
     }
-    let log = std::fs::read(root.join("re/out/boot/runtime-all.calllog")).unwrap();
+    let log = std::fs::read(output.join("runtime-all.calllog")).unwrap();
     assert_eq!(
         log.windows(b"displayModeName".len())
             .filter(|bytes| *bytes == b"displayModeName")
@@ -73,7 +88,7 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
     };
     let expected =
         read_log(root.join("re/out/headless/oracle-33d8aa8/observed/script-natives.slrlog"));
-    let actual = read_log(root.join("re/out/boot/runtime.calllog"));
+    let actual = read_log(output.join("runtime.calllog"));
     for ordinal in 167..=169 {
         assert_eq!(
             actual[ordinal], expected[ordinal],
@@ -127,7 +142,7 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
         })
         .collect();
     assert_eq!(
-        std::fs::read_to_string(root.join("re/out/boot/package-indices.tsv")).unwrap(),
+        std::fs::read_to_string(output.join("package-indices.tsv")).unwrap(),
         expected_packages
     );
     // Compare the created resource graph too: an allocator-only adjustment
@@ -158,16 +173,15 @@ fn unchanged_stock_builds_menu_and_continues_through_frame_budget() {
             )
         })
         .collect();
-    let actual_graph: Vec<_> =
-        std::fs::read_to_string(root.join("re/out/boot/resource-identities.tsv"))
-            .unwrap()
-            .lines()
-            .map(|line| {
-                let fields: Vec<u64> = line.split('\t').map(|v| v.parse().unwrap()).collect();
-                (fields[0], fields[1], fields[2])
-            })
-            .take(expected_graph.len())
-            .collect();
+    let actual_graph: Vec<_> = std::fs::read_to_string(output.join("resource-identities.tsv"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let fields: Vec<u64> = line.split('\t').map(|v| v.parse().unwrap()).collect();
+            (fields[0], fields[1], fields[2])
+        })
+        .take(expected_graph.len())
+        .collect();
     assert!(!expected_graph.is_empty());
     assert_eq!(actual_graph, expected_graph);
 

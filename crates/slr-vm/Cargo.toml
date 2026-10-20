@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 slr-fmt-tufa = { path = "../slr-fmt-tufa" }
 slr-x87 = { path = "../slr-x87" }
 

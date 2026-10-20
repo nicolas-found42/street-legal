@@ -9,11 +9,25 @@ use std::cell::RefCell;
 
 thread_local! {
     static RECORDS: RefCell<Vec<LogRecord>> = const { RefCell::new(Vec::new()) };
+    static OBSERVER: RefCell<Option<fn(&LogRecord)>> = const { RefCell::new(None) };
+    static RETAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Subscribe a streaming recorder. The callback runs outside the capture borrow
+/// so it may emit correlated diagnostic events. The embedding owns I/O errors.
+pub fn configure_stream(observer: Option<fn(&LogRecord)>, retain: bool) {
+    OBSERVER.with(|slot| *slot.borrow_mut() = observer);
+    RETAIN.with(|slot| slot.set(retain));
 }
 
 /// Append one native call in execution order.
 pub fn record(call: LogRecord) {
-    RECORDS.with(|records| records.borrow_mut().push(call));
+    if let Some(observer) = OBSERVER.with(|slot| *slot.borrow()) {
+        observer(&call);
+    }
+    if RETAIN.with(std::cell::Cell::get) {
+        RECORDS.with(|records| records.borrow_mut().push(call));
+    }
 }
 
 /// Take this thread's ordered calls, leaving the capture empty.

@@ -565,7 +565,9 @@ version = "0.1.0"
 name = "slr-boot"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
+ "sha2",
  "slr-calllog",
  "slr-fmt-rpak",
  "slr-fmt-tufa",
@@ -830,6 +832,7 @@ dependencies = [
 name = "slr-vm"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "slr-fmt-tufa",
  "slr-x87",

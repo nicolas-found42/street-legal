@@ -776,6 +776,14 @@ impl ResHost {
     pub fn add_container(&mut self, container: Container) -> u32 {
         let word = self.next_container;
         self.next_container = self.next_container.wrapping_add(0x100);
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "resource-allocate".into(),
+            fields: vec![
+                ("container".into(), word.to_string()),
+                ("id".into(), container.id.to_string()),
+                ("type".into(), container.type_id.to_string()),
+            ],
+        });
         self.containers.insert(word, container);
         word
     }
@@ -818,6 +826,13 @@ impl ResHost {
         }
         self.containers.get_mut(&parent).unwrap().last_child = child;
         self.containers.get_mut(&sentinel).unwrap().previous_sibling = child;
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "resource-parent".into(),
+            fields: vec![
+                ("child".into(), child.to_string()),
+                ("parent".into(), parent.to_string()),
+            ],
+        });
         Ok(())
     }
 
@@ -1000,6 +1015,13 @@ impl ResHost {
         if let Some(c) = self.containers.get_mut(&container) {
             c.head = node;
         }
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "resource-retain".into(),
+            fields: vec![
+                ("node".into(), node.to_string()),
+                ("container".into(), container.to_string()),
+            ],
+        });
     }
 
     /// `0x429010`: unlink `node` from its container's handle list.
@@ -1029,6 +1051,14 @@ impl ResHost {
             n.container = 0;
             n.id = 0;
         }
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "resource-release".into(),
+            fields: vec![
+                ("node".into(), node.to_string()),
+                ("container".into(), entry.container.to_string()),
+                ("id".into(), entry.id.to_string()),
+            ],
+        });
     }
 
     /// `0x47d300`: allocate a wrapper object for `node` and answer its word.
@@ -1755,6 +1785,12 @@ thread_local! {
 /// Run `f` over this thread's [`ResHost`].
 pub fn with_res<R>(f: impl FnOnce(&mut ResHost) -> R) -> R {
     RES.with(|r| f(&mut r.borrow_mut()))
+}
+
+/// Read-only observation may occur during nested script callbacks. A busy
+/// resource host is reported as unavailable rather than changing execution.
+pub fn try_observe<R>(f: impl FnOnce(&ResHost) -> R) -> Option<R> {
+    RES.with(|host| host.try_borrow().ok().map(|host| f(&host)))
 }
 
 /// Reset this thread's resource state.

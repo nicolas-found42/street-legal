@@ -585,6 +585,16 @@ impl ThreadHost {
         self.current = id;
     }
 
+    /// Destroy a temporary engine thread after a synchronous finalizer call.
+    /// The original41f4d0 destructor also performs the die/monitor-unlink half;
+    /// retain only its dead arena identity, with no ready/waiting membership.
+    pub fn dispose_scoped(&mut self, id: ThreadId) {
+        if let Some(object) = self.queues.die(id) {
+            self.unlink_waiter(object, id);
+        }
+        self.queues.remove(id);
+    }
+
     /// The calling thread (`[CallInfo+4]`), when one is installed.
     #[must_use]
     pub fn current(&self) -> Option<ThreadId> {
@@ -1056,7 +1066,7 @@ fn param_of(args: &[Value], n: usize) -> u32 {
 /// thread or a container that ran short for the `F` reads 0 either way.
 pub fn thread_sleep(host: &mut LangHost, args: &[Value]) -> NativeResult {
     let duration = f32::from_bits(param_of(args, 1));
-    let now = host.read_clock();
+    let now = slr_vm::clock::with_site(slr_vm::clock::ClockSite::ThreadSleep, || host.read_clock());
     with_threads(|threads| {
         let outcome = threads.sleep(now, duration);
         threads.set_last_fault(outcome.err());

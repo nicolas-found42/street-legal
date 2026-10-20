@@ -70,6 +70,11 @@ impl<W: Write> LogWriter<W> {
         Ok(())
     }
 
+    /// Access the sink for durability checkpoints without ending the stream.
+    pub fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
     /// Finish writing and return the sink.
     pub fn into_inner(self) -> W {
         self.inner

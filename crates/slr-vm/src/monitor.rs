@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(monitor.notify(&mut queues), Ok(a));
         assert_eq!(queues.run_order(), vec![c, b, a]);
         assert!(queues.notify_order().is_empty());
-        assert_eq!(monitor.waiters(), vec![]);
+        assert!(monitor.waiters().is_empty());
         for id in [a, b, c] {
             assert_eq!(queues.get(id).flags, 0);
         }
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(monitor.notify(&mut queues), Ok(c));
         // 0x10 cleared, 0x20 kept, still in the notify queue.
         assert_eq!(queues.get(c).flags, flags::NOTIFIED);
-        assert_eq!(queues.run_order(), vec![]);
+        assert!(queues.run_order().is_empty());
         assert_eq!(queues.notify_order(), vec![a, b, c]);
         assert_eq!(monitor.waiters(), vec![a, b]);
         assert_eq!(queues.get(a).flags, flags::WAITING);

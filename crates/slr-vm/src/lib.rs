@@ -9,7 +9,10 @@
 //!   with class-dependent operations behind the `Host` trait (M1-03; the
 //!   class loader and string pool are M1-04, issue #31).
 
+pub mod clock;
+pub mod diagnostics;
 pub mod format;
+pub mod gc;
 pub mod host;
 pub mod interp;
 pub mod monitor;

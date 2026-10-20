@@ -921,7 +921,10 @@ pub fn build_number(_host: &mut LangHost, _args: &[Value]) -> NativeResult {
 ///
 /// exe: LAB_0047bfe0
 pub fn current_time(host: &mut LangHost, _args: &[Value]) -> NativeResult {
-    Some((host.read_clock() * MS_TO_SECONDS).to_bits())
+    let clock = slr_vm::clock::with_site(slr_vm::clock::ClockSite::SystemCurrentTime, || {
+        host.read_clock()
+    });
+    Some((clock * MS_TO_SECONDS).to_bits())
 }
 
 /// `java.lang.System.simTime()F`
@@ -1137,7 +1140,9 @@ pub fn time_warp(_vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let mut out = [0u32; 2];
     let _ = marshal_args(info, &mut out);
     let argument = f32::from_bits(out[1]);
-    let clock = with_lang_host(|host| host.read_clock());
+    let clock = slr_vm::clock::with_site(slr_vm::clock::ClockSite::TimeScaleOffset, || {
+        with_lang_host(|host| host.read_clock())
+    });
     with_lang_host(|host| {
         // The word is loaded *before* the branch, so both paths return the
         // pre-call scale -- including the path that just stored a new one.
