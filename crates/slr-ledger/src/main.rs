@@ -341,6 +341,24 @@ fn collect_suites() -> Vec<Suite> {
         ),
         (
             "slr-vm",
+            "request",
+            vec![
+                (
+                    "request_paths_replay_path_rows",
+                    vec!["FUN_00410890", "FUN_00410630", "FUN_0041d290", "FUN_00410430"],
+                ),
+                (
+                    "request_directories_replay_directory_rows",
+                    vec!["FUN_0041d290", "FUN_00410630"],
+                ),
+                (
+                    "request_files_replay_file_rows",
+                    vec!["FUN_00411b20", "FUN_00403a90", "FUN_00411610"],
+                ),
+            ],
+        ),
+        (
+            "slr-vm",
             "sched_oracle",
             vec![(
                 "scheduler_matches_oracle_vectors",
