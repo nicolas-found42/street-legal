@@ -33,11 +33,14 @@ pending state. Global package
 indices are a replay-local namespace; their equality to original startup is not
 established.
 
-With both IDs the current stock run enters Init, then stops in
-`Sound.init → Dummy.<init> → GameType.createNativeInstance` at a named
-`NativeBackendBoundary`. The factory backend now models the measured default-class template and fresh native instance branches. Stock Sound requests explicit `system.rpk:0x1b`, so it currently stops at the named external-template materialisation boundary before allocating an instance.
-The driver also guards unwired `Thread.start` before it could silently lose a
-pending script frame. A rejected native call produces no fabricated result.
+With both IDs the stock run completes `Sound.init`: it materialises
+`system.rpk:0x1b` using its `script java.util.resource.Dummy` descriptor after
+root1's `lod_amp 1.000`, requests the actual retained class, and creates the
+native instance with the existing script and Native.ptr. Its compiled engine
+constructor remains null. The next stop is `InitializerBoundary`:
+`java.render.Frontend.defLoadingPic` requires initializer body execution beyond
+the current preflight. No initializer execution is bypassed. Unwired
+`Thread.start` also remains guarded before it could drop a pending frame.
 
 Script file operations use a fresh complete copy under ignored
 `re/out/boot/files/`, never stock. The controlled allocator starts at seed1 with supplied Config/Init IDs reserved; this is not recovered original startup history. Factory operations are written to `re/out/boot/factory-operations.txt`.
@@ -62,7 +65,7 @@ headless-original startup still stops before script execution. Consequently
 there is no original script-call prefix available for an execution comparison.
 
 Pending boot work includes native registration order/full surface, actual
-original allocation history, external GameType resource materialisation,
+original allocation history, general resource materialisation,
 present-backend graphics refresh, scheduler/native-thread wiring and monotonic
 clock/pacing. Native link validation uses
 `re/oracle/boot_native_link_probe.py` (original creation/link/field-store
@@ -73,7 +76,19 @@ Default factory evidence: original `FUN_0053a1a0` (three supplied-boundary
 cases), `FUN_0053a2a0` (three controlled cases plus one fresh original type1
 constructor and empty lifecycle case), and `FUN_00536ed0`/`FUN_00536f90`
 (two 130-allocation/recycle sequences) under Unicorn. Fresh instance flags are
-0x221, template flags2, and gametype words start at 1.0f/0. The class cache uses
+0x221, dynamic default-template flags2 (stock script templates keep descriptor flags0), and gametype words start at 1.0f/0. The class cache uses
 retained ClassId identity. Tests preserve the receiver's existing Native.ptr
-while attaching the new container and script back-reference. Parented native creation fails closed until parent inheritance is implemented.
-This does not establish external resource inheritance or parent child-list parity.
+while attaching the new container and script back-reference. Parented native
+creation accepts only the declared loaded fresh-empty type1 profile, with
+zero inherited range words; other parent branches stop before allocation.
+Config, Init and factory children append to the game-root child list. Typed
+head/end sentinels preserve order, previous/next links and tail behavior.
+Original `FUN_00536a10` rows cover explicit-parent registration of three
+sequential children for each type1/type8; manager lookup remains unverified.
+The original type8 parser row compares two supplied parser phases over actual
+stock text; it does not prove package-manager loading/inheritance. The driver's
+RPK reader supplies that phase order, logs it, and accepts only a direct child
+of library root1. Deeper/other-root hierarchies, unknown descriptor commands,
+flags and packages stop explicitly. The fresh child factory row supplies a declared
+already loaded empty parent and virtual/event boundaries. None of these probes
+executes original script bodies or establishes full original startup parity.

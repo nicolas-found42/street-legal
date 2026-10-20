@@ -1701,3 +1701,27 @@ fn failed_dependency_retry_selects_new_records() {
     assert_eq!(stored_base, Some(base_new));
     assert_eq!(ifaces, vec![vm.loader.lookup("InterfaceOne").unwrap()]);
 }
+
+#[test]
+fn static_initializer_failure_preserves_field_name_and_body_cause() {
+    let pool = vec![
+        PoolEntry::Str("Broken".into()),
+        PoolEntry::Class(0),
+        PoolEntry::Str("I".into()),
+        PoolEntry::Str("bad".into()),
+    ];
+    let mut vm = VmHost::new();
+    vm.loader
+        .load_file(&module(
+            &pool,
+            &[[0x28, 3, 2, 0]],
+            &[],
+            &[u32::MAX, 0, 1, u32::MAX, 0],
+            &[vec![n(0x101e, 0), n(0x10, 0)]],
+        ))
+        .unwrap();
+    assert!(vm.alloc_object("Broken").is_err());
+    let cause = vm.initializer_failure.unwrap();
+    assert!(cause.contains("Broken.bad"), "{cause}");
+    assert!(cause.contains("requires #110 execution"), "{cause}");
+}

@@ -70,11 +70,30 @@ fn native_rows(name: &str, initial_flags: u32) {
             initial_instance_flags: initial_flags,
             ..Factory::default()
         };
-        let root = root(false);
+        let root = root(name == "native-factory-child");
+        if let Some(parent) = root.container {
+            n::with_res(|h| {
+                let p = h.container_mut(parent).unwrap();
+                p.flags = row["parent_flags"].as_u64().unwrap() as u32;
+                p.load_state = 1;
+                p.instance = Some(n::GameInstance::default());
+            });
+            f.fresh_empty_parents.insert(parent);
+            assert_eq!(
+                n::with_res(|h| h.container(parent).unwrap().flags),
+                row["parent_flags"].as_u64().unwrap() as u32
+            );
+        }
         let template = f
-            .create_template(root, class(), "java.util.resource.Dummy", &mut || {
-                0xffff007e
-            })
+            .create_template(
+                Root {
+                    resource_id: 77,
+                    container: None,
+                },
+                class(),
+                "java.util.resource.Dummy",
+                &mut || 0xffff007e,
+            )
             .unwrap()
             .unwrap();
         let original_words = f.templates.get_mut(&template.id).unwrap();
@@ -111,6 +130,10 @@ fn native_rows(name: &str, initial_flags: u32) {
         );
         if let Some(i) = instance {
             assert_eq!(i.words, [0x1234, 0x5678]);
+            if name == "native-factory-child" {
+                assert_eq!(json!(i.range_bits), row["child_range_bits"]);
+                assert_eq!(row["parent_range_bits"], json!([0, 0]));
+            }
             n::with_res(|h| {
                 assert_eq!(h.container(i.container).unwrap().head, 0);
                 assert_eq!(
@@ -215,4 +238,101 @@ fn default_cache_and_script_identity() {
             "unknown template allocated"
         ))
         .is_err());
+}
+
+#[test]
+fn native_factory_fresh_child_original_row() {
+    native_rows("native-factory-child", 0x21);
+}
+#[test]
+fn materialise_stock_text_original_row() {
+    let Some(rows) = rows("gametype-materialize") else {
+        return;
+    };
+    assert_eq!(rows.len(), 1);
+    for row in rows {
+        let mut data = slr_resource::factory::ScriptData::default();
+        let mut requested = vec![];
+        for phase in row["phases"].as_array().unwrap() {
+            data.apply(phase["descriptor"].as_str().unwrap(), &mut |name| {
+                requested.push(name.to_owned());
+                Ok(class())
+            })
+            .unwrap();
+        }
+        assert_eq!(json!(requested), row["requests"]);
+        assert_eq!(data.class, Some(class()));
+        assert_eq!(row["class_matches_request"], true);
+        n::reset_res();
+        let template = Factory::default()
+            .install_script_template(
+                27,
+                Root {
+                    resource_id: 1,
+                    container: None,
+                },
+                &data,
+            )
+            .unwrap();
+        assert_eq!(template.class, class());
+        assert_eq!(
+            n::with_res(|h| h.container(template.container).unwrap().flags),
+            row["template_flags"].as_u64().unwrap() as u32
+        );
+        assert_eq!(
+            u32::from(template.compiled_constructor),
+            row["compiled_constructor"].as_u64().unwrap() as u32
+        );
+        assert_eq!(data.words[0], row["word18_bits"].as_u64().unwrap() as u32);
+        assert_eq!(data.words[1], row["word1c_bits"].as_u64().unwrap() as u32);
+        assert!(data
+            .apply("native unknown", &mut |_| panic!(
+                "unknown descriptor requested class"
+            ))
+            .is_err());
+        assert!(data
+            .apply("script missing.Class", &mut |_| Err("missing class".into()))
+            .is_err());
+    }
+}
+#[test]
+fn append_child_original_rows() {
+    let Some(rows) = rows("resource-child-registration") else {
+        return;
+    };
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        n::reset_res();
+        let kind = row["kind"].as_i64().unwrap() as i32;
+        n::with_res(|h| {
+            let parent = h.add_container(n::Container::new(kind, 4));
+            for expected in row["snapshots"].as_array().unwrap() {
+                let ids = expected["ids"].as_array().unwrap();
+                let id = ids.last().unwrap().as_u64().unwrap() as u32;
+                let child = h.add_container(n::Container::new(kind, id));
+                h.append_child(parent, child).unwrap();
+                let p = h.container(parent).unwrap();
+                let mut cursor = p.first_child;
+                let mut prev = parent;
+                let mut actual = vec![];
+                let mut consistent = true;
+                let mut parents = true;
+                while cursor != p.children_sentinel {
+                    assert!(actual.len() < 3);
+                    let c = h.container(cursor).unwrap();
+                    actual.push(c.id);
+                    consistent &= c.previous_sibling == prev;
+                    parents &= c.parent == parent;
+                    prev = cursor;
+                    cursor = c.next_sibling;
+                }
+                consistent &= h.container(p.children_sentinel).unwrap().previous_sibling == prev;
+                assert_eq!(json!(actual), expected["ids"]);
+                assert_eq!(json!(parents), expected["parent_matches"]);
+                assert_eq!(json!(consistent), expected["prev_next_consistent"]);
+                assert_eq!(json!(p.last_child == prev), expected["tail_matches_last"]);
+                assert!(h.append_child(parent, child).is_err());
+            }
+        });
+    }
 }

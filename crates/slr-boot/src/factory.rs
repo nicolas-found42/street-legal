@@ -1,7 +1,7 @@
 //! Controlled fresh resource world for the measured default GameType branch.
 use slr_resource::{
-    factory::{Factory, Root, RuntimeIds},
-    node::{self, Container},
+    factory::{Factory, Root, RuntimeIds, ScriptData},
+    node::{self, Container, GameInstance},
 };
 use slr_vm::{
     host::{marshal_args, CallInfo, VmHost},
@@ -14,14 +14,21 @@ struct World {
     ids: RuntimeIds,
     library: Root,
     game: Root,
+    materialisation: Vec<(u32, String)>,
 }
 thread_local! { static WORLD: RefCell<Option<World>> = const { RefCell::new(None) }; }
 
 pub fn configure(config: Option<u32>, init: Option<u32>) {
     node::reset_res();
     let (library, game) = node::with_res(|h| {
-        let library = h.add_container(Container::new(8, 1));
-        let game = h.add_container(Container::new(1, 4));
+        let mut library = Container::new(8, 1);
+        library.flags = 0;
+        let library = h.add_container(library);
+        let mut game = Container::new(1, 4);
+        game.flags = 1;
+        game.load_state = 1;
+        game.instance = Some(GameInstance::default());
+        let game = h.add_container(game);
         h.bind_id(1, library);
         h.bind_id(4, game);
         (library, game)
@@ -30,9 +37,12 @@ pub fn configure(config: Option<u32>, init: Option<u32>) {
     for id in [config, init].into_iter().flatten() {
         ids.reserve(id);
     }
+    let mut factory = Factory::default();
+    factory.fresh_empty_parents.insert(game);
     WORLD.with(|w| {
         *w.borrow_mut() = Some(World {
-            factory: Factory::default(),
+            factory,
+            materialisation: vec![],
             ids,
             library: Root {
                 resource_id: 1,
@@ -51,7 +61,7 @@ pub fn write_trace(output: &std::path::Path) -> Result<(), String> {
         let w = w.borrow();
         let Some(w) = w.as_ref() else { return Ok(()); };
         std::fs::write(output.join("factory-operations.txt"), format!(
-            "CONTROLLED seed=1; supplied Config/Init IDs reserved; original pre-Config allocation history not replayed\nroots replay-local system.rpk:1/type8 and system.rpk:4/type1\n{:#?}\ninstances={:#?}\n", w.factory.events, w.factory.instances))
+            "CONTROLLED loaded fresh-empty game parent; external descriptors supplied in RPK inheritance order; no general package manager parity\nmaterialisation={:#?}\nCONTROLLED seed=1; supplied Config/Init IDs reserved; original pre-Config allocation history not replayed\nroots replay-local system.rpk:1/type8 and system.rpk:4/type1\n{:#?}\ninstances={:#?}\n", w.materialisation,w.factory.events, w.factory.instances))
             .map_err(|e| format!("FactoryTraceBoundary: {e}"))
     })
 }
@@ -110,7 +120,18 @@ fn create(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), String> {
         let w = world.as_mut().ok_or("factory world is not installed")?;
         let requested = if requested == 0 {
             w.factory.default_for_class(w.library, class, &class_name, &mut || w.ids.allocate())?.id
-        } else { requested };
+        } else {
+            if !w.factory.templates.contains_key(&requested) {
+                let phases=super::RES.with(|r| r.borrow().template_phases(requested))?;
+                let mut data=ScriptData::default();
+                for (id,text) in phases {
+                    data.apply(&text,&mut |name| vm.loader.request(name).map_err(|e|format!("template script {name}: {e:?}"))?.ok_or_else(||format!("template script class {name} missing")))?;
+                    w.materialisation.push((id,text));
+                }
+                w.factory.install_script_template(requested,w.library,&data)?;
+            }
+            requested
+        };
         let root = match owner_container {
             Some((container, id)) if container != 0 => Root {resource_id:id,container:Some(container)},
             _ => w.game,
@@ -128,4 +149,14 @@ pub fn create_native_instance(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u3
         vm.native_failure = Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
     }
     None
+}
+
+/// Original creation uses the same game-root owner for Config and GameInit.
+pub fn attach_created(link: node::ScriptLink) -> Result<(), String> {
+    WORLD.with(|w| {
+        let w = w.borrow();
+        let w = w.as_ref().ok_or("factory world not installed")?;
+        let parent = w.game.container.ok_or("game root missing")?;
+        node::with_res(|h| h.append_child(parent, link.container))
+    })
 }

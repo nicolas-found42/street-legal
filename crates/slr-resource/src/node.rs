@@ -402,6 +402,7 @@ pub fn link_created_script(
             return Err("created resource ID or script object already registered".into());
         }
         let mut container = Container::new(1, resource_id);
+        container.flags = 0x21;
         container.instance = Some(GameInstance {
             script: object,
             ..GameInstance::default()
@@ -535,6 +536,12 @@ pub struct Container {
     pub first_child: u32,
     /// Next sibling (+4); a terminal sentinel has no next sibling.
     pub next_sibling: u32,
+    /// Previous child, or parent word as the typed head sentinel.
+    pub previous_sibling: u32,
+    /// Last live child, excluding the terminal sentinel.
+    pub last_child: u32,
+    /// Typed terminal child sentinel; its next_sibling is zero.
+    pub children_sentinel: u32,
     /// `+0x48` — the handle list's head node.
     pub head: u32,
     /// `+0x4c` — the type id.
@@ -543,6 +550,8 @@ pub struct Container {
     pub id: u32,
     /// `+0x54` — the flags word.
     pub flags: u32,
+    /// `+0x64` — load-state bits, distinct from descriptor flags (+0x54).
+    pub load_state: u32,
     /// `+0xcc` — the WT root container.
     pub wt_root: u32,
     /// `+0x6c` — the render detail word `getDetail` reads.
@@ -559,10 +568,14 @@ impl Container {
             parent: 0,
             first_child: 0,
             next_sibling: 0,
+            previous_sibling: 0,
+            last_child: 0,
+            children_sentinel: 0,
             head: 0,
             type_id,
             id,
             flags: 0,
+            load_state: 0,
             wt_root: 0,
             detail: 0,
             instance: None,
@@ -759,6 +772,47 @@ impl ResHost {
         self.next_container = self.next_container.wrapping_add(0x100);
         self.containers.insert(word, container);
         word
+    }
+
+    /// Append to the original two-sentinel child list. Sentinel addresses are
+    /// represented as typed handles, with the parent word denoting the head.
+    /// exe: FUN_00536a10
+    pub fn append_child(&mut self, parent: u32, child: u32) -> Result<(), String> {
+        let p = self.containers.get(&parent).ok_or("child parent missing")?;
+        let (tail, mut sentinel) = (p.last_child, p.children_sentinel);
+        if p.first_child != 0 && sentinel == 0 {
+            return Err("parent has an unmodelled child list".into());
+        }
+        let c = self
+            .containers
+            .get(&child)
+            .ok_or("child container missing")?;
+        if parent == child
+            || c.previous_sibling != 0
+            || c.next_sibling != 0
+            || (c.parent != 0 && c.parent != parent)
+        {
+            return Err("child is already attached or has a different parent".into());
+        }
+        if sentinel == 0 {
+            sentinel = self.add_container(Container::new(0, 0));
+            self.containers.get_mut(&parent).unwrap().children_sentinel = sentinel;
+        }
+        let c = self.containers.get_mut(&child).unwrap();
+        c.parent = parent;
+        c.previous_sibling = if tail == 0 { parent } else { tail };
+        c.next_sibling = sentinel;
+        if tail == 0 {
+            self.containers.get_mut(&parent).unwrap().first_child = child;
+        } else {
+            self.containers
+                .get_mut(&tail)
+                .ok_or("child tail missing")?
+                .next_sibling = child;
+        }
+        self.containers.get_mut(&parent).unwrap().last_child = child;
+        self.containers.get_mut(&sentinel).unwrap().previous_sibling = child;
+        Ok(())
     }
 
     /// The container behind a word.
@@ -1494,7 +1548,7 @@ impl ResHost {
     }
 
     /// The container a lookup by id answers, if one is registered.
-    fn container_for_id(&self, id: u32) -> Option<u32> {
+    pub fn container_for_id(&self, id: u32) -> Option<u32> {
         if id == 0 {
             return None;
         }

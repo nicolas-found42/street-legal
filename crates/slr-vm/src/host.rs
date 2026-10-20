@@ -508,6 +508,8 @@ pub struct VmHost {
     /// unavailable. Checked before invoking a native, preserving named stops.
     pub native_boundary: Option<NativeBoundary>,
     pub native_failure: Option<String>,
+    /// Last failed field/class initializer, preserved before VM error encoding.
+    pub initializer_failure: Option<String>,
     /// Original diagnostic-only conditions during field/class initialization.
     pub initialization_diagnostics: Vec<InitializationDiagnostic>,
     /// Embedding guard for nested initializer bodies (default32). This is a
@@ -615,6 +617,7 @@ impl VmHost {
             native_observer: None,
             native_boundary: None,
             native_failure: None,
+            initializer_failure: None,
             initialization_diagnostics: vec![],
             initializer_depth_limit: 32,
             initializer_depth: 0,
@@ -1029,6 +1032,12 @@ impl VmHost {
             Ok(())
         })();
         self.initializing_classes.remove(&context);
+        if let Err(error) = &result {
+            self.initializer_failure = Some(format!(
+                "{}: {error:?}",
+                self.loader.class_name(class).unwrap_or("<stale class>")
+            ));
+        }
         result
     }
 

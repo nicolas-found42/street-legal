@@ -1,6 +1,7 @@
-//! Default GameType template/native instance creation over a declared resource
-//! world. Compiled constructors, spatial children and external templates remain
-//! explicit boundaries; no script constructor is entered by this native path.
+//! GameType template/native instance creation over a declared resource world.
+//! Script-only text and the fresh-empty loaded parent branch are supported.
+//! Compiled constructors and spatial/physics parent branches fail closed; no
+//! script constructor is entered by this native path.
 use crate::node::{self, Container, GameInstance};
 use slr_vm::vmclass::ClassId;
 use std::collections::{HashMap, HashSet};
@@ -47,6 +48,7 @@ pub struct Instance {
     pub flags: u32,
     pub quality: u32,
     pub words: [u32; 2],
+    pub range_bits: [u32; 2],
 }
 
 /// Original ushort free stack. Reserving supplied IDs declares earlier
@@ -108,6 +110,8 @@ pub struct Factory {
     /// Fresh type1 constructor starts at 0x21. Controlled callback probes can
     /// supply zero storage instead; this seam does not describe fresh objects.
     pub initial_instance_flags: u32,
+    /// Only the declared, already materialized, fresh empty type1 parent branch.
+    pub fresh_empty_parents: HashSet<u32>,
 }
 impl Default for Factory {
     fn default() -> Self {
@@ -118,6 +122,7 @@ impl Default for Factory {
             instances: HashMap::new(),
             created_count: 0,
             initial_instance_flags: 0x21,
+            fresh_empty_parents: HashSet::new(),
         }
     }
 }
@@ -150,8 +155,11 @@ impl Factory {
             c.flags = 2;
             let c = host.add_container(c);
             host.bind_id(id, c);
-            c
-        });
+            if let Some(parent) = root.container {
+                host.append_child(parent, c)?;
+            }
+            Ok::<_, String>(c)
+        })?;
         self.events.push(Event::Retain);
         self.events.push(Event::Data);
         let template = Template {
@@ -165,6 +173,43 @@ impl Factory {
         self.templates.insert(id, template.clone());
         Ok(Some(template))
     }
+    /// Install a decoded script-only type8 template over fresh constructor data.
+    /// Package lookup/inheritance is supplied by the caller and remains logged.
+    pub fn install_script_template(
+        &mut self,
+        id: u32,
+        parent: Root,
+        data: &ScriptData,
+    ) -> Result<Template, String> {
+        if let Some(t) = self.templates.get(&id) {
+            return Ok(t.clone());
+        }
+        let class = data.class.ok_or("type8 template has no script class")?;
+        let container = node::with_res(|h| {
+            if h.container_for_id(id).is_some() {
+                return Err("external template ID already belongs to another container".into());
+            }
+            let mut c = Container::new(8, id);
+            c.flags = 0;
+            let c = h.add_container(c);
+            h.bind_id(id, c);
+            if let Some(parent) = parent.container {
+                h.append_child(parent, c)?;
+            }
+            Ok::<_, String>(c)
+        })?;
+        let t = Template {
+            id,
+            container,
+            class,
+            quality: 1f32.to_bits(),
+            words: data.words,
+            compiled_constructor: false,
+        };
+        self.templates.insert(id, t.clone());
+        Ok(t)
+    }
+
     /// The wrapper caches a default type per retained class record (+0x1d4).
     pub fn default_for_class(
         &mut self,
@@ -209,8 +254,21 @@ impl Factory {
         if template.compiled_constructor {
             return Err("compiled GameType constructor is not installed".into());
         }
-        if root.container.is_some() {
-            return Err("parented native instance inheritance is not installed".into());
+        if let Some(parent) = root.container {
+            if !self.fresh_empty_parents.contains(&parent)
+                || !node::with_res(|h| {
+                    h.container(parent).is_some_and(|c| {
+                        c.type_id == 1
+                            && c.load_state & 1 != 0
+                            && c.detail == 0
+                            && c.instance
+                                .as_ref()
+                                .is_some_and(|i| i.info.is_none() && !i.member)
+                    })
+                })
+            {
+                return Err("parented native instance inheritance requires the declared loaded fresh-empty type1 profile".into());
+            }
         }
         self.events.push(Event::Call("0x536ed0"));
         let id = allocate();
@@ -233,9 +291,12 @@ impl Factory {
             });
             let c = h.add_container(c);
             h.bind_id(id, c);
+            if let Some(parent) = root.container {
+                h.append_child(parent, c)?;
+            }
             let retained = h.add_bound_node(request, template.container);
-            (c, retained)
-        });
+            Ok::<_, String>((c, retained))
+        })?;
         for call in [
             "0x544b90",
             "instance-data",
@@ -260,9 +321,44 @@ impl Factory {
             flags: self.initial_instance_flags | 0x200,
             quality: 1.0f32.to_bits(),
             words: template.words,
+            range_bits: [0, 0],
         };
         self.created_count = self.created_count.wrapping_add(1);
         self.instances.insert(id, instance.clone());
         Ok(Some(instance))
+    }
+}
+
+/// Measured high-quality text parser branch over fresh type8 constructor data.
+/// Unsupported descriptor commands fail closed before a native instance exists.
+#[derive(Debug)]
+pub struct ScriptData {
+    pub class: Option<ClassId>,
+    pub words: [u32; 2],
+}
+impl Default for ScriptData {
+    fn default() -> Self {
+        Self {
+            class: None,
+            words: [1f32.to_bits(), 0],
+        }
+    }
+}
+impl ScriptData {
+    /// exe: FUN_005461a0
+    pub fn apply(
+        &mut self,
+        text: &str,
+        request: &mut impl FnMut(&str) -> Result<ClassId, String>,
+    ) -> Result<(), String> {
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut words = line.split_whitespace();
+            match (words.next(), words.next(), words.next()) {
+                (Some("script"), Some(name), None) => self.class = Some(request(name)?),
+                (Some("lod_amp"), Some("1.000"), None) => self.words[0] = 1f32.to_bits(),
+                _ => return Err(format!("unsupported type8 descriptor line {line:?}")),
+            }
+        }
+        Ok(())
     }
 }

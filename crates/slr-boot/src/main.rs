@@ -55,6 +55,41 @@ impl Resources {
         };
         Ok(((i as u32) << 16) | (id & 0xffff))
     }
+    fn template_phases(&self, id: u32) -> Result<Vec<(u32, String)>, String> {
+        if id >> 16 != 0 {
+            return Err(format!(
+                "external template package {:#x} is not installed",
+                id >> 16
+            ));
+        }
+        let p = &self.packages.first().ok_or("system.rpk not installed")?.1;
+        let mut next = id;
+        let mut visited = std::collections::HashSet::new();
+        let mut phases = vec![];
+        while next != 0 {
+            if !visited.insert(next) {
+                return Err("type8 inheritance cycle".into());
+            }
+            let e = p
+                .entries
+                .iter()
+                .find(|e| e.type_id == next)
+                .ok_or_else(|| format!("missing type8 resource {next:#x}"))?;
+            if e.typeof_ != 8 || e.flags != 0 {
+                return Err(format!(
+                    "unsupported external template {next:#x} kind={} flags={}",
+                    e.typeof_, e.flags
+                ));
+            }
+            phases.push((next, p.descriptor(e)));
+            next = e.super_id;
+        }
+        phases.reverse();
+        if phases.len() != 2 || phases[0].0 != 1 {
+            return Err(format!("unsupported external template hierarchy for {id:#x}: only a direct child of system.rpk library root1 is installed"));
+        }
+        Ok(phases)
+    }
     fn script(&self, id: u32) -> Result<String, String> {
         let p = &self
             .packages
@@ -283,6 +318,7 @@ fn run(
     println!("CONTROLLED Config created resource ID={created:#010x}; original startup allocation history not replayed");
     let link = slr_resource::node::link_created_script(vm, object, created)
         .map_err(|e| format!("ConfigNativeLinkBoundary: {e}"))?;
+    factory::attach_created(link).map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
     println!("BOOT Config native link {link:?}");
     let mut thread = Thread::new();
     vm.enter_method(
@@ -329,6 +365,7 @@ fn run(
         .map_err(|e| format!("GameInit allocation: {e:?}"))?;
     let link = slr_resource::node::link_created_script(vm, object, created)
         .map_err(|e| format!("GameInitNativeLinkBoundary: {e}"))?;
+    factory::attach_created(link).map_err(|e| format!("GameInitChildRegistrationBoundary: {e}"))?;
     println!("CONTROLLED GameInit created ID={created:#010x}; native link {link:?}");
     let mut thread = Thread::new();
     vm.enter_method(
@@ -447,6 +484,9 @@ fn execute() -> Result<(), String> {
         if let Some(failure) = vm.native_failure {
             return format!("{error}; NativeBackendBoundary: {failure}");
         }
+        if let Some(failure) = vm.initializer_failure {
+            return format!("{error}; InitializerBoundary: {failure}");
+        }
         if let Some(native) = vm.missing_native {
             format!("{error}; NoBody: {native}")
         } else {
@@ -459,5 +499,47 @@ fn main() {
     if let Err(error) = execute() {
         eprintln!("STOP {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn external_template_hierarchy_scope_fails_closed() {
+        let mut bytes = b"RPAK".to_vec();
+        for word in [0x200u32, 0, 0, 0, 0, 0, 0] {
+            bytes.extend(word.to_le_bytes());
+        }
+        let mut package = Package::parse(bytes).unwrap();
+        for (id, parent) in [(1, 0), (27, 1), (28, 27), (2, 0), (3, 2)] {
+            package.entries.push(slr_fmt_rpak::Entry {
+                super_id: parent,
+                type_id: id,
+                typeof_: 8,
+                flags: 0,
+                is_parent_compatible: 1.0,
+                rsd_offset: 0,
+                rsd_size: 0,
+                alias: String::new(),
+                spatial: None,
+            });
+        }
+        let resources = Resources {
+            root: PathBuf::new(),
+            packages: vec![("system.rpk".into(), package)],
+        };
+        assert_eq!(
+            resources
+                .template_phases(27)
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect::<Vec<_>>(),
+            vec![1, 27]
+        );
+        for id in [28, 3, 1, 0x1001b] {
+            assert!(resources.template_phases(id).is_err(), "{id:#x}");
+        }
     }
 }
