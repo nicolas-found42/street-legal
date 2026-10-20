@@ -170,3 +170,19 @@ Field paths: `class`, `name`, `method`, `kind`, `op`, `path`, `report`,
 `result`, `args[i]`, `detail[i]`, `stack[i]`, `frame`, `pc`,
 `control_word`, `pos[i]`, `ypr[i]`, `vel[i]`, `rpm`, `gear`.
 ```
+
+## Inspecting a runtime capture
+
+Decode every record with its zero-based ordinal:
+
+```sh
+cargo run -q -p slr-calllog --bin slr-calllog-inspect -- re/out/boot/runtime.calllog
+```
+
+The text view preserves raw handles, byte arrays and floating-point bit words.
+It validates the existing binary format and exits 2 on an I/O/decode error.
+It does not normalize identities or establish parity. Compare compatible
+original/port captures with `slr-calllog-diff`; a controlled function probe's
+JSONL cannot be passed off as an original startup call log. The current
+headless-original oracle stops before script execution, so there is no original
+script-call prefix available for comparison yet.

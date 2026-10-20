@@ -10,3 +10,7 @@ thiserror = "2"
 [[bin]]
 name = "slr-calllog-diff"
 path = "src/bin/slr-calllog-diff.rs"
+
+[[bin]]
+name = "slr-calllog-inspect"
+path = "src/bin/slr-calllog-inspect.rs"
