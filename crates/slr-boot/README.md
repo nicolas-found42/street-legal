@@ -16,9 +16,13 @@ single-player parity.
 The driver verifies the stock manifest, loads system.rpk, initializes the loader,
 requests its two eager classes, installs available native implementations, finds
 the Config RPK entry, and allocates its unchanged script class. With the explicit
-instance-ID input it runs the unchanged Config constructor, reads `Config.init`,
-and resolves that resource's script class. It stops before the unported native
-settings application (`FUN_00427bf0`). Global package indices are a replay-local
+instance-ID input it runs the unchanged Config constructor, then applies
+Config's settings through the port of `FUN_00427bf0`, preserving ordered raw
+global words and optional absent-field state. It declares an absent renderer
+backend and takes original `FUN_004fc590`'s measured no-op branch. It then reads
+`Config.init`, resolves that resource's script class, and stops at
+`GameInitCreationBoundary` before creating or executing GameInit. Global package
+indices are a replay-local
 namespace; their equality to original startup is not established.
 
 Script file operations use a fresh complete copy under ignored
@@ -27,7 +31,11 @@ call-log format to `re/out/boot/runtime.calllog`. Standard output reports the
 ordered driver boundaries and standard error reports exact execution stops;
 redirect both to `re/out/boot/runtime.txt` to inspect a replay. Missing native
 stops include class, method and signature. Graphics/audio/input remain explicit
-headless logging hosts.
+headless logging hosts. Config reads, settings writes and the final refresh
+request are inspectable in `re/out/boot/settings-operations.txt`. This includes
+PC24 x87 gamma reciprocal, texture quality multiplication/truncation and FFB
+scaling. Controlled original settings rows cover both optional-field branches;
+refresh rows establish only the absent-backend branch used by this profile.
 
 Original oracles used by the VM fixes: original `FUN_0041fbc0` null-body dispatch
 under Unicorn (`re/oracle/vm_empty_dispatch_probe.py`, six cases), and static
@@ -38,6 +46,6 @@ headless-original startup still stops before script execution. Consequently
 there is no original script-call prefix available for an execution comparison.
 
 Pending boot work includes native registration order/full surface, actual
-resource creation and native/script linking, settings application, GameInit
-creation, scheduler/native-thread wiring and monotonic clock/pacing. The current
+resource creation and native/script linking, present-backend graphics refresh,
+GameInit creation, scheduler/native-thread wiring and monotonic clock/pacing. The current
 frontier deliberately exits with a nonzero status.

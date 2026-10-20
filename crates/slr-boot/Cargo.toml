@@ -15,3 +15,6 @@ slr-render-natives = { path = "../slr-render-natives" }
 slr-input = { path = "../slr-input" }
 slr-sound = { path = "../slr-sound" }
 slr-x87 = { path = "../slr-x87" }
+
+[dev-dependencies]
+serde_json = "1"

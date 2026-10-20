@@ -16,12 +16,12 @@ python3 re/progress.py
 
 | Measure | Handoff baseline (`7caab32`) | Current integration |
 |---|---:|---:|
-| Generated ledger symbol rows | 430 | 478 |
-| Rows with passing evidence | 321 | 360 |
+| Generated ledger symbol rows | 430 | 480 |
+| Rows with passing evidence | 321 | 362 |
 | Ported rows without registered passing evidence | 109 | 118 |
-| Unique annotated addresses | 423 | 476 |
-| Ghidra function entries with an annotation | 200 / 4,356 | 229 / 4,356 |
-| Ghidra function entries with passing evidence | 151 / 4,356 | 170 / 4,356 |
+| Unique annotated addresses | 423 | 478 |
+| Ghidra function entries with an annotation | 200 / 4,356 | 231 / 4,356 |
+| Ghidra function entries with passing evidence | 151 / 4,356 | 172 / 4,356 |
 | Native registrations with exact ledger symbol | 108 / 353 | 178 / 353 |
 | Native registrations with exact symbol and passing evidence | 85 / 353 | 158 / 353 |
 | Native registrations with any annotation at the same address | 173 / 353 | 205 / 353 |
@@ -42,7 +42,7 @@ existing tests exercise null/error envelopes or injected engine seams; inspect
 them before extending any exactness claim to live engine paths.
 
 The baseline `cargo test --workspace` passed (106 successful test-result
-summaries). Current ledger collection passed 455/455 evidence rows. These are test-to-symbol evidence rows, distinct from the 360 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
+summaries). Current ledger collection passed 457/457 evidence rows. These are test-to-symbol evidence rows, distinct from the 362 passing symbol rows. Language wrapper additions and real File.move coverage increase evidence; removal of duplicate aliases and unexercised File.move/File.copy claims corrects earlier overstatements.
 
 An interner audit also removed `FUN_004174a0` from the math oracle's passing
 claims. That probe replaces the helper with a callback that records output bytes
@@ -58,21 +58,23 @@ implementation.
   13 recovered original Unicorn selection rows (5 path, 6 directory, 2 file).
   The new `slr-boot` command executes unchanged Config bytecode with an explicitly
   supplied created-instance ID and a fresh writable copy under ignored `re/out/`.
-  A root run of `cargo run -q -p slr-boot -- stock --config-instance-id 123`
-  completed Config's constructor, read `Config.init`, resolved its stock RPK
-  target to `java.game.Init`, then exited at `NativeSettingsBoundary`
-  (`FUN_00427bf0`). The default stops at `ResourceCreationBoundary`; original
+  A controlled run of `cargo run -q -p slr-boot -- stock --config-instance-id 123`
+  completed Config's constructor, applied 37 stock settings global words and
+  original refresh's explicitly absent-backend branch, then read `Config.init`
+  and resolved its stock RPK target to `java.game.Init`. It now exits at
+  `GameInitCreationBoundary`: GameInit's created ID/native link remain missing.
+  The default stops at `ResourceCreationBoundary`; original
   pre-Config allocation history is not pinned. The runtime has 192 registered
   keys and 191 implementation addresses, including seven Controller rows
   outside the 353-row table. This is not a complete native surface.
   Native calls are inspectable in `re/out/boot/runtime.calllog`; no original
   script-call prefix exists yet for whole-boot comparison. Original oracles
   actually run: controlled Unicorn creation-bridge, null-body dispatch,
-  field-flag, resource-ID and File.exists/delete probes. These do not execute
-  original script bodies. Full root checks pass: 909 tests, formatting, Clippy,
-  ledger 455/455 and regeneration without drift. Settings, actual creation/link
-  history, GameInit execution, scheduler/thread wiring and MainMenu remain open;
-  parity is still 0/30. Probe scope and reproducible commands are in
+  field-flag, resource-ID, settings/refresh and File.exists/delete probes.
+  These do not execute original script bodies. Workspace checks pass: 911 tests, formatting, Clippy,
+  ledger 457/457 and regeneration without drift. Actual creation/link
+  history, present-backend refresh, GameInit execution, scheduler/thread wiring
+  and MainMenu remain open; parity is still 0/30. Probe scope and reproducible commands are in
   `docs/research/boot-sequence.md` and `crates/slr-boot/README.md`.
 
 - **Request-driven loader:** the recovered original-executable selection oracle

@@ -1,4 +1,5 @@
 //! Headless stock bootstrap. All script bodies come from the read-only install.
+use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{
     host::{CallInfo, VmHost},
@@ -135,7 +136,56 @@ fn install(vm: &mut VmHost) {
     slr_sound::install_headless(vm);
     vm.native_observer = Some(observe);
 }
-fn run(root: &Path, vm: &mut VmHost, config_instance_id: Option<u32>) -> Result<(), String> {
+struct ConfigSource<'a> {
+    vm: &'a mut VmHost,
+    object: u32,
+}
+impl Source for ConfigSource<'_> {
+    fn read(&mut self, kind: Kind, name: &'static str) -> Result<u32, String> {
+        let value = match self.vm.read_field(self.object, name) {
+            Ok(value) => value,
+            Err(slr_vm::host::HostError::MissingMember) if kind == Kind::Has => return Ok(0),
+            Err(error) => return Err(format!("Config.{name}: {error:?}")),
+        };
+        if kind == Kind::Has {
+            return Ok(1);
+        }
+        let expected = if kind == Kind::Float {
+            slr_vm::values::TypeTag::Float
+        } else {
+            slr_vm::values::TypeTag::Int
+        };
+        if value.tag != expected {
+            return Err(format!(
+                "Config.{name} expected {expected:?}, found {:?}",
+                value.tag
+            ));
+        }
+        Ok(value.payload)
+    }
+}
+fn apply_settings(vm: &mut VmHost, object: u32, output: &Path) -> Result<Settings, String> {
+    use std::io::Write;
+    let mut settings = Settings::default();
+    let outcome = settings.apply(&mut ConfigSource { vm, object });
+    let mut log = std::io::BufWriter::new(
+        std::fs::File::create(output.join("settings-operations.txt"))
+            .map_err(|e| format!("SettingsLogBoundary: {e}"))?,
+    );
+    for event in &settings.events {
+        writeln!(log, "{event:?}").map_err(|e| format!("SettingsLogBoundary: {e}"))?;
+    }
+    log.flush()
+        .map_err(|e| format!("SettingsLogBoundary: {e}"))?;
+    outcome?;
+    Ok(settings)
+}
+fn run(
+    root: &Path,
+    vm: &mut VmHost,
+    config_instance_id: Option<u32>,
+    output: &Path,
+) -> Result<(), String> {
     RES.with(|r| {
         let mut r = r.borrow_mut();
         r.root = root.into();
@@ -195,6 +245,13 @@ fn run(root: &Path, vm: &mut VmHost, config_instance_id: Option<u32>) -> Result<
     thread
         .run(vm, 0.0, &mut || X87::from_f64(0.0))
         .map_err(|e| format!("Config constructor: {e:?} pc={:?}", thread.pc))?;
+    let mut settings = apply_settings(vm, object, output)?;
+    println!(
+        "BOOT settings global words={} final refresh requested",
+        settings.globals.len()
+    );
+    settings.finish_refresh(false)?;
+    println!("CONTROLLED original refresh absent-backend branch: no handle writes or engine calls");
     let init = vm
         .read_field(object, "init")
         .map_err(|e| format!("Config.init: {e:?}"))?
@@ -202,9 +259,7 @@ fn run(root: &Path, vm: &mut VmHost, config_instance_id: Option<u32>) -> Result<
     println!("BOOT Config.init={init:#010x}");
     let script = RES.with(|r| r.borrow().script(init))?;
     println!("BOOT GameInit resource={init:#010x} class={script}");
-    Err(format!(
-        "NativeSettingsBoundary: FUN_00427bf0 has not run; resolved Config.init={init:#010x}"
-    ))
+    Err("GameInitCreationBoundary: Config/settings completed in controlled headless profile; GameInit created resource ID and native link are not installed".into())
 }
 /// Fresh writable filesystem projection. No script I/O points at stock.
 fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -277,7 +332,7 @@ fn execute() -> Result<(), String> {
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
     let mut vm = VmHost::new();
-    let outcome = run(&root, &mut vm, config_instance_id);
+    let outcome = run(&root, &mut vm, config_instance_id, &output);
     let file = std::fs::File::create(output.join("runtime.calllog"))
         .map_err(|e| format!("CallLogBoundary: {e}"))?;
     let mut writer =

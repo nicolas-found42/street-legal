@@ -565,6 +565,7 @@ version = "0.1.0"
 name = "slr-boot"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "slr-calllog",
  "slr-fmt-rpak",
  "slr-input",
