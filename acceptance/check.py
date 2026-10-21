@@ -142,9 +142,11 @@ def main(argv: list[str]) -> int:
     print(render(rows, statuses))
     unmet = [row["id"] for row in rows if row.get("status") != "passed"]
     if unmet:
+        counts = Counter(row.get("status") for row in rows)
         print(
-            f"\nACCEPTANCE NOT MET: {len(unmet)} of {len(rows)} obligations open"
-            f" ({', '.join(unmet[:12])}{' ...' if len(unmet) > 12 else ''})",
+            f"\nACCEPTANCE NOT MET: {len(unmet)} of {len(rows)} obligations not passed"
+            f" ({counts['open']} open, {counts['partial']} partial;"
+            f" {', '.join(unmet[:12])}{' ...' if len(unmet) > 12 else ''})",
             file=sys.stderr,
         )
         return 1
