@@ -80,11 +80,40 @@ received as its receiver. So the port's native instances carry a script where
 the original's have none. That is a resource-model defect in how
 `createNativeInstance` publishes its container, not a logging or ordering bug.
 
-Both changes were reverted; the tree is back at the `fe6f2e5` baseline. The next
-attempt should make `createNativeInstance` publish a container whose
-`instance.script` is 0 (and confirm `instance.child`/`child_script` handling for
-type 8), then re-add the `queue_event` record above and re-measure. That should
-keep record 156 aligned and move the frontier back to 620 with the row present.
+Both experiments were reverted; the tree is back at the `fe6f2e5` baseline.
+
+The defect is now identified precisely.
+`main.rs:633` binds the `GameType.createNativeInstance` row (`0x00481a70`) to
+`factory::create_native_instance`, which simply calls `factory::create`.
+`create` unpacks its argument container as
+`[receiver, owner, template, parameters, name]` (`factory.rs:985`), matching
+`GameRef.create`'s `(GameRef, GameRef, String, String)`; but
+`createNativeInstance`'s registered descriptor is
+`(Ljava.util.resource.GameRef;ILjava.lang.String;Ljava.lang.String;)V`
+(`slr-lang/src/langobj/gametype.rs:264`). So a whole-number second argument is
+read as an `owner` GameRef, `instantiate` publishes a scripted container for a
+call that creates a native instance, and `instance.script` is left holding the
+receiver word (the `4219` the probe saw). That is why the port reports a live
+script where the original's `vtable+0xc` returns 0.
+
+The fix is to implement `0x481a70` on its own terms — `this` is the object whose
+`Native.ptr` is rewritten in place, the second argument is the resource to
+instantiate (not an owner), and no new script object is allocated — instead of
+routing it through `create`. Until then, emitting the `getScriptInstance` row
+from `queue_event` will keep moving the frontier backwards to record 156.
+
+That rewrite was attempted and reverted: routing the call to
+`instantiate(.., script = 0, ..)` with the receiver's class as the default
+template fails closed at
+`GameInit constructor: Unsupported(36)` inside
+`Dummy.<init> -> Dummy.<init>(GameRef;I) -> Dummy.<init>(GameRef)`. `0x36` is
+`HostError::NoBody`: `instantiate`'s default-template branch needs a script body
+for the class, while `0x481ae8` caches a *native* template built by `0x53a1a0`
+that deliberately has none. So `instantiate` needs an explicit native-template
+path (cached per class at `X+0x1d4`, no script body, no `<init>` run) before
+`0x481a70` can be ported. Adding that path without a real template registry
+entry would be a shim, so it was not attempted.
+
 
 The clock-replay `THRD-RUNVMI Dummy.getInfo` vs `THRD-INSTVAR-INI` mismatch
 remains the other blocker at this frontier; it is independent of this one.
