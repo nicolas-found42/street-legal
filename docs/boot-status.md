@@ -287,6 +287,38 @@ Fixing this one line removes the `currentTime` flood, restores the `sleep`-drive
 frame loop, and is the single highest-value change available: it addresses the
 46 % of port native calls that the original does not make.
 
+### The trigger is `Osd.isFocused` reading a residual local slot
+
+`idleFor` node 3 (`0x0024`, line 258) enters the script method `Osd.isFocused()I`,
+and node 6 (`0x1015 imm=0x10`) then decides whether to skip the waiting block.
+The port takes the loop-back edge at node 26→0 without blocking, so the wait is
+never entered.
+
+`Osd.isFocused` is body 127 (19 nodes) and opens:
+
+    0 op=0x101b   FieldRef
+    1 op=0x101b   FieldRef
+    2 op=0x1007 imm=0x9   sub-op 9 = `local9 <= ...`
+    3 op=0x0005   `&&` short-circuit
+    4 op=0x1014 imm=0xb   jump to 11
+    5 op=0x1027 imm=0
+    6 op=0x0024   CallResolved -> java.util.Vector.lastElement
+
+`0x1007` is not a field read: it is `sub_op`, and `imm=9` is the `<=` operator
+(see the `0x1 => logical_or … 0x9 => le` table in `interp.rs`). So the guard
+compares local slot 9, and `isFocused()I` declares no parameters and never
+writes that slot — it reads whatever the frame's slot 9 already held. The
+original reads a zero there and returns 0; the port reads a live value, returns
+1, and `idleFor` skips the blocking branch.
+
+This is the same family as the ADR 0007 exceptions: original behaviour that
+depends on residual, uninitialised frame state. Reproducing it needs the
+original's slot-residue rule for this call graph, which the retained capture does
+not record — the call log carries natives only, not script step traces. Until
+that rule is established (a targeted Unicorn trace of `0x41fbc0` around this
+body, or a documented decision to initialise the slot), the frame-loop inversion
+cannot be closed, and the 620-record frontier stands.
+
 ### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
 
 331 of the 336 `lastKey` calls come from one site: `java.render.Osd.animate()V`
