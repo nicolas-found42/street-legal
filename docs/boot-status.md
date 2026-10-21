@@ -611,12 +611,34 @@ frame 179. It runs `SplashScreen.exit()` at 146691 and then continues for anothe
 251 000 sequence numbers. A single scheduler tick therefore executes the entire
 remaining boot.
 
-`Scheduler::tick` (`sched.rs:687`) drains the fairness queue, runs callbacks,
-swaps the thread queues once, and hands them to the runner. If the handler is only
-ever entered on the last frame, the cause is upstream of `dispatch`: either the
-thread is created that late, or it sits in a wait/ready queue that only drains
-then. That is where to look next — `Scheduler::tick`'s queue handoff against the
-original's per-frame round-robin.
+**The collapse is not a scheduler or clock effect.** Running the same boot with
+`--clock-step` at 0.01, 0.5 and 5.0 - a 500-fold change in how fast the simulated
+clock advances per read - leaves `queueEvent` at exactly `{None: 4, 179: 64}` in
+all three runs. The scheduler's time slice is therefore not what parks the
+handler.
+
+The event stream shows what does. Frames 0-178 each carry 29-130 records; frame
+179 carries **47 436**. The transition at sequence 146660-146669 is:
+
+    146661  thread_return   Osd.animate()V               (frame 178)
+    146662  render-frame-notify  monitor 0x100b, woken []
+    146665  frame-enter      frame 179
+    146666  native-player-frame  container 0x00615e00 phase=control
+    146667  resource-retain  node 5245792 container 8711936
+    146668  store            Object{word:5292, slot:0} = 5245792
+    146669  thread_run       SplashScreen.handleEvent  thread 596
+
+So on the first frame after the animating `Osd` retires, the player's `control`
+phase retains a resource node and stores it into object `0x14AC`, and only *then*
+is the `SplashScreen.handleEvent` thread created and run to completion. The
+ordering is inverted relative to a live splash screen: the handler is created
+after the screen's own exit path has already been reached, which is why it can
+run `SplashScreen.exit()` at 146691 and still keep draining to 397705.
+
+Next step: find why `SplashScreen.handleEvent` is created at that point rather
+than when the screen's events are first queued - i.e. what in the
+`native-player-frame` control phase triggers it, and whether the original creates
+it during `enter()` instead.
 
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
