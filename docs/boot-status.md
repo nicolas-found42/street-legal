@@ -256,6 +256,37 @@ frame loop at all, and the one-slot offset is a symptom, not the cause.
 calls to a native the stock boot does not use means a script path is being
 chosen that the original never takes.
 
+### The sleep/currentTime inversion has one site
+
+Every port `currentTime` call has a call site, and they collapse to one line:
+
+| site | calls |
+|---|---|
+| `java.render.Osd.idleFor(F)I` line 259 | 329 |
+| `Osd.show(I)V` line 793 | 4 |
+| `Osd.activateText(...)` line 315 | 2 |
+| `Osd.idleFor(F)I` line 267 | 2 |
+| `Vehicle.<init>` line 68 | 1 |
+
+329 of 338 come from `Osd.idleFor(F)I` line 259, all on the `Osd;.animate`
+thread. The original's 313 `Thread.sleep` calls are the same count in the same
+place, so this is one script line resolving to `System.currentTime` in the port
+and to `Thread.sleep` in the original — not a distributed scheduling drift.
+
+`idleFor` is body 69 (52 nodes) and its loop is visible in the bytecode: node 0
+loads, node 1 is `0x1015 imm=0x1a` (the guard), nodes 2-11 are the poll body and
+node 26 (`0x1014 imm=0x12`) is the back edge. The port's step trace shows
+`idx=1 ... COND payload=0x1` taking the jump to 26 and back to 0, i.e. the loop
+spins without ever blocking. The next step is to resolve which method the
+`0x101b`/`0x1019`/`0x101a` node triple at 7/8/9 actually names — the constant
+pool is not a flat string table (offset `0x14a` names `java.render.osd.Menu`,
+`0x14e` names `ALIGN_LEFT`), so the name must be read through `Module::strings`
+plus the pool layout rather than assumed to be a direct index.
+
+Fixing this one line removes the `currentTime` flood, restores the `sleep`-driven
+frame loop, and is the single highest-value change available: it addresses the
+46 % of port native calls that the original does not make.
+
 ### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
 
 331 of the 336 `lastKey` calls come from one site: `java.render.Osd.animate()V`
