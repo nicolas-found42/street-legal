@@ -560,6 +560,64 @@ self-consistent, so the defect is in *which* container each side names —
 exactly the `FUN_0042ab50(this, DAT_0062e008)` indirection in `FUN_0048d3d0` that
 the port collapses to `container_of(receiver)`.
 
+### The mask bookkeeping is correct; the commands arrive after the subscriber exits
+
+Container IDs settle the "wrong object" hypothesis — they match exactly:
+
+    SETMASK   receiver=0x1016 container=0x614400 id=Some(4294901884) mask=0x10010
+    DISPATCH  container=0x614400           id=Some(4294901884) mask=0x2 instance_mask=0x0
+
+Same container, same id. The mask really was registered and really was `0` at
+delivery time, because `Dialog.hide()V` line 184 clears it:
+
+    CLEARMASK container=0x614400 mask=0xfffffff      <- Dialog.hide()V:184
+
+The full lifecycle of `Osd` `0x1016`, by event sequence number:
+
+| seq | call |
+|---|---|
+| 10138 | `setEventMask` from `osd.dialog.Dialog.show()V:177`, mask `0x10010` |
+| 110310 | `clearEventMask` from `osd.dialog.Dialog.hide()V:184`, mask `0xfffffff` |
+| 154164 | first `queueEvent(0x10)` from `GameRef.command()V:83` |
+
+So the subscriber is gone 44 000 native calls before the first event it would
+have wanted arrives. Dropping them is correct behaviour, not a mask bug.
+
+The real defect is upstream, and it is a scheduling collapse rather than an
+event bug. Every `queueEvent` in the whole run lands on **one frame**:
+
+    queueEvent by frame: [(179, 64), (None, 4)]
+
+and the `SplashScreen.handleEvent` thread has a total lifetime *inside* frame
+179: its first record is sequence 146669 (`thread_run`, line 0, node 0) and its
+last is 397705, with not one record on any other frame. `SplashScreen.exit()` runs
+at 146691, inside that same window, so the thread starts, exits the screen, and
+then keeps draining to 397705.
+
+Before the first `GameRef.command` there is a burst of
+`Part.addPart(ILjava.lang.String;Ljava.game.parts.Descriptor;)` on the same
+thread, also on frame 179. So the whole resource-load / message sequence that the
+original spreads across the boot runs is collapsed into the frame the main menu
+completes, and by the time the commands are issued the dialogs that subscribed to
+them have already hidden.
+
+That is the defect to fix: **the SplashScreen handler thread is not being run
+until frame 179.** Everything downstream — the 131 mask drops, the 2-versus-69
+delivery count — follows from that.
+
+Thread 596 is that handler, and its whole life is 31 522 records from sequence
+146669 (`thread_run`, node 0) to 397705 (`thread_return`), every one of them on
+frame 179. It runs `SplashScreen.exit()` at 146691 and then continues for another
+251 000 sequence numbers. A single scheduler tick therefore executes the entire
+remaining boot.
+
+`Scheduler::tick` (`sched.rs:687`) drains the fairness queue, runs callbacks,
+swaps the thread queues once, and hands them to the runner. If the handler is only
+ever entered on the last frame, the cause is upstream of `dispatch`: either the
+thread is created that late, or it sits in a wait/ready queue that only drains
+then. That is where to look next — `Scheduler::tick`'s queue handoff against the
+original's per-frame round-robin.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames

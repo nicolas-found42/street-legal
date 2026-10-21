@@ -275,8 +275,9 @@ pub fn set_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
                 let w = words(info).unwrap_or_default();
                 eprintln!(
-                    "SETMASK receiver={:#x} container={c:#x} mask={mask:#x} script={:#x}",
+                    "SETMASK receiver={:#x} container={c:#x} id={:?} mask={mask:#x} script={:#x}",
                     w[0],
+                    with_res(|h| h.container(c).map(|x| x.id)),
                     script_of(c)
                 );
             }
@@ -291,7 +292,12 @@ pub fn set_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 pub fn clear_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let r = words(info).and_then(|w| Ok((receiver_container(info, &w)?, w[1])));
     match r {
-        Ok((c, mask)) => with(|s| *s.masks.entry(c).or_insert(0) &= !mask),
+        Ok((c, mask)) => {
+            if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
+                eprintln!("CLEARMASK container={c:#x} mask={mask:#x}");
+            }
+            with(|s| *s.masks.entry(c).or_insert(0) &= !mask)
+        }
         Err(e) => return fail(vm, info, e),
     }
     None
@@ -639,8 +645,9 @@ pub fn dispatch(
         }
     }
     if std::env::var_os("SLR_DISPATCH_TRACE").is_some() && instance_mask & mask == 0 {
+        let id = with_res(|h| h.container(container).map(|c| c.id));
         eprintln!(
-            "DROP_MASK container={container:#x} mask={mask:#x} instance_mask={instance_mask:#x}"
+            "DROP_MASK container={container:#x} id={id:?} mask={mask:#x} instance_mask={instance_mask:#x}"
         );
     }
     if instance_mask & mask != 0 && script != 0 && !native_consumed {
