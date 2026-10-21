@@ -344,19 +344,51 @@ call chain is now measured end to end.
     6-8:   resetSelection()
     10-13: controlMode = 1
 
-sets `controlMode` only on the first `show`. A write trace on instance slot 52
-confirmed the whole run performs exactly three `controlMode = 1` stores and
-**zero** `controlMode = 0` stores. The clear is dead code: both `idleFor` return
-paths (nodes 18-19 and 50-51) yield 0, and `0x1015` at node 307 jumps on a zero
-value to node 316, stepping over 308-315.
+sets `controlMode` only on the first `show`. A write trace on instance slot 52 over a
+200-frame run recorded only `Int/1` stores on the three `Osd` instances and
+**zero** `controlMode = 0` stores (the remaining hits are other classes whose
+layout happens to put a field at slot 52, e.g. `osd.Slider`).
 
-That makes the two engines agree on the *script*, so the 329-versus-16
-`currentTime` gap is not explained by `controlMode` alone. It is recorded here
-as the open question rather than as a fix: either the original's `animate` is
-not entered every frame for this instance (the port's `animate` does reach node
-295 each frame), or `idleFor` returns non-zero on a path the port does not
-model. Resolving it needs the original's per-frame `Osd.animate` entry count,
-which no retained capture currently carries.
+That is surprising, because `idleFor`'s two exit sequences end in `0x002b`,
+which is `ret(host, true)` — a **value-carrying** return, not a plain one — so
+`idleFor` does not always answer 0 and the `0x1015` at node 307 does not always
+jump. The clear at 308-315 should therefore be reachable in at least some
+frames. It is not, in this run.
+
+Both candidate causes for the always-zero answer are now **excluded**, and the
+mechanism is fully traced:
+
+```
+STEP idleFor(F)I idx=49 op=002b        <- ret(with_value = true)
+  RET value tag=Int payload=0x0
+STEP animate()V idx=305 op=1007 imm=27 <- sub-op 0x1b: no case, a no-op here
+STEP animate()V idx=306 op=1007 imm=2
+STEP animate()V idx=307 op=1015 imm=9
+  COND value tag=Int payload=0x0
+```
+
+`ret` restores the pc and pushes the callee's value correctly, and the two
+`0x1007` fixups do not replace it. The zero is `idleFor`'s **own** answer, and it
+is correct for the branch it took. `idleFor` has two exit expressions:
+
+| exit | bytes | answer |
+|---|---|---|
+| nodes 7-20 (line 259) | `(lastUserActivityTimeStamp + dt) < currentTime()` | `lt`, node 16 sub-op `0x0b` |
+| nodes 44-49 (line 272) | f32 `0.0` literal | constant 0 |
+
+The port takes the line-265/272 branch (`idx=27`, then 38-43), which sets
+`focusTracker = 1`, refreshes `lastUserActivityTimeStamp`, and returns `0.0`
+meaning "nothing left to wait for". `0x1015` at 307 therefore jumps, `controlMode`
+is never cleared, and the next frame re-enters with the flag still set.
+
+Every step of that chain matches the script. So either the original's
+`lastUserActivityTimeStamp + 1.0 < currentTime()` becomes true for this instance
+— which needs its clock to advance differently than the port's per-frame
+`advance_ms(1000/60)` — or the original's `animate` is not entered for this
+container on most frames. Distinguishing them needs the original's per-frame
+`Osd.animate` entry count or its `currentTime` values, neither of which the
+retained captures carry. That is the one genuinely missing input, and it is
+recorded as such rather than papered over.
 
 The port's `Thread.sleep` counts are already right (333 against the original's
 313), so frame pacing itself is not the divergence.
