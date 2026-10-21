@@ -202,6 +202,130 @@ Two edits were tried here and reverted, each measured:
   (`0x41400000` against `0x41f00000`). The `Dummy` path needs the constructor
   call the original performs, not a shortcut around it.
 
+## Ordinal 446: the refresher's first iteration is missing a clock read (2026-10-21)
+
+Aligning the two logs by filtered ordinal removes the noise and leaves a
+one-position offset:
+
+| ordinal | original | port |
+|---|---|---|
+| 443 | `GameType.addTimer` | `GameType.addTimer` |
+| 444 | `Object.wait` | `Object.wait` (`LoadingScreen;<1010>`) |
+| 445 | `Thread.sleep` | `Thread.sleep` (`Hotkey watcher`) |
+| 446 | `System.currentTime` | `Object.wait` (`Game time refresher`) |
+| 447 | `Object.wait` | `System.currentTime` (`Osd;.animate`) |
+| 448 | `System.currentTime` | `Thread.sleep` (`LoadingScreen;<1010>`) |
+
+Every call is present on both sides; the refresher thread's `wait` arrives one
+slot early in the port, pushing the rest down. The port's own event stream shows
+why: after `thread_run`, the refresher emits `ThreadEnter`, then one
+`ThreadPoll` at `java.game.GameLogic.run()V` line 563 node 2, then `wait` at line
+565 node 8 — no native call in between. The original performs a
+`System.currentTime` in that window, and the record is filtered-true, so it comes
+from script, not from VM bookkeeping.
+
+`Thread.sleep` is confirmed correct: `0x47c650` forwards to `0x41f630`, which is
+`deadline = 0x5516c0() + duration; flags |= 8` and does **not** move the thread
+between queues. `Object.wait` is confirmed correct: `0x47c920` forwards to
+`0x408b20`, whose thread half `0x41f650` unlinks from the run queue, sets `0x10`
+and appends to the notify queue — matching `Monitor::wait` in `monitor.rs`. The
+defect is therefore in which script nodes `GameLogic.run` executes between the
+poll and the wait, not in either native.
+
+### The port polls where the original sleeps
+
+Counting thread primitives across each full run makes the shape of the
+divergence unambiguous:
+
+| native | original (6508 calls) | port (8208 calls) |
+|---|---|---|
+| `Thread.sleep` | 313 | 112 |
+| `System.currentTime` | 16 | 338 |
+| `Input.lastKey` | 0 | 336 |
+| `Object.wait` | 7 | 4 |
+
+The original drives its main loop with `Thread.sleep`: ordinals 447-531 are an
+almost unbroken run of `sleep` calls, and `currentTime` appears 16 times in the
+whole run. The port inverts it — 338 `currentTime` and 336 `lastKey` against 112
+`sleep` — so `Osd.animate` busy-waits on the clock and the keyboard instead of
+sleeping. That is why ordinal 446 shows `currentTime` in the original and a
+waiting thread in the port: the two programs are not executing the same kind of
+frame loop at all, and the one-slot offset is a symptom, not the cause.
+
+`Input.lastKey` is the sharpest signal: **the original never calls it.** 336 port
+calls to a native the stock boot does not use means a script path is being
+chosen that the original never takes.
+
+### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
+
+331 of the 336 `lastKey` calls come from one site: `java.render.Osd.animate()V`
+source line 557, body 76, node 291. The guard is three nodes earlier:
+
+    281 op=0x1007 imm=27   line=553   load this
+    282 op=0x1001 imm=0    line=553   push null
+    283 op=0x1007 imm=7    line=553   load this.<field 7>
+    284 op=0x1015 imm=191  line=650   if (payload == 0) goto node 191
+
+Field 7 of `Osd` names `RID_ARROWRG` (own-field record 7 is string index 46, a
+`Ljava.util.resource.ResourceRef;` slot). So line 557's block is
+`if (this.RID_ARROWRG != null) { ... Input.lastKey() ... }`, and the port takes it
+while the original does not. `SLR_TRACE_STEPS=1` confirms the port executes
+nodes 285-296 and loops back to 281 without ever taking the `goto 191` edge.
+
+That makes the remaining question concrete and testable: why does the port's
+`Osd` hold a non-null `RID_ARROWRG` at animate time when the original's does not.
+It is a resource-population difference in whichever setup assigns that slot —
+not a scheduler, script-body or native issue.
+
+`Osd.<init>(FFI)` alone does not assign it. Its whole executed trace is nodes
+0,2,3,5,7,8,9,11,12,14,15,16,17,18,19,20 — node 15-16 is `push 7; CallInit`
+(an object array) and node 20 is `0x002a` (return). The slot is filled later, by
+`Osd.<init>(Viewport)` or by the `setup`/`createButton` path, so the next probe is
+a write-watch on that field across the whole `Osd` lifetime rather than a read of
+one constructor.
+
+
+
+### The loop body, decoded
+
+`GameLogic.run` is body 87 (43 nodes). `SLR_TRACE_STEPS=1` on the port shows only
+four of them executed before the thread parks:
+
+    idx=0 op=1007 line=563   load this
+    idx=2 op=1015 line=575   conditional jump to node 0x27 (39)
+    idx=3 op=1027 line=565   push int 0
+    idx=4 op=0024 line=565   CallResolved -> Object.wait()
+
+Node 1 (`0x100b`) never appears, and `idx=2` carries `imm=0x27` with the *loop's*
+line number, so node 2 is the loop guard and nodes 39-40
+(`0x1008`, `0x1014 imm=-0x28`) are its back edge. There is **no `currentTime`
+node anywhere in this body** — the port executes the whole body correctly and
+still parks in `wait` before any `currentTime` appears.
+
+That rules out a missing script call and points at queue order instead: the
+port's `thread_run` sequence is LoadingScreen (seq 113204), Hotkey watcher
+(113217), Game time refresher (113241), `Osd;.animate` (113258). `Thread.start`
+appends at the queue tail (`ThreadList::append`), so the refresher really does
+sit ahead of `Osd;.animate`, and the port's first `currentTime` therefore lands
+after the refresher's `wait`. The original has them the other way round: its
+`currentTime` comes before the refresher's `wait`. The observable defect is the
+order in which `GameLogic` starts those two threads, not the body of `run` and
+not either native.
+
+### Reading a stock script body
+
+`slr_fmt_tufa::parse` plus `Module::trees` decodes every `TREE` body of a stock
+class, and `module.strings` holds the name/type pool. A throwaway
+`cargo run -p slr-boot --example ...` that prints `node.opword`, `operand` and
+`imm` for one body answers "what does this script actually do" without a new
+tool: `0x1027` pushes `imm` as an int, `0x0023` is `CallSuperInit`, `0x0024` is
+`CallResolved`, `0x4025`/`0x4026` are instance/static calls, `0x0010` stops the
+body. `Module::methods` returns raw `MTHD` records whose fields are not yet
+decoded, so mapping a global `BodyId` back to a class-local body index still
+needs `Host::body_label` or the loader's `body_id_of`. The classes have 100
+bodies each; `GameLogic`'s two largest are body 71 (594 nodes, a constructor —
+it opens with `CallSuperInit`) and body 96 (608 nodes).
+
 ## Two frontiers, and the reason they differ (2026-10-21)
 
 The strict probe has two distinct stopping points and they must not be
