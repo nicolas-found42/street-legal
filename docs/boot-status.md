@@ -7,7 +7,91 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 Last updated: 2026-10-21, branch `exact-port`. See the cfg-handler parity section first.
 
-## cfg handler oracle: full leaf parity (2026-10-21, later than the section below)
+## Boot frontier: record 620, investigated 2026-10-21 (after `fe6f2e5`)
+
+Reproduce:
+
+    python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 331 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl
+
+Result: filtered/actual 4170 vs 6508, unfiltered/actual 6278 vs 9209, first
+divergence at filtered 620 / unfiltered 909. The port emits
+`GameRef.queueEvent [0, 16, 5460]` where the original emits
+`GameRef.getScriptInstance -> 559164976` and *then* `queueEvent`.
+
+Findings this pass, each checked against the exe and the recorded traces:
+
+- The row is registered. `re/out/native_api.tsv:299` has
+  `java.util.resource.GameRef getScriptInstance ()Ljava.lang.Object; LAB_00486f30`,
+  `GAME_REF_BINDINGS` carries it, and `node::install` registers it. It is not a
+  missing-row gap.
+- The port never executes the script call either: the whole run contains zero
+  `getScriptInstance` records, and `missing_native` is never set to it. So the
+  divergence is not a dropped log line.
+- `0x486f30` has no direct call site in the image; its only reference is the
+  registrar table entry at `0x48977e`. It is reached through the object vtable.
+- The original records it from `FUN_004265c0` at `0x426642`, i.e. after the
+  `cmp eax,1` instance gate (`0x426604`) and the `0x5447d0` envelope gate
+  (`0x426629`), before the `0x426653` mask test.
+- Emitting that record unconditionally from `engine::dispatch` when
+  `script != 0` moved the first divergence *backwards* to record 156 (an
+  original `File.open` position), adding 126 records that the original does not
+  have. That edit was reverted. It shows the port's `script_of` is not
+  equivalent to the original's `0x429060` + `vtable+0xc` pair: at record 156 the
+  original's `[ecx+0x4c] != 1` or its `esi` is zero while the port has a live
+  script.
+- `queueEvent` argument slots in `queue_event` (`w[0]` receiver, `w[1]`
+  ResourceRef, `w[2]` kind, `w[3]` String) match `marshal_args`, which places
+  the receiver last. Changing the target to `w[1]` and adding a default-resource
+  fallback changed nothing observable and was reverted.
+
+`0x429060` is now disassembled and is the missing piece. It is an intrusive
+list re-link with `ret 4`: `ecx` is a four-word record, `edi` the new parent.
+It unlinks `ecx` from its old list, writes `[ecx+4] = [edi+0x44+4]`,
+`[ecx+0xc] = edi`, `[ecx+8] = [edi+0x50]`, and links `ecx` under `edi`.
+`0x4265c8` passes `edi = [target+0xc]` (the target's container `X`) and
+`0x4265cc` passes `ecx = esp+8`, a scratch four-word record cleared at
+`0x4265d0..0x4265e8`.
+
+The follow-on read `0x4265f5 mov ecx,[esp+0x10]` was resolved empirically
+(Unicorn, `Oracle.call(0x4265c0, [node,0,0,0,0])` with `[node+0xc] = X`,
+`X+0x4c = 1`, `X+0x50 = 0xbeef`, `X = 0x20000000`): at `0x426601` `ecx` is
+`X` itself, and `[X+0x4c]` reads `1`. So `0x4290bf mov [ecx+0xc], eax` does
+write the container into the scratch record and the later load returns it. The
+gate is a real type check on the event target's container (`X+0x4c == 1`), not
+stack residue. An earlier note in this file claiming stack residue was wrong
+and is corrected here.
+
+So the port's `is_type1` check in `engine::dispatch` *is* the equivalent gate,
+and the remaining discrepancy is the target's script-ness, not the gate.
+
+Locating it further: a scoped `getScriptInstance` record emitted from
+`queue_event` before `bridge` (type-1 target, per-container gate clear,
+`script != 0`) produced 4233 filtered records and moved the first divergence
+to record 156, where the original has `java.io.File.open`. Walking the two
+lists there gives the reason: the `queueEvent` at port 157 corresponds to the
+original's 156, and the original has **no** `getScriptInstance` before it. That
+event's target came from `GameType.createNativeInstance` (port 154 / original
+154) — a native instance, whose `vtable+0xc` returns 0, so the original skips the
+whole block.
+
+The port instead reports a non-zero script for that container: the scoped probe
+read `script = 4219` for target `0x615e00`, which is the very word `queue_event`
+received as its receiver. So the port's native instances carry a script where
+the original's have none. That is a resource-model defect in how
+`createNativeInstance` publishes its container, not a logging or ordering bug.
+
+Both changes were reverted; the tree is back at the `fe6f2e5` baseline. The next
+attempt should make `createNativeInstance` publish a container whose
+`instance.script` is 0 (and confirm `instance.child`/`child_script` handling for
+type 8), then re-add the `queue_event` record above and re-measure. That should
+keep record 156 aligned and move the frontier back to 620 with the row present.
+
+The clock-replay `THRD-RUNVMI Dummy.getInfo` vs `THRD-INSTVAR-INI` mismatch
+remains the other blocker at this frontier; it is independent of this one.
+
+## cfg handler oracle: full parity, leaves and handlers (2026-10-21)
+
+Pushed as `fe6f2e5`.
 
 `cargo test -p slr-physics --test cfg_handlers_oracle` is green: 1091 leaf rows
 exercised, 1080 replayed bit-exactly against the Unicorn vectors, 10 rows the
@@ -43,9 +127,13 @@ Fixes in this pass (all verified against `re/out/cfg_handlers/leaves_*.jsonl`):
   the transposed matrix then multiplied by the stored matrix (`0x46d5c4`
   through `0x46d696`).
 
-Still open on this frontier: nothing in the leaf vectors. The wider handler
-run (`cfg_handlers_match_unicorn_vectors`) and the rest of P01-P30 remain as
-described below.
+The wider run is green too:
+
+    cargo test -p slr-physics --test cfg_handlers_oracle cfg_handlers_match -- --nocapture
+
+reports `files=2037 exercised=42635 matched=42635 distinct_kw=53
+nondet_skipped=14 unported_skipped=0 uncovered_unexpected=0`. Both cfg-frontier
+obligations are closed; the rest of P01-P30 remain as described below.
 
 ## Active ownership and verified baseline (2026-10-21, superseding 2026-10-20 pause)
 
@@ -421,7 +509,10 @@ listed here. A clean test suite alone does not satisfy this definition.
 * Missing linked packages (stock links `obstacles\*.rpk`, which the media lacks) get
   declared placeholder roots.
 
-## Frontier (next stops, in order)
+## Frontier (historical; superseded by the 2026-10-21 section at the top)
+
+This list predates the current checkpoint. Read the top section first; the
+current frontier is record 620 / 909 and the clock-replay thread identity.
 
 1. Filtered native #446 and node #65018: scheduler/time-budget ordering.
    The original uses the declared instruction-count-driven QPC scenario;
