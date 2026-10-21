@@ -522,7 +522,45 @@ in `createButton` appears only on the diagnostic harness path, and the honest
 statement is that the no-replay run reaches the menu while the deterministic
 replay does not yet reproduce the original's schedule.
 
-### Root cause found: the missing deliveries are internal `0x10000` dispatches
+### Corrected counts: the events are generated, the masks land on the wrong objects
+
+Earlier text in this section used 1041 `queueEvent` calls. **That was a counting
+error**: `events.jsonl` emits several record kinds per native call, and only the
+`native_enter` rows are calls. Counting only `native_enter` on a full 700-frame
+boot (`20261021T...`, run `final2`) gives:
+
+| native | port | original |
+|---|---|---|
+| `queueEvent` | **68** | 69 |
+| `setEventMask` | 27 | — |
+| `clearEventMask` | 19 | — |
+| `lastKey` | 705 | 0 |
+| `currentTime` | 707 | 16 |
+| `sleep` | 235 | 313 |
+
+So event **generation** already matches the original almost exactly (68 against
+69). Nothing is being swallowed at the call site. The loss is entirely on the
+delivery side: `dispatch` is entered 134 times on that run, delivers twice, and
+`DROP_MASK` fires **131** times while `DROP_TYPE` fires **zero**. The type gate
+never rejects anything.
+
+The mismatches are systematic, not incidental:
+
+    SETMASK receiver=0x1016 container=0x614400 mask=0x10010
+    SETMASK receiver=0x101d container=0x614700 mask=0x110000
+    SETMASK receiver=0x1486 container=0x84f100 mask=0x110000
+
+    DROP_MASK container=0x616200 mask=0x10 instance_mask=0x0
+    DROP_MASK container=0x855000 mask=0x10 instance_mask=0x0
+    DROP_MASK container=0x868a00 mask=0x2  instance_mask=0x0
+
+The masks are registered on one set of containers and the events target a
+**disjoint** set. Both sides resolve through `container_of`, and both are
+self-consistent, so the defect is in *which* container each side names —
+exactly the `FUN_0042ab50(this, DAT_0062e008)` indirection in `FUN_0048d3d0` that
+the port collapses to `container_of(receiver)`.
+
+### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
 records every `dispatch` entry and the mask that was registered for the target:

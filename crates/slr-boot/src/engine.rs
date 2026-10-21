@@ -604,6 +604,9 @@ pub fn dispatch(
         );
     }
     if !is_type1 {
+        if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
+            eprintln!("DROP_TYPE container={container:#x} mask={mask:#x}");
+        }
         return Ok(());
     }
     // FUN_004265c0 first offers the event to the native object's vtable +0x38.
@@ -634,6 +637,11 @@ pub fn dispatch(
                 _ => {}
             }
         }
+    }
+    if std::env::var_os("SLR_DISPATCH_TRACE").is_some() && instance_mask & mask == 0 {
+        eprintln!(
+            "DROP_MASK container={container:#x} mask={mask:#x} instance_mask={instance_mask:#x}"
+        );
     }
     if instance_mask & mask != 0 && script != 0 && !native_consumed {
         if matches!(kind, 1 | 4 | 0x20 | 0x40) {
