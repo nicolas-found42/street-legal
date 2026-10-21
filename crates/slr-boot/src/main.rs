@@ -676,6 +676,33 @@ fn install(vm: &mut VmHost) {
     vm.native_thread_hook = Some(sched::hook);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
+    if std::env::var_os("SLR_NATIVE_AUDIT").is_some() {
+        audit_natives(vm);
+    }
+}
+
+/// Report how many of the registered natives still dispatch to `capture_only`.
+fn audit_natives(vm: &VmHost) {
+    let placeholder: fn(&mut VmHost, &CallInfo<'_>) -> Option<u32> = capture_only;
+    let (mut real, mut stub, mut unbound) = (0usize, 0usize, 0usize);
+    let mut stubs: Vec<String> = Vec::new();
+    for record in vm.natives.sorted() {
+        match vm.native_impls.get(&record.impl_addr) {
+            None => unbound += 1,
+            Some(f) if std::ptr::fn_addr_eq(*f, placeholder) => {
+                stub += 1;
+                stubs.push(format!(
+                    "{}.{}{} @ {:#010x}",
+                    record.key.class, record.key.name, record.key.sig, record.impl_addr
+                ));
+            }
+            Some(_) => real += 1,
+        }
+    }
+    println!("NATIVE_AUDIT real={real} capture_only={stub} unbound={unbound}");
+    for row in stubs {
+        println!("NATIVE_STUB {row}");
+    }
 }
 struct ConfigSource<'a> {
     vm: &'a mut VmHost,

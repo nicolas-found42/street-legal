@@ -87,6 +87,121 @@ yields 151 idle frames. Both halves of the boot endpoint therefore remain open:
 the replay mismatch blocks the run, and filtered native-log equality fails at
 record 620 regardless.
 
+## Gate B inventory: 245 of 353 natives implemented (2026-10-21)
+
+Measured, not inferred. `SLR_NATIVE_AUDIT=1` runs `audit_natives` after every
+install site has run and classifies each of the 353 registered rows by the
+function pointer it actually dispatches to:
+
+    NATIVE_AUDIT real=245 capture_only=113 unbound=0
+
+| class family | capture-only rows |
+|---|---|
+| `java.util.resource` | 61 |
+| `java.game.parts` | 44 |
+| `java.game.Vehicle` | 3 |
+| `java.game.Painter` | 3 |
+| `java.game.Navigator` | 1 |
+| `java.game.GameLogic` | 1 |
+| **total** | **113** |
+
+Gate B ("all 353 registered natives implemented and registered by original
+address") reads 245/353. No row is unbound, so nothing fails to resolve; the
+gap is behaviour, not wiring.
+
+**A count of `missing_rows::MISSING` is not this number.** That table is the
+input to `capture_only`, but `parts.rs`, `part_render.rs`, `wheel.rs` and
+`resource_identity.rs` deliberately re-register a subset of those rows with real
+implementations afterwards, overwriting both the record and `native_impls`.
+Reading the table alone yields 170 and understates the port by 57 rows.
+`re/out/boot/native-installed.tsv` and `native-missing.tsv` date from
+2026-10-19, predate those installers, and should not be cited. `re/build_native_table.py`
+still rebuilds `native_api.tsv` (the 353-row registry) from the binary.
+
+## Two parallel native implementations; only one is wired (2026-10-21)
+
+The port carries two independent models of the same natives, and the stock boot
+can only execute one of them.
+
+| | `slr-lang/src/langobj/*` | `slr-boot/src/{factory,node}.rs` |
+|---|---|---|
+| fidelity | exe-faithful branch/loop structure, calls `0x53a2a0`, `0x546070`, `0x404ea0`, `0x42ab50` by address | port-native reimplementation over `VmHost` objects |
+| backend | `langobj::engine::Engine` trait | `VmHost` + `slr-resource::node` |
+| installed in production | **no** — `langobj::engine::install` is called only from `slr-lang/tests/engine_oracle.rs` | yes |
+
+`main.rs:621` runs `langobj::gametype::install(&mut table)` and `main.rs:622`
+`langobj::install(vm, &table)`, which registers those bodies by original address.
+`main.rs:633` then **overwrites** `0x00481a70` with
+`factory::create_native_instance`, because the `langobj` body would call
+`with_engine(...)`, which `expect`s an installed backend and would panic.
+
+So the faithful `GameType.createNativeInstance` (`gametype.rs:148`, which passes
+the receiver as the script identity to `0x53a2a0`) is dead code on the boot path,
+and the `factory` version runs instead. That is the mechanical origin of the
+record-620 divergence: `factory::create_native_instance` decodes the arguments
+as `create` does — `[receiver, owner, template, parameters, name]` — but the
+fifth slot of the real signature is a request id, so `ref_container` reads an
+integer as a GameRef.
+
+Closing this needs one of two things, and the choice should be recorded before
+either is built:
+
+1. Implement `langobj::engine::Engine` over the production `VmHost`/resource
+   world so `slr-lang`'s faithful native bodies can run, then delete the
+   `factory` overrides. This is the route that keeps ADR 0004's
+   function-level-port requirement satisfied by construction.
+2. Port the remaining `langobj` bodies into the `factory`/`node` idiom and stop
+   registering the `langobj` table at all.
+
+Option 1 is cheaper per native and does not duplicate behaviour, but it commits
+the boot path to the `Engine` ABI for every `GameType`/`System`/`Thread` call.
+Option 2 keeps one ABI but requires rewriting every `langobj` function that is
+not yet expressed in `factory` form.
+
+## Record 620 is a script branch, not a missing native (2026-10-21)
+
+Re-measured on `33ccb95` with the fixed clock
+(`--clock-replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`):
+filtered 620 with 4170 port records, unfiltered 909 with 6278.
+
+The original's calls at ordinals 614-620:
+
+    614 ResourceRef newNative
+    615 GameRef     create              -> 559164976
+    616 Part        setWear             (1.0)
+    617 Part        setTear             (1.0)
+    618 ResourceRef id
+    619 GameRef     getScriptInstance  -> 559164976
+    620 GameRef     queueEvent
+
+The port at the same ordinals:
+
+    614 GameType    createNativeInstance
+    615 GameRef     setFlags
+    616 GameRef     clearFlags
+    617 GameType    setEventMask
+    620 ResourceRef duplicate, inside `java.render.RectangleTemplate.<init>`
+
+`GameRef.getScriptInstance` is **registered and installed**: it is absent from
+`NATIVE_STUB` and `0x486f30` carries a body. The port is not failing to answer
+it — it never reaches the script node that calls it, because the `Dummy.<init>`
+path emits a `createNativeInstance` the original does not, and the following
+calls diverge from there. That makes record 620 an object-construction ordering
+defect first and an event-path symptom second.
+
+Two edits were tried here and reverted, each measured:
+
+- `node::install` re-run after `CREATE`/`CREATE_NATIVE` were bound. It uses
+  `insert`, so it replaced `factory::game_ref_create` with the generic bridge and
+  the run collapsed to 444 filtered records. The existing single install site is
+  correct and must stay where it is.
+- `createNativeInstance` rewritten to reuse its receiver as the script identity
+  and to resolve the receiver class for the `resource == 0` template. It builds
+  and starts, reaches MainMenu at 151 idle frames, but under the fixed clock the
+  replay collapses to 444 and aborts at record 135 on `System.currentTime`
+  (`0x41400000` against `0x41f00000`). The `Dummy` path needs the constructor
+  call the original performs, not a shortcut around it.
+
 ## Event dispatch: one delivery against the original's 69 (2026-10-21)
 
 Instrumenting `engine::dispatch` on the stock boot shows the port delivers
