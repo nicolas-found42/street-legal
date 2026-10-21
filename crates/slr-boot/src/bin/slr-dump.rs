@@ -42,6 +42,9 @@ fn main() {
             }
             continue;
         }
+        for f in &loader.find_by_id(id).unwrap().fields {
+            println!("FIELD {} {} static={}", f.name, f.ty, f.is_static);
+        }
         for m in &loader.find_by_id(id).unwrap().methods {
             if filter
                 .as_ref()

@@ -943,6 +943,22 @@ impl ResHost {
     }
 
     /// The node behind a word, mutably.
+    /// Every direct child container, in link order. The walk stops after
+    /// `limit` entries so a damaged sibling chain cannot loop forever.
+    #[must_use]
+    pub fn child_containers(&self, container: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut cursor = self.container(container).map_or(0, |c| c.first_child);
+        while cursor != 0 && out.len() < 1024 {
+            let Some(child) = self.container(cursor) else {
+                break;
+            };
+            out.push(cursor);
+            cursor = child.next_sibling;
+        }
+        out
+    }
+
     pub fn node_mut(&mut self, word: u32) -> Option<&mut Node> {
         self.nodes.get_mut(&word)
     }
@@ -2085,6 +2101,12 @@ fn resource_ptr_layout(vm: &VmHost, class: &slr_vm::vmclass::ClassRef) -> Option
         return None;
     }
     Some((slot, fields.len()))
+}
+
+/// Wrap `node` in the VM class the real factory selects for `ty`.
+/// exe: FUN_0047d300
+pub fn wrap_node(vm: &mut VmHost, node: u32, ty: u32) -> u32 {
+    vm_resource_wrapper(vm, node, ty)
 }
 
 /// Construct the wrapper class selected by the real resource factory.

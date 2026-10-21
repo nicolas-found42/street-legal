@@ -7,7 +7,7 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
-Last updated: 2026-10-21, branch `exact-port`, HEAD `a9784e2`.
+Last updated: 2026-10-21, branch `exact-port`.
 
 **Status is not prose any more.** `acceptance/matrix.json` is the one
 machine-readable inventory of the 54 obligations (P01–P30, G1–G11, S1–S13);
@@ -18,12 +18,20 @@ evidence (a `passed` row with no evidence, or a missing evidence path).
 
     54 obligations: 43 open, 11 partial, 0 passed
 
-**Single next blocker: S1 (boot endpoint).** The strict replay path stops at
-frame 31 on a thread-identity mismatch — the port reaches
-`THRD-INSTVAR-INI java.game.parts.Part <instance field init>` where the
-original replay expects `THRD-RUNVMI Dummy.getInfo` (row 7375 of
-`re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`). Latest
-receipt: `re/out/boot/runs/20261021T134225.455943Z-1b807ddf0283`.
+**Single next blocker: S1 (boot endpoint).** The strict replay now runs the
+original owner notification after every scripted `GameRef.create`: the created
+part's script is built, `Part.addpart` runs on the owner's script through
+`run_callback`, and the replay matches all 58 `THRD-RUNVMI prime.addpart`
+entries before the frontier. It stops at request ordinal 11604, where the original runs
+`THRD-RUNVMI prime.updatevariables` (`java.game.cars.Prime_models`) but the port
+still runs `THRD-RUNVMI Dummy.getInfo`. The trigger sits in the engine update
+path: original `Chassis.forceUpdate` (`0x43e320`) reaches `0x448430`, which calls
+`425a90(script, "updatevariables", 0x4f, 0x4f)`. The port registers `forceUpdate`
+as capture-only (`missing_rows.rs`), so the callback is never emitted. That row
+is the next native to implement; do not paper over it in the replay matcher.
+
+Latest receipt:
+`re/out/boot/runs/20261021T225949.421173Z-d8234b590c1f`.
 
 **Do not chase filtered record 447.** That frontier belongs to the *non-replay*
 run, whose clock advances 0.01 ms per read; the 10 ms scheduler budget therefore
