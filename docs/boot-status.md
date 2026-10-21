@@ -5,7 +5,14 @@ the cross-cutting gates in [fidelity.md](fidelity.md#whole-game-completion-contr
 Boot to MainMenu is a required intermediate milestone.
 This file is the handoff. Update it at every milestone; do not keep a second copy.
 
-Last updated: 2026-10-21, branch `exact-port`. See the cfg-handler parity section first.
+Last updated: 2026-10-21, branch `exact-port`, HEAD `35703ca`.
+
+**Read the first four sections in order.** They are the current state of
+work: the boot endpoint measurement, the record-620 frontier, the event
+dispatch gap, and the two-level gate that explains it. The cfg-handler parity
+section after them is closed work and can be skimmed. Everything under
+"Active ownership" and below is older context; the "Frontier" list there is
+explicitly marked superseded.
 
 ## Boot endpoint: 300 idle frames reached at a 600-frame budget (2026-10-21)
 
