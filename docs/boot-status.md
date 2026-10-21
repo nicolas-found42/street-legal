@@ -131,19 +131,37 @@ argument slot is a genuine zero, not a masked pointer, and
 resolve. `0x42ab5d` in `0x42ab50` dereferences `[edi+0x10]`, which means the
 word it receives is an object.
 
-The ABI is now settled from the disassembly, and it corrects the guess above:
-`0x42ab50` is `sub esp,0x20; push esi; mov esi,[esp+0x2c]; push edi;
-mov edi,[esp+0x2c]; mov ecx,[edi+0x10]; push esi; call 0x403820`. `0x47da51`
-pushes the object field id (`[0x62e008]` = 3) and `0x47da57` pushes the
-receiver, so `esi` = 3 and `edi` = the receiving `Native`. `0x42ab5d` then reads
-`[this+0x10]` — the receiver's `Native.ptr` — and `0x403820` looks up field 3 on
-it. So the target *is* derived from the receiver, exactly as the port's
-`container_of(w[0])` does, and the earlier hypothesis that the `ResourceRef`
-argument supplies it is wrong.
+A direct measurement on the headless original settles the input side. Hooking
+`0x481a15` (after `0x42ab50` in `setEventMask`) and the `0x4265f5`/`0x426601`
+window in one 200M-instruction run (`winmain_reached = true`) gives:
 
-That means the remaining gap is not target selection but why the port's
-`state.masks` (the model of `[X+0x70]`) holds `0x10` for `0x615e00` and `0` for
-`0x616200`, while the original delivers events on both.
+    setEventMask targets: 0x203030a0 0x204e6100 0x202f9e40 0x202ce300
+                          0x20a9bb80 0x205c86b0 0x20b065a0 0x20b05a40 0x20b02870
+    [esp+0x10] at 0x4265f5: 0x200045bc 0x20004874 0x20004874 0x20004874
+
+`ecx` at `0x4265f5` is the four-word scratch record's own stack address, but
+the word the very next instruction loads from `[esp+0x10]` is a **heap**
+pointer (`0x2000_...`), i.e. the container that `0x4290bf` stored into
+`[record+0xc]`. An earlier note in this file read the stale `ecx` at
+`0x4265f5` and concluded the gate depends on stack residue; that was wrong and
+is withdrawn. The gate really does test a container's `+0x4c`, as the
+disassembly says.
+
+Widening the hook to `0x481a15..0x426601` gives the container at the gate:
+`ecx` is `0x200045bc` (once) and `0x20004874` (three times) — heap containers
+again — and none of them appears among the nine `setEventMask` targets. So the
+original's event targets and its mask subscribers are genuinely different
+objects; the mask check therefore cannot be satisfied by the containers the
+port stores masks on, which is what its `instance-mask = 0` readings show.
+
+Nine mask targets against four gate hits in a 200M-instruction window also means
+most `queueEvent` calls never reach the gate within that budget, so these counts
+are not yet comparable to the 58/69 of the full accepted run.
+
+The remaining question is the branch layout between `0x426601` and the delivery
+at `0x426800` — specifically which word `0x426653 test [esi+0x70], ecx` reads
+(`esi` there is the value stored at `0x42664b`, not the gate's `ecx`). Reading
+`esi` at `0x426653` on the original is the next concrete probe.
 
 The writer of `[X+0x70]` is now known: `FUN_004819f0` (`GameType.setEventMask`)
 unpacks its arguments with `0x45d910`, resolves `0x42ab50(field id,
