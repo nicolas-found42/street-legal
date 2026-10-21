@@ -225,6 +225,11 @@ def run(script, dispatch_result=0, real_link=False, bound_request=False):
         # What decides getParentID for the created wrapper: the container the
         # node now sits in, and that container's +0x14 parent word.
         created_container = o.read_u32(native_ptr + 0xC)
+        parent_writers = [
+            {"addr": a, "size": n, "value": v}
+            for (a, n, v) in r.mem_writes
+            if created_container + 0x10 <= a < created_container + 0x18
+        ]
         # Does getParentID work when the container's +0x14 points at itself?
         saved = o.read_u32(created_container + 0x14)
         o.write_u32(created_container + 0x14, created_container)
@@ -264,6 +269,7 @@ def run(script, dispatch_result=0, real_link=False, bound_request=False):
             "node_container_parent": o.read_u32(created_container + 0x14),
             "node_container_id": o.read_u32(created_container + 0x50),
             "self_parent_getParentID": self_parent,
+            "parent_word_writes": parent_writers,
         }
     calls = [e["call"] for e in events]
     if script:

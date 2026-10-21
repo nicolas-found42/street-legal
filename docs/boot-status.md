@@ -898,6 +898,46 @@ will name the writer directly. Do not change `parent_id` or the factory's
 `c.parent = root.container` until that writer is named - the port's value is the
 owner, the original's is the resource itself, and the difference is one call.
 
+### FIXED: the created node belongs to the owner container
+
+The writer hunt above was the wrong question. `0x47d7b0` reaches
+`0x536890(owner, ...)`, whose body calls `0x536a10(parent, child, ...)` - the
+`append_child` already ported at `node.rs:794`. Its first formal is the parent, so
+the created node joins the **owner's** container. A write watch over a whole
+`53a5e0` call confirms the allocated container never receives it: zero writes in
+`created+0x10..+0x18`.
+
+`ResourceHost::create` was instead moving every created node into
+`created_result`, which gave all 116 `getParentID` calls one value
+(`4294901877`). `Part.addPart:714` compares that against the freshly read parent
+id, so the comparison was always false and the jump at node 135 skipped nodes
+136-156 - `addStockParts` (141) and `setTexture` (154) with them.
+
+Linking to the owner container restores the original counts:
+
+| native | oracle | before | after |
+|---|---|---|---|
+| `Part.setTexture` | 112 | 1 | **112** |
+| `Part.setWear` | 116 | 58 | **116** |
+| `Part.setTear` | 116 | 58 | **116** |
+| `Part.addStockParts` (script) | 116 | 2 | **116** |
+| `getParentID` values | 58 / 58 | 116 / 0 | **58 / 58** |
+
+`getParentID` now returns two values in the oracle's 58/58 shape (the second is
+`4`, not the oracle's `-65426`, so the value itself is still wrong - only the
+split is right).
+
+The filtered boot trace grows 6943 -> 7112 records. First divergence is
+unchanged at record 447 (`System.currentTime` on the `Osd.idleFor` thread versus
+`Object.wait` on `LoadingScreen.run`), which is the thread-interleaving frontier
+and the next thing to fix: the port runs `LoadingScreen.run` before the `Osd`
+animate thread. `wait`/`sleep`/`currentTime` totals already match (5/235/707), so
+this is ordering, not missing behaviour.
+
+Still open in this area: `getSlots` 1 vs 0 and `getSlotID` 76 vs 0 (the slot-table
+walk that follows `disableSlot`, which the port has not reached), and
+`ResourceRef.destroy` 19 vs 77.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
