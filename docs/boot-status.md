@@ -129,11 +129,37 @@ A further probe settles the input side: `marshal_args` reports the real
 argument slot is a genuine zero, not a masked pointer, and
 `container_of(0)` is `None`. So the port never had a non-null argument to
 resolve. `0x42ab5d` in `0x42ab50` dereferences `[edi+0x10]`, which means the
-word it receives is an object, not either slot as the port reads them; the
-remaining work is to establish `0x42ab50`'s exact ABI (which register and which
-stack word it uses, and what it returns for the null case) with a Unicorn
-call built from a real invocation rather than from the two guesses tried
-here.
+word it receives is an object.
+
+The ABI is now settled from the disassembly, and it corrects the guess above:
+`0x42ab50` is `sub esp,0x20; push esi; mov esi,[esp+0x2c]; push edi;
+mov edi,[esp+0x2c]; mov ecx,[edi+0x10]; push esi; call 0x403820`. `0x47da51`
+pushes the object field id (`[0x62e008]` = 3) and `0x47da57` pushes the
+receiver, so `esi` = 3 and `edi` = the receiving `Native`. `0x42ab5d` then reads
+`[this+0x10]` — the receiver's `Native.ptr` — and `0x403820` looks up field 3 on
+it. So the target *is* derived from the receiver, exactly as the port's
+`container_of(w[0])` does, and the earlier hypothesis that the `ResourceRef`
+argument supplies it is wrong.
+
+That means the remaining gap is not target selection but why the port's
+`state.masks` (the model of `[X+0x70]`) holds `0x10` for `0x615e00` and `0` for
+`0x616200`, while the original delivers events on both.
+
+The writer of `[X+0x70]` is now known: `FUN_004819f0` (`GameType.setEventMask`)
+unpacks its arguments with `0x45d910`, resolves `0x42ab50(field id,
+this)` to a container at `0x481a10`, and calls `0x48d3d0(target, mask, 0)` at
+`0x481a1d`. So the mask is stored on the container that `0x42ab50` derives from
+`setEventMask`'s own receiver, and `0x4265c0` later tests that same word.
+
+The port models both steps (`set_event_mask` -> `state.masks`,
+`dispatch` -> `instance_mask`), so the discrepancy must be in which object the
+script passes as `setEventMask`'s receiver versus which object owns the event.
+The next probe should log, on the original side, the container `0x42ab50`
+returns for each `setEventMask` (hook `0x481a15` and read `eax`) and the container
+`0x4265f5` returns for the following `queueEvent`, then diff that pairing
+against the port's. The oracle already records `receiver` and `caller` per
+clock request, so a hook script is enough — no new instrumentation is needed in
+the shipped code.
 
 ## Boot frontier: record 620, investigated 2026-10-21 (after `fe6f2e5`)
 
