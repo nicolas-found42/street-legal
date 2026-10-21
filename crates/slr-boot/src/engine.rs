@@ -271,7 +271,17 @@ fn fail(vm: &mut VmHost, info: &CallInfo<'_>, error: String) -> Option<u32> {
 pub fn set_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let r = words(info).and_then(|w| Ok((receiver_container(info, &w)?, w[1])));
     match r {
-        Ok((c, mask)) => with(|s| *s.masks.entry(c).or_insert(0) |= mask),
+        Ok((c, mask)) => {
+            if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
+                let w = words(info).unwrap_or_default();
+                eprintln!(
+                    "SETMASK receiver={:#x} container={c:#x} mask={mask:#x} script={:#x}",
+                    w[0],
+                    script_of(c)
+                );
+            }
+            with(|s| *s.masks.entry(c).or_insert(0) |= mask)
+        }
         Err(e) => return fail(vm, info, e),
     }
     None
@@ -576,11 +586,26 @@ pub fn dispatch(
 ) -> Result<(), String> {
     let kind = mask & 0x0fff_ffff;
     let is_type1 = with_res(|h| h.container(container).is_some_and(|c| c.type_id == 1));
+    let instance_mask = with(|s| s.masks.get(&container).copied().unwrap_or(0));
+    let script = script_of(container);
+    if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
+        let info = with_res(|h| {
+            h.container(container).map(|c| {
+                (
+                    c.type_id,
+                    c.id,
+                    c.parent,
+                    c.instance.as_ref().map(|i| i.script),
+                )
+            })
+        });
+        eprintln!(
+            "DISPATCHTRY container={container:#x} type1={is_type1} mask={mask:#x} instance_mask={instance_mask:#x} script={script:#x} info={info:?}"
+        );
+    }
     if !is_type1 {
         return Ok(());
     }
-    let instance_mask = with(|s| s.masks.get(&container).copied().unwrap_or(0));
-    let script = script_of(container);
     // FUN_004265c0 first offers the event to the native object's vtable +0x38.
     // FUN_0047a920 consumes Controller commands and invokes setcontrol directly.
     let native_consumed = instance_mask & mask != 0
@@ -1072,6 +1097,12 @@ fn queue_event(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     };
     let target = container_of(w[0])?;
     let source = container_of(w[1]);
+    if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
+        eprintln!(
+            "QUEUEEVENT target={target:#x} source={source:?} mask={:#x}",
+            w[2]
+        );
+    }
     let arg = EventArg::Str(string(vm, w[3]));
     if let Err(e) = dispatch(vm, target, source, w[2], &arg, None) {
         return fail(vm, info, e);

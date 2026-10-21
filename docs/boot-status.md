@@ -522,6 +522,50 @@ in `createButton` appears only on the diagnostic harness path, and the honest
 statement is that the no-replay run reaches the menu while the deterministic
 replay does not yet reproduce the original's schedule.
 
+### Root cause found: the missing deliveries are internal `0x10000` dispatches
+
+The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
+records every `dispatch` entry and the mask that was registered for the target:
+
+    DISPATCHTRY container=0x615e00 type1=true mask=0x10 instance_mask=0x10 script=0x107b   <- delivered
+    DISPATCHTRY container=0x614200 type1=true mask=0x2  instance_mask=0x0  script=0x1006   <- dropped
+    DISPATCHTRY container=0x614400 type1=true mask=0x2  instance_mask=0x0  script=0x1016   <- dropped
+    DISPATCHTRY container=0x614700 type1=true mask=0x2  instance_mask=0x0  script=0x101d   <- dropped
+    DISPATCHTRY container=0x616200 type1=true mask=0x10 instance_mask=0x0  script=0x0      <- dropped
+
+Every entry passes `type_id == 1`. What drops them is that `queueEvent` never
+carries the mask the subscribers registered:
+
+    SETMASK receiver=0x1016 container=0x614400 mask=0x10010 script=0x1016
+    SETMASK receiver=0x101d container=0x614700 mask=0x110000 script=0x101d
+    SETMASK receiver=0x1486 container=0x84f100 mask=0x110000 script=0x1486
+    SETMASK receiver=0x1484 container=0x84ef00 mask=0x80     script=0x1484
+
+`0x10010 & 0x2 == 0`, so the gate is closed — correctly. **`0x10000` is a real
+event type, not a stray high bit.** The exe sends it from native code:
+
+    FUN_00426800(param_1 + 0x13c, 0, 0x10000, local_238, 0);   // pseudocode 49375
+    FUN_00426800(param_1,       0, 0x10000, local_238, 0);   // pseudocode 49376
+
+and `FUN_00426800` is a bare wrapper over `FUN_004265c0` — the function the port
+calls `dispatch`. The site is the camera/viewport update: it compares the stored
+camera state against `PTR_DAT_00610a54` and, when they differ, formats a string
+and dispatches `0x10000` twice, to `param_1 + 0x13c` and to `param_1`.
+
+So the gap is not in `dispatch`, not in the mask bookkeeping, and not in
+`queueEvent`: **the port never performs the engine-internal `0x10000` dispatch.**
+`engine::dispatch` is only ever reached from `queue_event`.
+
+The emitter is `FUN_00460140(int, float)` — a per-frame camera update that takes
+the frame delta as its second argument. It has **no call site anywhere in the
+pseudocode dump**, which is why it was never ported: it is reached through a
+vtable slot, not a direct call. Identifying which vtable slot and which object
+owns it is the next concrete step; that is what turns this from "the counts
+differ" into a bounded implementation task.
+
+Adding that dispatch pair is the fix, and it is what unblocks the
+`Osd`/`GameRef` `addpart` chain described above.
+
 ## Event dispatch: one delivery against the original's 69 (2026-10-21)
 
 Instrumenting `engine::dispatch` on the stock boot shows the port delivers
