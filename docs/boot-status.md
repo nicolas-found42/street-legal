@@ -789,6 +789,22 @@ checking next: whether the original's `53a5e0` resolves the owner *after*
 allocating the instance identity, in which case a create whose owner argument is
 the not-yet-existing id produces the self-parent.
 
+**That hypothesis is refuted.** `re/oracle/game_ref_create_arguments_probe.py`
+hooks `53a5e0`/`53a2a0` and runs the real `47d7b0`/`47d900` marshaller. Its
+assertion `calls == [expected]` passes with `expected[0]` already resolved to
+`0x636460` when the owner cell is null, and `handle+12 == 0` afterwards. So the
+original passes the owner *into* `53a5e0` already decided - the port's ordering
+(`root` fixed before `instantiate`) matches, and the self-parent cannot arise
+from late owner resolution.
+
+So the `-65426` must come from what `53a5e0` writes into the new container's
+`+0x14`, not from how the owner is chosen. That is exactly the boundary the
+existing probes stub (`boot_bridge_probe.py` declares "resource resolution" and
+`boot_native_link_probe.py` supplies "instance storage"), so this is the next
+thing to lift: make `53a5e0` write a real parent word and read the new
+container's `+0x14`/`+0x50` back. Until that is measured, do not guess between
+"parent = owner" and "parent = new container".
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
