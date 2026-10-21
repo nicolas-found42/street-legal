@@ -6,6 +6,12 @@ table there stays the one feature-status inventory and is not duplicated here.
 This file tracks: cross-cutting gates, supporting evidence gaps that block
 rows, and the final-verification obligations.
 
+The machine-readable form of this inventory is
+[`acceptance/matrix.json`](../acceptance/matrix.json), and
+`./acceptance/run.sh` is the gate over it. When the two disagree the matrix
+wins, because the gate can prove its own claims; prose below gives the
+rationale and the reasoning that the rows do not carry.
+
 Status vocabulary: `open` (no evidence), `partial` (bounded evidence, gate not
 met), `passed` (gate evidence linked, frozen revision). Nothing in this file
 grants acceptance without the fidelity.md evidence requirements.

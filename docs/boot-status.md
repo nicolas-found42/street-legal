@@ -5,14 +5,44 @@ the cross-cutting gates in [fidelity.md](fidelity.md#whole-game-completion-contr
 Boot to MainMenu is a required intermediate milestone.
 This file is the handoff. Update it at every milestone; do not keep a second copy.
 
-Last updated: 2026-10-21, branch `exact-port`, HEAD `35703ca`.
+## Current state (authoritative; supersedes every section below)
 
-**Read the first four sections in order.** They are the current state of
-work: the boot endpoint measurement, the record-620 frontier, the event
-dispatch gap, and the two-level gate that explains it. The cfg-handler parity
-section after them is closed work and can be skimmed. Everything under
-"Active ownership" and below is older context; the "Frontier" list there is
-explicitly marked superseded.
+Last updated: 2026-10-21, branch `exact-port`, HEAD `a9784e2`.
+
+**Status is not prose any more.** `acceptance/matrix.json` is the one
+machine-readable inventory of the 54 obligations (P01–P30, G1–G11, S1–S13);
+`./acceptance/run.sh` is the gate. It exits 0 only when every row is `passed`,
+1 while any row is unmet, and 2 when the matrix makes a claim it cannot
+evidence (a `passed` row with no evidence, or a missing evidence path).
+`./acceptance/selftest.py` proves it rejects. Current reading:
+
+    54 obligations: 43 open, 11 partial, 0 passed
+
+**Single next blocker: S1 (boot endpoint).** The strict replay path stops at
+frame 31 on a thread-identity mismatch — the port reaches
+`THRD-INSTVAR-INI java.game.parts.Part <instance field init>` where the
+original replay expects `THRD-RUNVMI Dummy.getInfo` (row 7375 of
+`re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`). Latest
+receipt: `re/out/boot/runs/20261021T134225.455943Z-1b807ddf0283`.
+
+**Do not chase filtered record 447.** That frontier belongs to the *non-replay*
+run, whose clock advances 0.01 ms per read; the 10 ms scheduler budget therefore
+can never expire, so the thread interleave cannot match the original by
+construction. Original iteration evidence (`main_loop_calls` in the oracle
+facts) confirms the original exits the drive after two threads because real
+elapsed time crosses the deadline. `--clock-replay` is the only acceptance path;
+a non-replay 447 receipt is a smoke test, not evidence.
+
+Everything below this block is dated history. It is retained for the reasoning
+and the oracle addresses, but its "current frontier" claims are superseded and
+must not be cited as present state. New work updates *this* block and leaves
+the history where it is.
+
+
+## History
+
+Dated findings, superseded frontiers and retained oracle addresses follow. Read
+them for the reasoning and the addresses, never for the current status.
 
 ## Boot endpoint: 300 idle frames reached at a 600-frame budget (2026-10-21)
 
