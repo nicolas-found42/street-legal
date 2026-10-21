@@ -24,11 +24,16 @@ part's script is built, `Part.addpart` runs on the owner's script through
 `run_callback`, and the replay matches all 58 `THRD-RUNVMI prime.addpart`
 entries before the frontier. It stops at request ordinal 11604, where the original runs
 `THRD-RUNVMI prime.updatevariables` (`java.game.cars.Prime_models`) but the port
-still runs `THRD-RUNVMI Dummy.getInfo`. The trigger sits in the engine update
-path: original `Chassis.forceUpdate` (`0x43e320`) reaches `0x448430`, which calls
-`425a90(script, "updatevariables", 0x4f, 0x4f)`. The port registers `forceUpdate`
-as capture-only (`missing_rows.rs`), so the callback is never emitted. That row
-is the next native to implement; do not paper over it in the replay matcher.
+still runs `THRD-RUNVMI Dummy.getInfo`. The observed difference is the
+registration branch, not the clock: original `0x426470`/`0x427210` routes the
+post-create queries by the created instance's kind and by its `+0x50` script
+word, and only the `+0x4c == 0` / `+0x50 != 0` case reaches
+`425a90(script, "getInfo", …)`. The port's `register_created` runs the owner
+`getInfo` for every scripted create. Next: model that branch from the created
+instance's own words. `Chassis.forceUpdate` (`0x43e320` → `0x448430` →
+`425a90(script, "updatevariables", 0x4f, 0x4f)`) is capture-only
+(`missing_rows.rs`) and remains the next update-path native, but its position in
+the replay is not yet established. Do not paper over either gap in the matcher.
 
 Latest receipt:
 `re/out/boot/runs/20261021T225949.421173Z-d8234b590c1f`.
