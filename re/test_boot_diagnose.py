@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMAND = ROOT / 're/boot-diagnose.py'
@@ -71,6 +72,56 @@ class RunTests(unittest.TestCase):
   self.assertEqual(diag.analyze(bundle)['status'],'completed')
   (bundle/'runtime/runtime.calllog').write_bytes(b'changed')
   with self.assertRaisesRegex(ValueError,'artifact changed'):diag.analyze(bundle)
+ def test_bundle_retains_untracked_source_bytes_and_mode(self):
+  source=self.repo/'src/new tool.py';source.parent.mkdir()
+  original=b'#!/usr/bin/env python3\nprint("untracked implementation")\n'
+  source.write_bytes(original);source.chmod(0o755)
+  before,_=diag.git_identity(self.repo)
+  result,bundle,manifest,_=self.invoke()
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertEqual(manifest['source'],before)
+  archived=manifest['source_untracked'][0]
+  self.assertEqual(archived['path'],'src/new tool.py')
+  self.assertEqual(archived['mode'],0o755)
+  saved=bundle/archived['snapshot']
+  source.unlink()
+  self.assertEqual(saved.read_bytes(),original)
+  self.assertEqual(diag.analyze(bundle)['status'],'completed')
+  saved.write_bytes(b'changed source')
+  with self.assertRaisesRegex(ValueError,'artifact changed'):diag.analyze(bundle)
+ def test_nested_manifest_source_is_inventoried(self):
+  source=self.repo/'src/manifest.json';source.parent.mkdir()
+  source.write_bytes(b'{"source":true}')
+  result,bundle,manifest,_=self.invoke()
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  snapshot='source-untracked/src/manifest.json'
+  self.assertIn(snapshot,manifest['artifacts'])
+  self.assertEqual(diag.analyze(bundle)['status'],'completed')
+  (bundle/snapshot).write_bytes(b'{"source":false}')
+  with self.assertRaisesRegex(ValueError,'artifact changed'):diag.analyze(bundle)
+ def test_untracked_source_change_during_archive_is_rejected(self):
+  source=self.repo/'new.py';source.write_bytes(b'original')
+  identity,_=diag.git_identity(self.repo)
+  bundle=self.repo/'runs';bundle.mkdir()
+  copy=diag.shutil.copyfileobj
+  def changing_copy(original,saved):
+   copy(original,saved)
+   source.write_bytes(b'modified during capture')
+  with mock.patch.object(diag.shutil,'copyfileobj',side_effect=changing_copy):
+   with self.assertRaisesRegex(ValueError,'changed while archiving'):
+    diag.archive_untracked_sources(self.repo,bundle,identity)
+ def test_untracked_symlink_fails_closed(self):
+  (self.repo/'new.py').symlink_to(self.repo/'fake')
+  result,_,manifest,report=self.invoke()
+  self.assertNotEqual(result.returncode,0)
+  self.assertEqual(manifest['status'],'failed')
+  self.assertIn('symlink requires explicit provenance',report['error'])
+ def test_untracked_archive_mode_change_is_rejected(self):
+  (self.repo/'new.py').write_bytes(b'original')
+  _,bundle,manifest,_=self.invoke()
+  saved=bundle/manifest['source_untracked'][0]['snapshot']
+  saved.chmod(0o755)
+  with self.assertRaisesRegex(ValueError,'archive mode changed'):diag.analyze(bundle)
  def test_fail_closed_cases(self):
   for mode in ['short','malformed','stale','wrong-id','truncated','bad-events','event-id','empty-states','missing-events']:
    with self.subTest(mode=mode):

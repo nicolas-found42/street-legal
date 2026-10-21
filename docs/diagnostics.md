@@ -22,7 +22,9 @@ archive root. Stock and reference inputs remain read-only. Each bundle contains:
 
 * `manifest.json`: lifecycle status, Git revision and dirty source hash, binary
   identity, arguments, trace configuration, input/profile hashes and final
-  artifact inventory. The tracked source diff is saved separately. Source,
+  artifact inventory. The tracked source diff is saved separately; untracked
+  source bytes are retained under `source-untracked/`, with their original
+  paths, modes and identities in `source_untracked`. Source,
   binary and input mutation during execution invalidates acceptance.
 * `inputs/`, replay inputs and `stock-inputs.json`: frozen oracle/signature/profile
   inputs and a stock file inventory. Licensed stock files are still required to
@@ -44,6 +46,14 @@ All bundles are local, gitignored and retained until explicitly removed. They
 are not uploaded or backed up automatically. Preserve the whole bundle, not
 just a call log, when archiving an investigation. Never commit stock, reference
 files or original-derived captures.
+
+To reconstruct a candidate, check out the manifest's source commit in a separate
+directory, apply `source.diff`, then restore each `source_untracked` snapshot to
+its recorded repository-relative path and mode. Obtain the unchanged licensed
+stock inputs separately and verify their inventory. Do not restore over ongoing
+work. Older bundles that contain only untracked hashes cannot reconstruct those
+files; retain their original checkout/archive. Untracked source symlinks are
+rejected rather than silently copied as regular files.
 
 ## Shared timeline and state
 

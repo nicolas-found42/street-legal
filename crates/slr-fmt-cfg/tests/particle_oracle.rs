@@ -167,7 +167,16 @@ fn skid_json(c: &SkidCfg) -> Value {
     })
 }
 
-fn first_diffs(rust: &Value, oracle: &Value, path: String, out: &mut Vec<String>) {
+fn first_diffs(
+    rust: &Value,
+    oracle: &Value,
+    path: String,
+    excluded: &[String],
+    out: &mut Vec<String>,
+) {
+    if excluded.contains(&path) {
+        return;
+    }
     if out.len() >= 6 {
         return;
     }
@@ -175,19 +184,136 @@ fn first_diffs(rust: &Value, oracle: &Value, path: String, out: &mut Vec<String>
         (Value::Object(a), Value::Object(b)) => {
             for (k, v) in a {
                 match b.get(k) {
-                    Some(w) => first_diffs(v, w, format!("{path}.{k}"), out),
+                    Some(w) => first_diffs(v, w, format!("{path}.{k}"), excluded, out),
                     None => out.push(format!("{path}.{k} only in rust")),
                 }
+            }
+            for k in b.keys().filter(|k| !a.contains_key(*k)) {
+                out.push(format!("{path}.{k} only in oracle"));
             }
         }
         (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
             for (i, (v, w)) in a.iter().zip(b).enumerate() {
-                first_diffs(v, w, format!("{path}[{i}]"), out);
+                first_diffs(v, w, format!("{path}[{i}]"), excluded, out);
             }
         }
         _ if rust != oracle => out.push(format!("{path}: rust {rust} oracle {oracle}")),
         _ => {}
     }
+}
+
+/// Narrow ADR 0007 exception: original execution confirms the two synthetic
+/// state inputs and the stock source action below read a leftover argument slot
+/// as the absent radius. Keep the raw oracle result intact; assert both the
+/// original bug and the corrected output before excluding only radius words.
+fn sphere_exception(bytes: &[u8], rust: &Value, oracle: &Value) -> Result<Vec<String>, String> {
+    let (pointer, path, supplied_radius) = match bytes {
+        b"[STATE]\r\nsource_size sphere 1 2 3\r\n" => (
+            "/state/domains/source_size".to_owned(),
+            ".state.domains.source_size".to_owned(),
+            0.0f32,
+        ),
+        b"[STATE]\r\nsource_size sphere 1 2 3 2\r\n" => (
+            "/state/domains/source_size".to_owned(),
+            ".state.domains.source_size".to_owned(),
+            2.0f32,
+        ),
+        _ => {
+            // The complete measured action form, not any NaN, any sphere,
+            // any file name, or any missing numeric argument.
+            let mut in_action = false;
+            let matches = bytes
+                .split(|b| *b == b'\n')
+                .filter(|line| {
+                    if line.windows(8).any(|word| word == b"[ACTION]") {
+                        in_action = true;
+                        return false;
+                    }
+                    if line.windows(7).any(|word| word == b"[STATE]") {
+                        in_action = false;
+                        return false;
+                    }
+                    if !in_action {
+                        return false;
+                    }
+                    let fields: Vec<_> = line
+                        .split(|b| b" \t\r".contains(b))
+                        .filter(|field| !field.is_empty())
+                        .collect();
+                    fields.len() == 11
+                        && fields[0] == b"source"
+                        && fields[1] == b"s0"
+                        && [b"20".as_slice(), b"40".as_slice()].contains(&fields[2])
+                        && fields[3..]
+                            == [
+                                b"point".as_slice(),
+                                b"0.00",
+                                b"0.00",
+                                b"0.00",
+                                b"sphere",
+                                b"1.00",
+                                b"1.00",
+                                b"1.00",
+                            ]
+                })
+                .count();
+            if matches != 1 {
+                return Ok(vec![]);
+            }
+            let actions = oracle["actions"]
+                .as_array()
+                .ok_or("missing original actions")?;
+            let selected: Vec<_> = actions
+                .iter()
+                .enumerate()
+                .filter(|(_, action)| action["t"] == 10 && action["name"] == "s0")
+                .collect();
+            if selected.len() != 1 {
+                return Err("missing-radius trigger has ambiguous original source action".into());
+            }
+            let index = selected[0].0;
+            (
+                format!("/actions/{index}/d/1"),
+                format!(".actions[{index}].d[1]"),
+                0.0f32,
+            )
+        }
+    };
+    let original = oracle.pointer(&pointer).ok_or("missing original sphere")?;
+    let corrected = rust.pointer(&pointer).ok_or("missing corrected sphere")?;
+    if original["k"] != "sphere" || corrected["k"] != "sphere" {
+        return Err("missing-radius trigger did not produce spheres".into());
+    }
+    let words = original["v"]
+        .as_array()
+        .ok_or("missing original sphere words")?;
+    let fixed = corrected["v"]
+        .as_array()
+        .ok_or("missing corrected sphere words")?;
+    if words.len() != 7 || fixed.len() != 7 {
+        return Err("unexpected sphere layout".into());
+    }
+    let raw = words[3]
+        .as_u64()
+        .filter(|word| *word <= u32::MAX as u64)
+        .ok_or("original radius is not a u32")? as u32;
+    if !f32::from_bits(raw).is_nan()
+        || words[5] != words[3]
+        || words[4] != json!(supplied_radius.to_bits())
+        || words[6] != json!((supplied_radius * supplied_radius).to_bits())
+    {
+        return Err("original missing-radius witness no longer shows the confirmed bug".into());
+    }
+    let expected = [
+        supplied_radius.to_bits(),
+        0,
+        (supplied_radius * supplied_radius).to_bits(),
+        0,
+    ];
+    if fixed[3..] != expected.map(|word| json!(word)) {
+        return Err("corrected sphere did not default only missing radii to zero".into());
+    }
+    Ok((3..7).map(|index| format!("{path}.v[{index}]")).collect())
 }
 
 fn run_rows(
@@ -205,8 +331,16 @@ fn run_rows(
     };
     assert!(!rows.is_empty(), "{file} has no rows");
     let (mut bad, mut corpus, mut syn) = (0usize, 0usize, 0usize);
-    let mut shown = 0;
+    let (mut shown, mut exceptions) = (0, 0);
     for row in &rows {
+        assert_eq!(
+            row["schema_version"], 2,
+            "{file}: regenerate raw original vectors; legacy sphere results were normalized"
+        );
+        assert_eq!(
+            row["result_encoding"], "raw-original-words",
+            "{file}: original result encoding is not raw"
+        );
         let src = row["src"].as_str().unwrap();
         if src.starts_with("syn:") {
             syn += 1;
@@ -215,18 +349,111 @@ fn run_rows(
         }
         let bytes = unhex(row["cfg_hex"].as_str().unwrap());
         let got = check(&bytes);
-        if got != row["result"] {
+        let excluded = if file == "particle_parse.jsonl" {
+            sphere_exception(&bytes, &got, &row["result"])
+                .unwrap_or_else(|error| panic!("{src}: {error}"))
+        } else {
+            vec![]
+        };
+        if !excluded.is_empty() {
+            exceptions += 1;
+            eprintln!("CONFIRMED_DIVERGENCE {src}: missing sphere radii; raw original retained, corrected words checked separately");
+        }
+        let mut diffs = Vec::new();
+        first_diffs(&got, &row["result"], String::new(), &excluded, &mut diffs);
+        if !diffs.is_empty() {
             bad += 1;
             if shown < 8 {
                 shown += 1;
-                let mut diffs = Vec::new();
-                first_diffs(&got, &row["result"], String::new(), &mut diffs);
                 eprintln!("MISMATCH {src}: {}", diffs.join("; "));
             }
         }
     }
-    eprintln!("{file}: {corpus} asset cfgs + {syn} synthetic");
+    eprintln!("{file}: {corpus} asset cfgs + {syn} synthetic; {exceptions} separately checked intentional divergences");
     Some((rows.len(), bad, corpus))
+}
+
+#[test]
+fn missing_sphere_exception_rejects_unrelated_differences() {
+    let bytes = b"[STATE]\r\nsource_size sphere 1 2 3\r\n";
+    let rust = particle_json(&ParticleCfg::parse_with(bytes, Precision::F32));
+    let mut oracle = rust.clone();
+    // Synthetic test data tests the acceptance guard; original bug evidence
+    // comes from the separately replayed original vectors below.
+    oracle["state"]["domains"]["source_size"]["v"][3] = json!(0x7fc0_1234u32);
+    oracle["state"]["domains"]["source_size"]["v"][5] = json!(0x7fc0_1234u32);
+    let frozen = oracle.clone();
+    let excluded = sphere_exception(bytes, &rust, &oracle).unwrap();
+    let mut differences = vec![];
+    first_diffs(&rust, &oracle, String::new(), &excluded, &mut differences);
+    assert!(differences.is_empty());
+    assert_eq!(oracle, frozen, "raw original results must remain untouched");
+
+    let mut wrong = rust.clone();
+    wrong["state"]["domains"]["source_size"]["v"][0] = json!(0);
+    first_diffs(&wrong, &oracle, String::new(), &excluded, &mut differences);
+    assert!(!differences.is_empty(), "center differences must fail");
+    wrong = rust.clone();
+    wrong["state"]["domains"]["source_size"]["v"][3] = json!(1);
+    assert!(sphere_exception(bytes, &wrong, &oracle).is_err());
+    assert!(
+        sphere_exception(bytes, &rust, &rust).is_err(),
+        "normalized original must fail"
+    );
+    assert!(sphere_exception(
+        b"[STATE]\r\nsource_size sphere 1 2 3 2 4\r\n",
+        &rust,
+        &oracle
+    )
+    .unwrap()
+    .is_empty());
+
+    assert!(
+        sphere_exception(
+            b"[STATE]\nsource s0 20 point 0.00 0.00 0.00 sphere 1.00 1.00 1.00\n",
+            &rust,
+            &oracle
+        )
+        .unwrap()
+        .is_empty(),
+        "inactive action text is not a trigger"
+    );
+    let mut extra = oracle.clone();
+    extra["unexpected_original_field"] = json!(1);
+    differences.clear();
+    first_diffs(&rust, &extra, String::new(), &excluded, &mut differences);
+    assert!(!differences.is_empty(), "omitted original fields must fail");
+}
+
+#[test]
+fn missing_sphere_radius_original_witnesses_and_corrected_results() {
+    let Some(rows) = load_rows("particle_parse.jsonl") else {
+        eprintln!(
+            "SLR_ORACLE_SKIPPED: missing_sphere_radius_original_witnesses_and_corrected_results"
+        );
+        return;
+    };
+    for name in [
+        "syn:sphere_missing_both_radii",
+        "syn:sphere_missing_second_radius",
+    ] {
+        let selected: Vec<_> = rows.iter().filter(|row| row["src"] == name).collect();
+        assert_eq!(selected.len(), 1, "regenerate raw vectors including {name}");
+        let row = selected[0];
+        assert_eq!(row["schema_version"], 2);
+        assert_eq!(row["result_encoding"], "raw-original-words");
+        let bytes = unhex(row["cfg_hex"].as_str().unwrap());
+        let rust = particle_json(&ParticleCfg::parse_with(&bytes, Precision::F32));
+        let excluded = sphere_exception(&bytes, &rust, &row["result"]).unwrap();
+        assert_eq!(excluded.len(), 4);
+        assert_ne!(
+            rust, row["result"],
+            "witness must demonstrate the original bug"
+        );
+        let mut diffs = vec![];
+        first_diffs(&rust, &row["result"], String::new(), &excluded, &mut diffs);
+        assert!(diffs.is_empty(), "non-radius state must match: {diffs:?}");
+    }
 }
 
 #[test]

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import signal
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -93,6 +94,39 @@ def git_identity(repository):
     body = tracked + b"\0" + json.dumps(untracked, sort_keys=True).encode()
     return {"commit": commit, "dirty": bool(tracked or untracked), "dirty_diff_sha256": sha(body),
             "tracked_diff_sha256": sha(tracked), "untracked": untracked}, tracked
+
+
+def archive_untracked_sources(repository, bundle, source):
+    """Retain the bytes named by git_identity, without changing that identity."""
+    archived = []
+    for expected in source["untracked"]:
+        relative = Path(expected["path"])
+        path = repository / relative
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("untracked source path escapes repository")
+        # A hash of a symlink target does not capture the source tree's link
+        # semantics. Reject rather than silently turning it into a regular file.
+        if any(candidate.is_symlink() for candidate in (path, *path.parents)
+               if candidate != repository and candidate.is_relative_to(repository)):
+            raise ValueError(f"untracked source symlink requires explicit provenance: {relative}")
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"untracked source is not a regular file: {relative}")
+        destination = bundle / "source-untracked" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("rb") as original, destination.open("xb") as saved:
+            shutil.copyfileobj(original, saved)
+            saved.flush()
+            os.fsync(saved.fileno())
+        actual = file_identity(destination)
+        current = file_identity(path)
+        if any(record[key] != expected[key]
+               for record in (actual, current) for key in ("sha256", "bytes")) or path.stat().st_mode != before.st_mode:
+            raise ValueError(f"untracked source changed while archiving: {relative}")
+        mode = stat.S_IMODE(before.st_mode)
+        destination.chmod(mode)
+        archived.append({**expected, "snapshot": destination.relative_to(bundle).as_posix(), "mode": mode})
+    return archived
 
 
 def load_records(path):
@@ -266,7 +300,7 @@ def verify_artifacts(bundle, manifest):
         raise ValueError("bundle is running or unfinished; no completed-run acceptance")
     artifacts = manifest.get("artifacts", {})
     if not artifacts or "report.json" not in artifacts: raise ValueError("artifact manifest incomplete")
-    actual_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file() and path.name != "manifest.json"}
+    actual_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file() and path != bundle / "manifest.json"}
     if actual_files != set(artifacts): raise ValueError("artifact manifest does not cover bundle files")
     for relative, expected in artifacts.items():
         path = (bundle / relative).resolve()
@@ -274,6 +308,22 @@ def verify_artifacts(bundle, manifest):
         actual = file_identity(path)
         if actual["sha256"] != expected["sha256"] or actual["bytes"] != expected["bytes"]:
             raise ValueError(f"bundle artifact changed: {relative}")
+    # Older bundles may have only source hashes; do not invent archived bytes
+    # for them. New bundles bind every preserved untracked file to that hash.
+    if "source_untracked" in manifest:
+        archived = manifest["source_untracked"]
+        expected_sources = manifest["source"]["untracked"]
+        if [{key: row[key] for key in ("path", "sha256", "bytes")} for row in archived] != expected_sources:
+            raise ValueError("untracked source archive does not match source identity")
+        for row in archived:
+            expected_path = (Path("source-untracked") / row["path"]).as_posix()
+            if row["snapshot"] != expected_path or expected_path not in artifacts:
+                raise ValueError("untracked source archive is incomplete")
+            saved = bundle / row["snapshot"]
+            if saved.is_symlink() or stat.S_IMODE(saved.stat().st_mode) != row["mode"]:
+                raise ValueError("untracked source archive mode changed")
+            if any(artifacts[expected_path][key] != row[key] for key in ("sha256", "bytes")):
+                raise ValueError("untracked source archive content differs from source identity")
 
 
 def correlate(bundle, comparisons):
@@ -382,6 +432,7 @@ def run(args, extra):
     try:
         manifest["source"], diff = git_identity(repository)
         (bundle / "source.diff").write_bytes(diff)
+        manifest["source_untracked"] = archive_untracked_sources(repository, bundle, manifest["source"])
         stock = tree_identity(repository / args.stock)
         dump(bundle / "stock-inputs.json", stock)
         manifest["stock_inputs_sha256"] = stock["sha256"]
@@ -612,7 +663,7 @@ def run(args, extra):
         dump(bundle / "report.json", report)
         manifest["finished"] = utc()
         manifest["artifacts"] = {path.relative_to(bundle).as_posix(): file_identity(path)
-            for path in sorted(bundle.rglob("*")) if path.is_file() and path.name != "manifest.json"}
+            for path in sorted(bundle.rglob("*")) if path.is_file() and path != bundle / "manifest.json"}
         dump(bundle / "manifest.json", manifest)
     print(json.dumps({"bundle": str(bundle), "status": manifest["status"], "error": report.get("error"), "comparisons": report["comparisons"]}, default=str))
     return exit_code

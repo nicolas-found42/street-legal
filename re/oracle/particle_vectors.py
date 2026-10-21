@@ -125,15 +125,6 @@ def _dump_domain(o, p):
     vt = o.read_u32(p)
     kind, n = DOMAIN_VT[vt]
     v = [o.read_u32(p + 4 + 4 * i) for i in range(n)]
-    if kind == "sphere":
-        # A sphere with fewer than two radius fields reads the callee's leftover argument
-        # slots: radius 1 = param_1 (0.0), radius 2 = param_2 = a *stack address* (FUN_005195e0's
-        # delimiter-table pointer) reinterpreted as a float. On the exe's real stack that is a
-        # tiny denormal (~1e-39), here (stack top 0x7ff00000) a NaN. Both stand for "radius ~ 0":
-        # the NaN words are normalised to 0.0, like the port's missing-field default.
-        for i in range(3, 7):
-            if (v[i] & 0x7F800000) == 0x7F800000 and (v[i] & 0x007FFFFF):
-                v[i] = 0
     return {"k": kind, "v": v}
 
 
@@ -298,6 +289,10 @@ def synthetic_particle():
         "dest_size box -1 5 -2 1 -5 2\n")
     add("plane_zero_normal", "[STATE]\nsource_size plane 1 2 3 0 0 0\n")
     add("triangle_degenerate", "[STATE]\nsource_size triangle 1 1 1 1 1 1 2 2 2\n")
+    # Intentional-divergence witnesses remain raw. Equality is expected to
+    # fail until a precise, separately verified exception is implemented.
+    add("sphere_missing_both_radii", "[STATE]\nsource_size sphere 1 2 3\n")
+    add("sphere_missing_second_radius", "[STATE]\nsource_size sphere 1 2 3 2\n")
 
     rng = random.Random(0x25_10)
     for i in range(60):
@@ -396,6 +391,7 @@ def all_inputs():
 
 def _row(i, kind, src, data, result):
     return {
+        "schema_version": 2, "result_encoding": "raw-original-words",
         "id": i, "exe_addr": "0x0051ac20" if kind == "particle" else "0x00521e10",
         "name": f"{kind}_parse", "kind": kind, "src": src, "cfg_hex": data.hex(),
         "result": result, "oracle": "unicorn", "unicorn": UC_VER,
@@ -403,26 +399,32 @@ def _row(i, kind, src, data, result):
     }
 
 
-def gen(exe=None):
-    os.makedirs(OUT_DIR, exist_ok=True)
+def gen(exe=None, out_dir=OUT_DIR):
+    os.makedirs(out_dir, exist_ok=True)
+    for kind in ("particle", "skid"):
+        path = os.path.join(out_dir, f"{kind}_parse.jsonl")
+        if os.path.exists(path):
+            raise FileExistsError(f"preserve existing vectors; choose a fresh --out directory: {path}")
     rows = {"particle": [], "skid": []}
     for i, (kind, src, data) in enumerate(all_inputs()):
         rows[kind].append(_row(len(rows[kind]), kind, src, data, run(kind, data, exe)))
     for kind, rs in rows.items():
-        path = os.path.join(OUT_DIR, f"{kind}_parse.jsonl")
-        with open(path, "w") as f:
+        path = os.path.join(out_dir, f"{kind}_parse.jsonl")
+        with open(path, "x") as f:
             for r in rs:
                 f.write(json.dumps(r) + "\n")
         print(f"{kind}: {len(rs)} rows -> {path}")
 
 
-def verify(exe=None):
+def verify(exe=None, out_dir=OUT_DIR):
     bad = n = 0
     for kind in ("particle", "skid"):
-        path = os.path.join(OUT_DIR, f"{kind}_parse.jsonl")
+        path = os.path.join(out_dir, f"{kind}_parse.jsonl")
         with open(path) as f:
             for line in f:
                 row = json.loads(line)
+                if row.get("schema_version") != 2 or row.get("result_encoding") != "raw-original-words":
+                    raise ValueError("legacy normalized vectors are not original-result evidence; regenerate into a fresh --out")
                 n += 1
                 again = run(kind, bytes.fromhex(row["cfg_hex"]), exe)
                 if again != row["result"]:
@@ -436,8 +438,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("cmd", choices=["gen", "verify"])
     ap.add_argument("--exe")
+    ap.add_argument("--out", default=OUT_DIR)
     a = ap.parse_args()
     if a.cmd == "gen":
-        gen(a.exe)
+        gen(a.exe, a.out)
     else:
-        sys.exit(verify(a.exe))
+        sys.exit(verify(a.exe, a.out))
