@@ -221,6 +221,22 @@ against the port's. The oracle already records `receiver` and `caller` per
 clock request, so a hook script is enough — no new instrumentation is needed in
 the shipped code.
 
+**Corrected 2026-10-21 (supersedes the argument-shape claim below).** A probe of
+`createNativeInstance` on the stock boot shows the port already receives the
+right shape: `marshal_args` yields `[receiver, GameRef, I, String, String]`,
+which lines up with `create`'s `[receiver, owner, requested, parameters, name]`
+slot for slot (`w=[4219, 4101, 50, 4222, 4223]` for the car case). So the
+whole-number argument is read as `requested`, not as an owner, and that part of
+the diagnosis below was wrong.
+
+What does differ is the instance's script identity: `0x481b4c` passes the
+*receiver itself* to `0x53a2a0`, while `create` allocates a fresh object. A
+rewrite that reuses the receiver as the script identity and supplies the
+receiver's class for the `resource == 0` default-template branch builds and
+starts, but the replay then collapses from 4170 to 444 filtered records and
+aborts at record 135 on `System.currentTime` (`0x41400000` vs
+`0x41f00000`). It was reverted.
+
 ## Boot frontier: record 620, investigated 2026-10-21 (after `fe6f2e5`)
 
 Reproduce:
@@ -296,8 +312,7 @@ the original's have none. That is a resource-model defect in how
 
 Both experiments were reverted; the tree is back at the `fe6f2e5` baseline.
 
-The defect is now identified precisely.
-`main.rs:633` binds the `GameType.createNativeInstance` row (`0x00481a70`) to
+main.rs:633` binds the `GameType.createNativeInstance` row (`0x00481a70`) to
 `factory::create_native_instance`, which simply calls `factory::create`.
 `create` unpacks its argument container as
 `[receiver, owner, template, parameters, name]` (`factory.rs:985`), matching
