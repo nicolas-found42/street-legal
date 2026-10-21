@@ -329,9 +329,20 @@ so `iLevel` comes only from the field-initialiser bodies; body 84 is the only
 assignment site (`iLevel`, `IL_TIPS`, `0x1007 sub_op 0xa` (`>`), conditional jump,
 then `0x1008` store at line 845), and nothing in the port reaches it.
 
-The next step is to establish why two of the four `Osd` instances skip that
-initialiser while the other two run it — a construction-order question in the
-`Osd` path, downstream of everything else here.
+Only **four** containers are registered for the `0x1c` (`animate`) callback; the
+port's 331 distinct `THRD-RUNVMI ...Osd;.animate` thread ids are those four being
+re-entered once per frame (4 containers × ~83 frames), because `engine::animate_pass`
+runs each callback through `call_script`, which mints a fresh thread per call.
+So the thread count is not a leak and not a second copy of the loop — the same
+four `Osd` objects animate on both sides.
+
+That narrows the defect to exactly two of those four objects: their `iLevel` stays
+0 while the other two hold 3. `Osd.setLevel` is never called during boot, so the
+value can only come from the field-initialiser block, and the port reaches the
+assignment path (body 84) for two instances and not the other two. The next step
+is to find what distinguishes those two construction paths.
+
+
 
 Note on reading pool offsets: `0x101b`/`0x1019` immediates are **constant-pool
 byte offsets**, resolved by `Loader::pool_text_of` / `field_reference_of`, not
