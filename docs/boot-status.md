@@ -31,6 +31,49 @@ ordering — the port reaches a `Part` field-initializer thread before the
 matching the original's creation order inside `instantiate`/`register_created`,
 not changing the clock layer.
 
+The replay rows at that position give the exact original sequence, which is the
+specification the port has to meet (`clock-inputs.jsonl`, positions 7373-7381):
+
+    ThreadEnter THRD-CREATE  java.game.cars.Prime_DLH_500 <init>
+    ThreadExit  THRD-CREATE
+    ThreadEnter THRD-RUNVMI Dummy.getInfo  java.lang.GameType getInfo
+    ThreadExit  THRD-RUNVMI Dummy.getInfo
+    ThreadEnter THRD-INSTVAR-INI java.game.parts.Part <instance field init>
+    ThreadExit  THRD-INSTVAR-INI
+    ...
+
+So the original runs the `Dummy.getInfo` callback thread between the car
+constructor's exit and the first `Part` field initializer; the port creates the
+`Part` containers first. Note the callback's resource is `Dummy`, not the car
+being constructed, so this is about when `register_created` is reached, not
+about which container it queries. A probe shows `register_created` *is* called
+for these containers (`native = None` for most, `Some("player")` for one), so
+the row is not being skipped wholesale. `instantiate` itself only *allocates*
+the container and runs `run_created`; it never creates `Part` children. So the
+port's `Part` field-initializer threads are produced by the script constructor
+itself, i.e. by the `Part.addPart` path, before `register_created` is reached.
+That makes this the same root cause as the `addPart` item in the 2026-10-20
+list: until `Part.addPart` creates its part at the original point (bytecode
+node 135 -> `addStockParts`/`setTexture`), the port will keep reaching a `Part`
+initializer before the `getInfo` callback thread and the replay will keep
+stopping here.
+
+Counts over the whole accepted run make the size of that gap concrete
+(original vs port, `script-natives.slrlog` vs the 600-frame port log):
+
+| native | original | port |
+|---|---|---|
+| `setTexture` | 112 | 1 |
+| `partOnSlot` | 119 | 0 |
+| `getSlotID` | 76 | 0 |
+| `disableSlot` | 20 | 0 |
+| `getScriptInstance` | 58 | 0 |
+
+So the port constructs `Part` objects but never reaches the slot/texture
+assembly that the original performs after them. These counts are the observable
+acceptance signal for the `addPart` fix; they should be reproduced exactly in
+both logs.
+
 The earlier note that the dialog completes at frame 31 with 300 idle frames
 by 331 is stale: the current tree reports frame 179, so `--frames 331`
 yields 151 idle frames. Both halves of the boot endpoint therefore remain open:
