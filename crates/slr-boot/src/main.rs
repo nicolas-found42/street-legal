@@ -680,6 +680,23 @@ fn install(vm: &mut VmHost) {
         audit_natives(vm);
     }
 }
+/// Temporary probe: report `Osd.iLevel` and `Osd.IL_TIPS` on every live `Osd`.
+fn probe_osd_levels(vm: &mut VmHost) {
+    for index in 0..vm.objects.len() {
+        let word = 0x1000 + index as u32;
+        let is_osd = matches!(
+            &vm.objects[index].class,
+            slr_vm::vmclass::ClassRef::Loaded(id)
+                if vm.loader.class_name(*id) == Some("java.render.Osd")
+        );
+        if !is_osd {
+            continue;
+        }
+        let level = vm.read_field(word, "iLevel").map(|v| v.payload);
+        let tips = vm.read_field(word, "IL_TIPS").map(|v| v.payload);
+        println!("OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?}");
+    }
+}
 
 /// Report how many of the registered natives still dispatch to `capture_only`.
 fn audit_natives(vm: &VmHost) {
@@ -935,6 +952,9 @@ fn run(
         telemetry::check()?;
         if let Some(error) = sched::replay_error() {
             return Err(error);
+        }
+        if std::env::var_os("SLR_OSD_PROBE").is_some() && frame % 40 == 0 {
+            probe_osd_levels(vm);
         }
         let active_menu = active_main_menu(vm).filter(|_| !sched::pending_menu_call(vm));
         if active_menu.is_some() && active_menu == menu {

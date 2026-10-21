@@ -287,37 +287,56 @@ Fixing this one line removes the `currentTime` flood, restores the `sleep`-drive
 frame loop, and is the single highest-value change available: it addresses the
 46 % of port native calls that the original does not make.
 
-### The trigger is `Osd.isFocused` reading a residual local slot
+### The trigger is `Osd.iLevel` against `IL_TIPS`
 
-`idleFor` node 3 (`0x0024`, line 258) enters the script method `Osd.isFocused()I`,
-and node 6 (`0x1015 imm=0x10`) then decides whether to skip the waiting block.
-The port takes the loop-back edge at node 26→0 without blocking, so the wait is
-never entered.
+`idleFor` node 3 (`0x0024`, line 258) enters `Osd.isFocused()I`, and node 6
+(`0x1015 imm=0x10`) then decides whether to skip the waiting block. The port
+takes the loop-back edge at node 26→0 without blocking, so the wait is never
+entered.
 
-`Osd.isFocused` is body 127 (19 nodes) and opens:
+Resolving the two field references in `Osd.isFocused` (body 127) through
+`Loader::field_reference_of` — the same function the interpreter uses — names
+them exactly:
 
-    0 op=0x101b   FieldRef
-    1 op=0x101b   FieldRef
-    2 op=0x1007 imm=0x9   sub-op 9 = `local9 <= ...`
-    3 op=0x0005   `&&` short-circuit
-    4 op=0x1014 imm=0xb   jump to 11
-    5 op=0x1027 imm=0
-    6 op=0x0024   CallResolved -> java.util.Vector.lastElement
+    0 op=0x101b off=0x1f0 -> java.render.Osd iLevel  I
+    1 op=0x101b off=0x256 -> java.render.Osd IL_TIPS I
+    2 op=0x1007 imm=0x9   -> sub-op 9 = `<=`
+    3 op=0x0005           -> `&&` short-circuit
 
-`0x1007` is not a field read: it is `sub_op`, and `imm=9` is the `<=` operator
-(see the `0x1 => logical_or … 0x9 => le` table in `interp.rs`). So the guard
-compares local slot 9, and `isFocused()I` declares no parameters and never
-writes that slot — it reads whatever the frame's slot 9 already held. The
-original reads a zero there and returns 0; the port reads a live value, returns
-1, and `idleFor` skips the blocking branch.
+So the guard is `iLevel <= IL_TIPS && …`. The port evaluates the left side true
+and falls into the `lastElement()` branch; the original evaluates it false. The
+companion body 84 confirms the same pair with the opposite operator: nodes 0-3
+are `iLevel`, `IL_TIPS`, `0x1007 sub_op 0xa` (`>`), then a conditional jump, i.e.
+the setter branches on `iLevel > IL_TIPS`.
 
-This is the same family as the ADR 0007 exceptions: original behaviour that
-depends on residual, uninitialised frame state. Reproducing it needs the
-original's slot-residue rule for this call graph, which the retained capture does
-not record — the call log carries natives only, not script step traces. Until
-that rule is established (a targeted Unicorn trace of `0x41fbc0` around this
-body, or a documented decision to initialise the slot), the frame-loop inversion
-cannot be closed, and the 620-record frontier stands.
+This is a **state** divergence, not name resolution, not a residual slot, and not
+a native. `iLevel`/`IL_TIPS` are plain `int` fields of `Osd`.
+
+Measured on the port (`SLR_OSD_PROBE=1`, which dumps every live `Osd`):
+
+| object | `iLevel` | `IL_TIPS` |
+|---|---|---|
+| `0x101d` | 3 | 1 |
+| `0x1486` | 3 | 1 |
+| `0x104f` | 0 | 1 |
+| `0x1427` | 0 | 1 |
+
+`IL_TIPS` is 1 everywhere. `isFocused`'s guard is therefore `iLevel <= 1`, which
+the two `iLevel == 0` objects satisfy and the two `iLevel == 3` objects do not.
+The port is running `animate` in an `Osd` that never left 0. `Osd.setLevel` is
+never called in the whole boot (`grep -c "Osd.setLevel"` on the step trace is 0),
+so `iLevel` comes only from the field-initialiser bodies; body 84 is the only
+assignment site (`iLevel`, `IL_TIPS`, `0x1007 sub_op 0xa` (`>`), conditional jump,
+then `0x1008` store at line 845), and nothing in the port reaches it.
+
+The next step is to establish why two of the four `Osd` instances skip that
+initialiser while the other two run it — a construction-order question in the
+`Osd` path, downstream of everything else here.
+
+Note on reading pool offsets: `0x101b`/`0x1019` immediates are **constant-pool
+byte offsets**, resolved by `Loader::pool_text_of` / `field_reference_of`, not
+indices into `Module::strings`. Indexing `strings` with them returns `None` and
+misleads; use the loader.
 
 ### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
 
