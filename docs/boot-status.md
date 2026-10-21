@@ -216,6 +216,11 @@ one-position offset:
 | 447 | `Object.wait` | `System.currentTime` (`Osd;.animate`) |
 | 448 | `System.currentTime` | `Thread.sleep` (`LoadingScreen;<1010>`) |
 
+**Superseded.** The one-slot offset below was explained as a sleep/`currentTime`
+inversion; the measurement in "Ruled out: the `currentTime` surplus is not a
+script or VM defect" shows the port's `currentTime` calls are correct execution
+of `idleFor(10.0)`. The offset is real but its stated cause is not.
+
 Every call is present on both sides; the refresher thread's `wait` arrives one
 slot early in the port, pushing the rest down. The port's own event stream shows
 why: after `thread_run`, the refresher emits `ThreadEnter`, then one
@@ -250,44 +255,51 @@ divergence unambiguous:
 already converged and any conclusion drawn from the 112/338 snapshot no longer
 holds. Re-derive the original column before using this table again.
 
-The original drives its main loop with `Thread.sleep`: ordinals 447-531 are an
-almost unbroken run of `sleep` calls, and `currentTime` appears 16 times in the
-whole run. The port inverts it — 338 `currentTime` and 336 `lastKey` against 112
-`sleep` — so `Osd.animate` busy-waits on the clock and the keyboard instead of
-sleeping. That is why ordinal 446 shows `currentTime` in the original and a
-waiting thread in the port: the two programs are not executing the same kind of
-frame loop at all, and the one-slot offset is a symptom, not the cause.
+The original's ordinal 447-531 run is an almost unbroken stretch of
+`Thread.sleep` calls, which is what made this look like a sleep/`currentTime`
+inversion. **That reading is superseded** — see "Ruled out: the `currentTime`
+surplus is not a script or VM defect" below. The port's `currentTime` calls are
+the correct execution of `idleFor(10.0)`, whose comparison cannot turn true
+before ten simulated seconds.
 
-`Input.lastKey` is the sharpest signal: **the original never calls it.** 336 port
-calls to a native the stock boot does not use means a script path is being
-chosen that the original never takes.
+`Input.lastKey` remains the open lead: **the original never calls it**, and the
+port calls it ~993 times.
 
-### The sleep/currentTime inversion has one site
+The guard is now decoded exactly. `Osd.animate` (body 76) nodes 275-283 compute
 
-Every port `currentTime` call has a call site, and they collapse to one line:
+    275-280: System.resolveName inputQueue.lastElement()   (line 553)
+    281-283: 0x1007/0x07  == local0                          (line 553)
+    284:     0x1015 imm=191                               (line 650)
+
+and `0x1015` jumps (to node 475) on a **zero** payload. So `lastElement() == local0`
+being true skips the whole 285-474 region, `lastKey` included, and being false
+falls into it.
+
+Two runs disagree here, and that is the finding worth chasing:
+
+- the 331-frame run recorded `java.render.Osd.animate()V` node **294** nine
+  times on each of several threads (`lastKey` at line 557);
+- a fresh 60-frame step trace shows node 284 receiving `payload=0x1` on all 60
+  entries and never reaching node 294 (`grep -c "idx=294 op=101a"` = 0).
+
+So `local0` (the comparison's right-hand side) takes different values across
+runs. Identify what `animate`'s local 0 holds and why it differs; that decides
+whether the port has a real `lastKey` divergence or whether the 331-frame
+capture was taken under different conditions.
+
+### Current call sites for `currentTime`
 
 | site | calls |
 |---|---|
-| `java.render.Osd.idleFor(F)I` line 259 | 329 |
-| `Osd.show(I)V` line 793 | 4 |
-| `Osd.activateText(...)` line 315 | 2 |
-| `Osd.idleFor(F)I` line 267 | 2 |
-| `Vehicle.<init>` line 68 | 1 |
+| `java.render.Osd.idleFor(F)I` line 259 | 987 |
+| `Osd.show(I)V` line 793 | 12 |
+| `Osd.activateText(...)` line 315 | 6 |
+| `Osd.idleFor(F)I` line 267 | 6 |
+| `Vehicle.<init>` line 68 | 3 |
 
-329 of 338 come from `Osd.idleFor(F)I` line 259, all on the `Osd;.animate`
-thread. The original's 313 `Thread.sleep` calls are the same count in the same
-place, so this is one script line resolving to `System.currentTime` in the port
-and to `Thread.sleep` in the original — not a distributed scheduling drift.
-
-`idleFor` is body 69 (52 nodes) and its loop is visible in the bytecode: node 0
-loads, node 1 is `0x1015 imm=0x1a` (the guard), nodes 2-11 are the poll body and
-node 26 (`0x1014 imm=0x12`) is the back edge. The port's step trace shows
-`idx=1 ... COND payload=0x1` taking the jump to 26 and back to 0, i.e. the loop
-spins without ever blocking. The next step is to resolve which method the
-`0x101b`/`0x1019`/`0x101a` node triple at 7/8/9 actually names — the constant
-pool is not a flat string table (offset `0x14a` names `java.render.osd.Menu`,
-`0x14e` names `ALIGN_LEFT`), so the name must be read through `Module::strings`
-plus the pool layout rather than assumed to be a direct index.
+(331-frame run, `20261021T120239.910924Z-eac1ff00040f`.) The `idleFor` line-259
+share is the `idleFor(10.0)` branch described in the ruled-out section, not a
+scheduling artefact.
 
 Resolving that one site to `sleep` removes the `currentTime` flood and restores
 the `sleep`-driven frame loop; it accounts for 329 of the 338 port `currentTime`
@@ -320,129 +332,49 @@ so `iLevel == 3` on an `Osd` is the stock initial value, not corruption. Three o
 the four `Osd`s read 0 because `alloc_object_id` runs a field initialiser only
 when the layout slot carries one; those instances are not the animating one.
 
-### The real chain: `controlMode` is set by `show`, never cleared
+### Ruled out: the `currentTime` surplus is not a script or VM defect
 
-The port's `currentTime` flood is 329 calls from `Osd.idleFor(F)I` line 259. The
-call chain is now measured end to end.
+This section records the full investigation so it is not repeated **and** so
+nobody acts on it. `Osd.animate()V` (body 76) node 299 jumps to 316, then nodes
+300-304 call `idleFor(10.0)` on every frame the `controlMode` flag is set:
 
-1. `Osd.animate()V` (body 76) has **two** `idleFor` call sites. Nodes 19-23
-   (line 515) sit behind the guard chain `pointedGadget || controlMode ||
-   tooltip || tooltipText`; nodes 300-304 (line 559) sit behind `controlMode`
-   alone (node 297 pushes it, node 298 is `0x0004`/`||`). The port takes the
-   second. Nodes 312-315 are `controlMode = 0` at line 562 — the flag's
-   consumer. Note that `0x1014`/`0x1015` operands are **relative** displacements
-   (`jump` adds `delta` to the node index), not absolute targets.
-2. Node 307 is `0x1015 imm=9`: on a zero value it jumps to node 9, which is
-   *above* 312-315, so the clear is skipped entirely. The step trace shows
-   exactly that edge: `303 -> 305 -> 306 -> 307 -> 295`.
-3. `idleFor` returns 0 on the path the port takes, so the clear never runs.
-4. `Osd.show(I)V` (body 81) node 12 writes `controlMode` at line 786, and
-   `changeSelection2(II)V` (body 74) node 20 writes it at line 345. The port
-   calls `show` 52 times and `changeSelection2` 10 times during boot.
-5. With `controlMode` left at 1, `animate` calls `idleFor` every frame, and
-   `idleFor` calls `System.currentTime` on every entry.
+    299: 0x1014 imm=8        <- jump over the first idleFor site (nodes 19-23)
+    300: 0x1007 imm=28       <- literal marker
+    301: 0x100b imm=10       <- the integer 10, converted to f32 1.0e1 by store_with
+    302: 0x1027 imm=1
+    303: 0x0024              <- call
+    304: 0x101a idleFor
 
-`Osd.show(I)V` is a one-shot: node 0 pushes the `init` **field** and node 1
-(`0x1015 imm=14`) jumps past the body when it is already set, so
+`idleFor(F)I` then evaluates `(lastUserActivityTimeStamp + 10.0f) < currentTime()`
+at its line-259 exit. A temporary `Alu::lt` trace confirms the shape and the
+values:
 
-    0: push init; 1: if (init == 0) goto 15
-    2-5:   init = 1
-    6-8:   resetSelection()
-    10-13: controlMode = 1
+    LT l=0x41204dba(10.018976) r=0x3d12c5f9(0.035833333)
+    LT l=0x41204dba(10.018976) r=0x3d57b204(0.052660003)
+    LT l=0x41204dba(10.018976) r=0x3d8e63ff(0.069526665)
 
-sets `controlMode` only on the first `show`. A write trace on instance slot 52 over a
-200-frame run recorded only `Int/1` stores on the three `Osd` instances and
-**zero** `controlMode = 0` stores (the remaining hits are other classes whose
-layout happens to put a field at slot 52, e.g. `osd.Slider`).
+The left operand is `lastUserActivityTimeStamp` (0.018976 s, measured directly on
+`0x1486`) plus the 10.0 argument; the right operand is the clock, advancing one
+frame step per entry. The branch can therefore only turn true once the clock
+passes ~10 s, which a 331-frame run at `1000/60` ms per frame never reaches.
 
-That is surprising, because `idleFor`'s two exit sequences end in `0x002b`,
-which is `ret(host, true)` — a **value-carrying** return, not a plain one — so
-`idleFor` does not always answer 0 and the `0x1015` at node 307 does not always
-jump. The clear at 308-315 should therefore be reachable in at least some
-frames. It is not, in this run.
+**Both engines run the same script and the same operands, so this is not a port
+defect.** `controlMode` stays set, `animate` enters `idleFor` on every frame, and
+three `Osd` instances make it fire exactly three times per frame — measured as
+`{per-frame: 3}` on all 331 frames.
 
-Both candidate causes for the always-zero answer are now **excluded**, and the
-mechanism is fully traced:
+That means the original's recorded `currentTime` total of 16 cannot be compared
+against the port's 993 without re-deriving it: the same table's `sleep` column is
+already stale (112 recorded, 336 measured on the current tree). Until the
+original column is re-measured on the current tree, **do not treat the
+`currentTime` count as evidence of a divergence**, and do not "fix" `controlMode`
+or `idleFor` to reduce it.
 
-```
-STEP idleFor(F)I idx=49 op=002b        <- ret(with_value = true)
-  RET value tag=Int payload=0x0
-STEP animate()V idx=305 op=1007 imm=27 <- sub-op 0x1b: no case, a no-op here
-STEP animate()V idx=306 op=1007 imm=2
-STEP animate()V idx=307 op=1015 imm=9
-  COND value tag=Int payload=0x0
-```
-
-`ret` restores the pc and pushes the callee's value correctly, and the two
-`0x1007` fixups do not replace it. The zero is `idleFor`'s **own** answer, and it
-is correct for the branch it took. `idleFor` has two exit expressions:
-
-| exit | bytes | answer |
-|---|---|---|
-| nodes 7-20 (line 259) | `(lastUserActivityTimeStamp + dt) < currentTime()` | `lt`, node 16 sub-op `0x0b` |
-| nodes 44-49 (line 272) | f32 `0.0` literal | constant 0 |
-
-Measured operands of that `lt` on consecutive entries, via a temporary trace in
-`Alu::lt`:
-
-    LT l=Float/41204dba r=Float/3d12c5f9      l = 10.0189
-    LT l=Float/41204dba r=Float/3d57b204      r = 0.0358 -> 0.0527 -> 0.0695
-    LT l=Float/41204dba r=Float/3d8e63ff
-
-The left operand is **constant at 10.0189 s** and the right operand is the clock
-climbing at roughly one frame step per entry. So `lastUserActivityTimeStamp` was
-stamped at 9.0189 s and never refreshed, and the branch cannot turn true until
-the clock passes 10.0189 s — about 600 frames at `1000/60` ms per frame, which a
-331-frame run never reaches. `Osd.show(I)V` is what stamps it (node 29 calls
-`currentTime`, node 31 pushes the field), so the stamp's absolute value depends
-on how far the simulated clock had advanced when the first `show` ran.
-
-The port takes the line-265/272 branch (`idx=27`, then 38-43), which sets
-`focusTracker = 1`, refreshes `lastUserActivityTimeStamp`, and returns `0.0`
-meaning "nothing left to wait for". `0x1015` at 307 therefore jumps, `controlMode`
-is never cleared, and the next frame re-enters with the flag still set.
-
-Every step of that chain matches the script, so the port is not mis-executing
-`idleFor`. The open question is now narrow and testable: the original's capture
-says `currentTime` appears 16 times across the whole run, yet the port's steady
-state is three per frame. Given the constant left operand above, the port cannot
-leave that branch before the clock passes the stamp plus one second, and the
-stamp inherits whatever the simulated clock had reached at first `show`.
-
-Two things would settle it, and both are reachable without running the exe:
-
-1. Re-derive the original column of the native-count table. It is stale on the
-   `sleep` side (112 recorded, 336 measured now), so the 16 may be equally out of
-   date.
-2. Check whether the original's clock advances during boot the same way. The
-   port's `configure_clock(0.01)` model adds `step` on **every read**
-   (`sched::clock_ms`), so a boot phase that reads the clock heavily inflates
-   the absolute time before the first frame. A wall clock would not. If the
-   original's `lastUserActivityTimeStamp` is stamped near zero instead of 9 s,
-   its branch turns true after one second and `controlMode` clears — which is
-   exactly the 16-versus-993 shape.
-
-Candidate 2 is the more promising: it makes the divergence a property of the
-clock model, not of the script or the VM, and it is checkable by printing the
-clock at first `show`.
-
-The call rate is exactly three per frame — one for each `Osd` whose
-`controlMode` is 1 — confirmed across all 331 frames of the run above
-(`{per-frame: 3}` for every frame). So the divergence is not sporadic: it is the
-steady state of three instances that never clear the flag.
-
-The port's `Thread.sleep` counts are already right (336 against the original's
-313), so frame pacing itself is not the divergence.
-
-Measured field values after `animate_pass` on the four `Osd` instances:
-
-    0x101d  iLevel=3  controlMode=1  focusTracker=0
-    0x104f  iLevel=0  controlMode=1  focusTracker=0
-    0x1427  iLevel=0  controlMode=0  focusTracker=0
-    0x1486  iLevel=3  controlMode=1  focusTracker=1   <- the only one animated
-
-Only `0x84f100` (container of `0x1486`) is on the `0x1c` callback list; the other
-three containers the engine animates are `0x84ff00`, `0x850100`, `0x855000`.
+What *is* worth checking, and is independent of this: whether
+`configure_clock(step)` is the right model. It adds `step` on **every read**
+(`sched::clock_ms`), so a boot phase that reads the clock heavily inflates
+absolute time — the port makes 230 reads before frame 0. A wall clock does not
+behave that way, and that difference is real regardless of the `idleFor` question.
 
 ### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
 
