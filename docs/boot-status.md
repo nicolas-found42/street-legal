@@ -640,6 +640,117 @@ than when the screen's events are first queued - i.e. what in the
 `native-player-frame` control phase triggers it, and whether the original creates
 it during `enter()` instead.
 
+### Part construction is incomplete: missing `setTexture`, `getSlots`, `getSlotID`
+
+Comparing the two call logs by `class.name` exposes a concrete, non-timing gap.
+The filtered oracle bundle `20261021T120133.016761Z-62ab81f49e10/inputs/` holds the
+oracle log; the port's is `runtime/runtime.calllog` of the failing run.
+
+| native | oracle | port |
+|---|---|---|
+| `java.game.parts.Part.setTexture` | 112 | **1** |
+| `java.game.parts.Part.getSlots` | 1 | **0** |
+| `java.game.parts.Part.getSlotID` | 76 | **0** |
+| `java.game.parts.Part.setWear` | 116 | 58 |
+| `java.game.parts.Part.setTear` | 116 | 58 |
+| `java.util.resource.ResourceRef.destroy` | 19 | **135** |
+
+The single surviving `setTexture` is the one `Chassis.addStockParts` line 582
+issues for the chassis itself; every per-part application is gone. The 76
+`getSlotID` calls pair with the single `getSlots()` that returned 76, i.e. one
+full slot-table walk, and that walk never happens in the port.
+
+**Where it is lost.** `Part.addPart` body line 719 carries a conditional on the
+variable declared at line 686 (slot 5) and the `getParentID()` result:
+
+    126  0x0024   CallResolved, resolves through 127-129 to getParentID
+    130  0x1007/0x1b  silent no-op
+    131  0x1001   load local 5
+    132  0x1007/0x06  `!=`
+    133  0x002d   store into slot 9
+    134  0x1001   load local 9
+    135  0x1015 imm=22  jump when false -> 157 (line 725, destroy)
+
+A jump at 135 steps over 136-156, which contain both `addStockParts` (141, line
+717) and `setTexture` (154, line 719). Confirmed with `SLR_TRACE_STEPS=1`: every
+one of the 68 `addPart` calls either takes the early `getCar()` return at node 12
+or jumps at 135; **none reaches node 141 or 154**.
+
+The operands are equal, so `!=` is 0 and the jump fires. Instrumented for one
+call:
+
+    LOADLOCAL imm=5 len=10 slot=Var(VarId{index:43,g4}) value=Int 4294901877
+    ASSIGN value=Int 0 -> local VarId{index:44,g4}
+    LOADLOCAL imm=9 ... value=Int 0
+    COND value Int 0x0  -> jump to 157
+
+So slot 5 already holds `4294901877` (0xFFFF0075, the same value the immediately
+preceding `getParentID` returned) at the point of comparison. Slot 5 is written
+at line 691 by `0x1008/0x23`, and line 691 is where the oracle gets
+`getParentID = -65419`. In other words the comparison is "did the parent id
+change since line 691", and the original answers yes while the port answers no:
+the resource created between lines 691 and 714 is not re-parented in the port.
+
+That is the defect to chase next - `GameRef.create` / resource re-parenting, not
+the VM's `!=` (verified correct: `0.0f != -65419` returns 1 in a unit probe) and
+not `0x1015` (payload-zero jumps, matching `docs/tufa-executor.md`).
+
+Corpus check backing `declare`: all 2081 `0x1002` nodes in `stock/` are followed
+by a `0x1006` type node, so reading the type from the follower is right; the
+`0x1002` immediate is the local slot index.
+
+**The re-parenting gap is now measured directly.** `getParentID` result
+distributions over the whole boot:
+
+    oracle:  58 x -65426  (0xFFFF006E)   and  58 x -65419  (0xFFFF0075)
+    port:   116 x -65419
+
+and in the oracle the two strictly alternate by predecessor call:
+
+    after ResourceRef.set(-65426)      -> getParentID = -65419
+    after GameRef.queueEvent(..., 16)  -> getParentID = -65426
+
+The port answers -65419 in both positions, so the node's container chain never
+reaches the freshly created resource. `queueEvent` arguments and counts match
+(69 vs 68), and `create` returns the same shape of id (oracle #291 -> 546735632,
+port #291 -> 4389), so creation itself is not the divergence - the parent link
+is.
+
+Candidate sites, in the order to check them:
+
+* `ResourceHost::create` (`node.rs:1494-1503`) relinks the node with
+  `insert_head(container, node)` against `created_result`. If the original only
+  rewrites the wrapper id (`nodes[node].id = containers[container].id`) and
+  leaves `nodes[node].container` on the old container, this relink is the
+  divergence - and it would explain why the port can never see -65426.
+* `Container::parent` set at `factory.rs:159`/`346` is `root.container`, i.e.
+  `owner_container` or `world.game`. `parent_id` (`node.rs:1802`) then returns
+  `containers[containers[node.container].parent].id`, so a container whose parent
+  is itself (or the new container) is what produces -65426.
+
+Resolve it against the oracle wrapper vectors (`re/oracle/part_probe.py`,
+`crates/slr-resource/tests/wrapper_oracle.rs`) before changing either site: the
+distinguishing observation is a `getParentID` immediately after `queueEvent` on a
+`create`d wrapper.
+
+Existing oracle coverage does not settle it. `re/out/res/resnode.jsonl` has three
+`getParentID` rows:
+
+    parent_id_no_field  node.container=0  eax=0
+    parent_id_unbound   node.container=0  eax=0
+    parent_id_bound     node.container=3  eax=null  error UnmappedAccess
+
+The only bound case faults reading `[[R+0xc]+0x14]+0x50`, which is the ADR 0007
+original-bug divergence recorded in `node.rs:49`. So no oracle row observes a
+*live* parent id, and the port's `-65419`-everywhere cannot be falsified against
+the current vectors: **a new probe is needed**. The minimal one is a node whose
+container word points at a container whose `+0x14` parent points at a second
+container with a known `+0x50` id, which would give `getParentID` a definite
+value for three shapes (parent == self, parent == sibling, parent == world).
+`re/oracle/resnode_vectors.py` already lays out `R = {prev,next,id,container}`
+and `X` with `+0x14 parent`, `+0x50 id`, so the row is a small addition, not new
+tooling.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
