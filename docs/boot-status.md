@@ -283,9 +283,35 @@ Two runs disagree here, and that is the finding worth chasing:
   entries and never reaching node 294 (`grep -c "idx=294 op=101a"` = 0).
 
 So `local0` (the comparison's right-hand side) takes different values across
-runs. Identify what `animate`'s local 0 holds and why it differs; that decides
-whether the port has a real `lastKey` divergence or whether the 331-frame
-capture was taken under different conditions.
+runs, and the declaration graph explains how:
+
+- node 27 (`0x1002 imm=1`, line 517) declares exactly **one** local, so `animate`
+  has local 0 and nothing else;
+- node 26 (`0x1015 imm=239`) jumps to 265, which steps over nodes 27-264 — the
+  only region that would assign it (`0x002c`/`0x1006` at 28-29 open the scope,
+  `getPos()` at 31-37 feeds it);
+- nodes 257-264 then free locals 8 down to 1 at line 547, and nodes 275-283 read
+  local 0 at line 553 — after that free.
+
+`declare` (`host.rs:1952`) initialises every local to `payload: 0` with the
+declared tag, so a read-before-write local is a stable zero. A 60-frame step
+trace confirms the shape on both guards:
+
+    idx=26  COND payload=0x0  (60 of 60)  -> jumps to 265, skipping 27-264
+    idx=284 COND payload=0x1  (60 of 60)  -> falls through to 285
+
+so local 0 stays 0, `inputQueue.lastElement() == 0` evaluates true, node 284
+does **not** jump, and the 285-474 region — `lastKey` at node 294 included — is
+entered. The trace shows node 285 entered 72 times, 6 of them from node 284;
+`lastKey` therefore really does run, on both engines' script.
+
+That leaves the sharpest open question in this whole area, stated plainly: the
+port calls `Input.lastKey` ~993 times and the original's capture records
+**zero**. The script path is the same, so either the original's `inputQueue` is
+non-empty in a way the port's is not at node 280 (making the `==` false and
+skipping the region), or the original's capture predates this path. Settling it
+needs `inputQueue.lastElement()` compared between the two, which is a
+one-line probe away on the port side and a capture on the original side.
 
 ### Current call sites for `currentTime`
 
