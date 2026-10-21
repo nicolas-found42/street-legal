@@ -805,6 +805,69 @@ thing to lift: make `53a5e0` write a real parent word and read the new
 container's `+0x14`/`+0x50` back. Until that is measured, do not guess between
 "parent = owner" and "parent = new container".
 
+**Measured, and it rules out the `create` relink.** `boot_bridge_probe.py
+real_link` now reads the created container back:
+
+    created_container_is_node_container: false
+    created_container_parent: 0
+    created_container_id: 123
+    owner_container: 536872368
+
+A *bound* node keeps its own container; only the wrapper id changes. So
+`0x47d7b0` does not move a bound node, and a variant of the port's
+`insert_head(container, node)` restricted to bound nodes was tried and reverted:
+it changed neither the `getParentID` distribution (still 116 x 4294901877) nor
+the `setTexture`/`getSlots`/`getSlotID` counts.
+
+The reason it could not have helped is measured too: every one of the 69
+`create` calls in a boot run has `node_container=0x0`, i.e. an **unbound** node,
+for which the port's unlink/insert path is the one the probe does not cover and
+the original does bind the node to the new container. So the `create` site is
+consistent with the evidence available and is not the divergence.
+
+What is left: the parent id `-65419` reaches the created wrappers from the
+container they end up in. Since they are unbound and join the newly created
+container, the question is that container's `+0x14`. The port sets it to
+`root.container` in `factory.rs:159`/`:346`; the original's own container has
+`+0x14 = 0` in the probe. That difference - new container parent 0 versus
+owner - is now the single unexplained link, and it is exactly what decides
+`getParentID` for these wrappers.
+
+**The probe now reads that container directly, and it does not match the
+production path.** With `real_link` the probe reports:
+
+    node_container:            536870976
+      +0x14 parent:            0
+      +0x50 id:                123        (= the new resource id)
+    owner_container:           536872368
+    created_container_in_list: false       (53a5e0's own 0x423c00 container differs)
+
+So the original's created container has `+0x14 = 0` and its own id, while in the
+boot run `getParentID` at `Part.addPart:714` returns `-65426`, the *new resource's
+id*. `parent_id` over a `+0x14 = 0` container yields `containers[0].id`, which is 0
+unless container 0 exists - so the two observations are only consistent if the
+production path's container has a non-zero `+0x14`, i.e. the probe's unbound
+scenario (`data+0x44 = 0`, node container 0) is *not* what the boot hits.
+
+The controlling call sequence in the oracle log is unambiguous about the shape:
+
+    #615 GameRef.create(...)          -> new resource
+    #618 ResourceRef.id()             -> -65426   (the new id)
+    #620 GameRef.queueEvent(0,16,...)
+    #621 ResourceRef.getParentID()    -> -65426   (equals the new id)
+    #624 Part.setTexture(196678)      <- first of the 112
+    #630 ResourceRef.getParentID()    -> -65419   (the next wrapper)
+
+`#621` returning the *new* id while `#630` returns the owner's is what makes
+`!=` true at line 714 and lets `setTexture` run; the port answering `-65419` at
+both points is what makes `!=` false and skips it.
+
+Next: build the probe case that matches production - a *bound* node whose
+`create` result is a fresh container - and read that container's `+0x14`. Keep
+`parent_id` as it is until that row exists; the current evidence cannot decide
+between "parent = the new container" and "parent = a container whose id is the
+new resource", and they are different words.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames

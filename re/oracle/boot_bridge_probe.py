@@ -88,7 +88,14 @@ def run(script, dispatch_result=0, real_link=False):
     hook(0x419860, 4, gtype, "thiscall")
     hook(0x41F340, 4, thread, "thiscall")
     hook(0x404E20, 0, instance, "thiscall")
-    hook(0x423C00, 0, lambda oc, a: mem(12))
+    created_containers = []
+
+    def alloc_container(oc, a):
+        c = mem(32)
+        created_containers.append(c)
+        return c
+
+    hook(0x423C00, 0, alloc_container)
 
     def resize(oc, a):
         p = oc.reg("ecx")
@@ -204,6 +211,17 @@ def run(script, dispatch_result=0, real_link=False):
         assert o.read_u32s(native_ptr, 4) == [0, 0, 123, node]
         assert o.read_u32(node + 0x48) == native_ptr
         assert o.read_u32(data + 0x50) == instance
+        # What decides getParentID for the created wrapper: the container the
+        # node now sits in, and that container's +0x14 parent word.
+        created_container = o.read_u32(native_ptr + 0xC)
+        created_readback = [
+            {
+                "container": c,
+                "parent": o.read_u32(c + 0x14),
+                "id": o.read_u32(c + 0x50),
+            }
+            for c in created_containers
+        ]
         link_state = {
             "id": 123,
             "owner": "native-node",
@@ -211,6 +229,16 @@ def run(script, dispatch_result=0, real_link=False):
             "next": 0,
             "owner_head_matches": True,
             "script_backref_matches": True,
+            "created_container_is_node_container": created_container == container,
+            "created_container_parent": o.read_u32(created_container + 0x14),
+            "created_container_id": o.read_u32(created_container + 0x50),
+            "owner_container": container,
+            "created_containers": created_readback,
+            "node_container_is_created": o.read_u32(native_ptr + 0xC) == created_container,
+            "created_container_in_list": created_container in created_containers,
+            "node_container": created_container,
+            "node_container_parent": o.read_u32(created_container + 0x14),
+            "node_container_id": o.read_u32(created_container + 0x50),
         }
     calls = [e["call"] for e in events]
     if script:
@@ -256,3 +284,12 @@ def run(script, dispatch_result=0, real_link=False):
 if __name__ == "__main__":
     for script, result in [(False, 0), (True, 0), (True, 1)]:
         print(json.dumps(run(script, result), sort_keys=True))
+    # real_link: read the new container's parent and id words back, which is what
+    # decides getParentID for a created wrapper.
+    row = run(True, 0, real_link=True)
+    print(json.dumps({
+        "scope": "real_link container parent/id readback",
+        "link_state": row.get("link_state"),
+        "constructor_link_state": row.get("constructor_link_state"),
+        "native_observations": row.get("native_observations"),
+    }, sort_keys=True))
