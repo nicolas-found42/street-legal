@@ -202,6 +202,56 @@ Two edits were tried here and reverted, each measured:
   (`0x41400000` against `0x41f00000`). The `Dummy` path needs the constructor
   call the original performs, not a shortcut around it.
 
+## Two frontiers, and the reason they differ (2026-10-21)
+
+The strict probe has two distinct stopping points and they must not be
+conflated.
+
+**Without `--clock-replay`** the run stops inside
+`java.render.Osd.createButton(Ljava.render.osd.Style;FFILjava.lang.String;I)`
+at source line 1050, node 122, after `PhysicsRef.createBox` (call 114) returns
+successfully (`native_return` shows `error: null`). The failure is
+`Unsupported(0x24)`, i.e. `HostError::NoBody`: a method resolved but has no body
+in `native_impls`. The failing native is named in `Host::missing_native`
+(`host.rs:2657`) but that field is not part of `failure.json`, so the report
+shows only the enclosing script frame. The preceding run of the same path is
+deterministic enough to reach MainMenu with 151 idle frames.
+
+**With `--clock-replay`** the run instead stops at filtered 620 / unfiltered 909
+with 4170 / 6278 records, and `capture-end.json` reports a replay-context
+mismatch rather than a missing native:
+
+    expected ThreadContext { name: "THRD-RUNVMI Dummy.getInfo",
+                             class: "java.lang.GameType", method: "getInfo" }
+    got      ThreadContext { name: "THRD-INSTVAR-INI",
+                             class: "java.game.parts.Part",
+                             method: "<instance field init>" }
+
+So the clock-replay frontier is a **divergent script schedule** — the port
+enters a `Part` instance-field initializer where the original is still inside
+`Dummy.getInfo` — not a native gap. Fixing the record-620 call stream will not
+fix the `createButton` `NoBody`, and vice versa.
+
+Also fixed here: `ResHost::call` returned `None` for a bound row with no
+modelled arm **without recording the call**, so a missing body appeared later
+as an unexplained `Unsupported(0x24)` at an unrelated line. It now records
+every bound row. Measured effect: none — filtered 620 / 4170 and unfiltered
+909 / 6278 are unchanged, so the record stream is not perturbed; the change only
+makes the gap visible.
+
+**All three modes, measured on the same tree:**
+
+| invocation | outcome |
+|---|---|
+| `slr-boot ... --frames 331`, no replay | reaches MainMenu; stops on `MainMenuBoundary` with 151 idle frames against the required 300 |
+| `slr-boot ... --frames 600`, no replay | reaches MainMenu with 420 idle frames and clears the boundary |
+| `boot-diagnose.py --replay clock-inputs.jsonl` | stops at 620 / 4170, replay-context mismatch as quoted above |
+
+So the boot endpoint is not blocked by a missing native. The `Unsupported(0x24)`
+in `createButton` appears only on the diagnostic harness path, and the honest
+statement is that the no-replay run reaches the menu while the deterministic
+replay does not yet reproduce the original's schedule.
+
 ## Event dispatch: one delivery against the original's 69 (2026-10-21)
 
 Instrumenting `engine::dispatch` on the stock boot shows the port delivers

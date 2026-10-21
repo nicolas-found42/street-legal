@@ -1440,7 +1440,11 @@ impl ResHost {
                 }
                 None
             }
-            _ => return None,
+            // A bound row with no modelled body still answers `None`, but it
+            // must appear in the record stream: a silent gap here hides which
+            // native returned, and the failure surfaces later as a bare
+            // `Unsupported(0x24)` at an unrelated script line.
+            _ => None,
         };
         let sig = row.sig;
         let args = param_types(sig)
