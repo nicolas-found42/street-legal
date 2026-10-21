@@ -80,6 +80,61 @@ yields 151 idle frames. Both halves of the boot endpoint therefore remain open:
 the replay mismatch blocks the run, and filtered native-log equality fails at
 record 620 regardless.
 
+## Event dispatch: one delivery against the original's 69 (2026-10-21)
+
+Instrumenting `engine::dispatch` on the stock boot shows the port delivers
+**one** script event in 331 frames (`DISPATCH container=0x84ef00 type=0x80
+method=handleEvent arg=Int(1)`), while the original's log has 69 `queueEvent`
+rows and 58 `getScriptInstance` rows. `dispatch` is entered many times and the
+type gate passes (`type_id = Some(1)`), but it stops at
+`instance_mask & mask != 0`.
+
+The masks the port holds come from `GameType.setEventMask` and land on the
+*subscriber* containers the script passes as `this`:
+
+    SET_MASK 0x614800 0x10000      SET_MASK 0x614400 0x10010
+    SET_MASK 0x615200 0x10000      SET_MASK 0x844e00 0x10000
+    SET_MASK 0x614700 0x110000     SET_MASK 0x628100 0x100080
+
+but the delivery targets are `0x615e00` (mask `0x10`, ok) and `0x616200`
+(mask `0x0`, blocked), so only the first ever reaches `call_script`. The
+original's `0x426653 test [esi+0x70], ecx` reads the mask off the *event
+target* it resolved through `0x42ab50`, which is evidently a container the port
+does not put a mask on.
+
+This is the same missing-link family as the `addPart` gap: without the delivery,
+`GameRef.command`'s `addpart` message never reaches `handleEvent`, `isComplex`
+stays 0, and `addPart`'s node 135 keeps branching to `destroy`. The counts in
+the table above are the end-to-end signal.
+
+Two candidate fixes were tried and reverted, each measured:
+
+- resolving the target from the `ResourceRef` argument slot
+  (`0x47da57`) instead of the receiver was behaviourally neutral — still 4170
+  filtered records, first divergence at 620.
+- letting a null argument fall back to `DEFAULT_RESOURCE_WORD` (`0x636460`,
+  the bound game root) makes the port dispatch on that container and then
+  abort: filtered records collapse from 4170 to 443 and the first divergence
+  moves to record 156 with a `queueEvent` where the original has `File.open`.
+  So the game root is not the container the original's `0x42ab50` returns for
+  this call, and dispatching on it runs a script path the original does not
+  take at that point. The abort is the clock-replay check firing on a different
+  thread than expected: `expected THRD-RUNVMI Controller.setcontrol, got
+  THRD-RUNVMI Ljava.io.MouseCursor;.getInfo`, i.e. the fallback delivers an
+  event the original never delivers, which shifts the thread sequence by the
+  time the replay reaches that request.
+
+A further probe settles the input side: `marshal_args` reports the real
+`queueEvent` words as `[this, 0, 16, <string>, 0, 0]` — the `ResourceRef`
+argument slot is a genuine zero, not a masked pointer, and
+`container_of(0)` is `None`. So the port never had a non-null argument to
+resolve. `0x42ab5d` in `0x42ab50` dereferences `[edi+0x10]`, which means the
+word it receives is an object, not either slot as the port reads them; the
+remaining work is to establish `0x42ab50`'s exact ABI (which register and which
+stack word it uses, and what it returns for the null case) with a Unicorn
+call built from a real invocation rather than from the two guesses tried
+here.
+
 ## Boot frontier: record 620, investigated 2026-10-21 (after `fe6f2e5`)
 
 Reproduce:
