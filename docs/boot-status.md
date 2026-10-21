@@ -868,6 +868,36 @@ Next: build the probe case that matches production - a *bound* node whose
 between "parent = the new container" and "parent = a container whose id is the
 new resource", and they are different words.
 
+**Both halves are now measured.** Forcing the created container's `+0x14` to
+point at itself makes the original's `getParentID` return `123`, the container's
+own `+0x50`:
+
+    self_parent_getParentID: 123
+    node_container_id:       123
+
+That is exactly the shape the boot log shows at `#621` (`getParentID` = the new
+resource's id), so a self-parent container is the mechanism that produces
+`-65426`.
+
+But `53a5e0` does **not** write that word. Its full engine-call sequence in the
+probe is
+
+    0x404e20 0x423c00 0x405180 0x41f9f0 0x4207c0 0x420ff0
+    0x405180 0x427210 0x544b90 0x4988a0 0x498b10 0x48ae40
+
+with no `setParent` (`0x48aba0`) anywhere, so the `+0x14` I read back as 0 is the
+allocator's zero-init, not an original write. A container with `+0x14 = 0` makes
+`0x48ab80` read address `0x50` and fault (`parent_id_bound` shows exactly that
+`UnmappedAccess`), while the boot run neither faults nor returns 0 - so in
+production something *else* sets the parent word.
+
+That something is one of the stubbed boundaries above (`0x427210` /
+`0x48ae40` are the only calls after the container is linked). The next probe must
+un-stub those two for the created container and read `+0x14` after each, which
+will name the writer directly. Do not change `parent_id` or the factory's
+`c.parent = root.container` until that writer is named - the port's value is the
+owner, the original's is the resource itself, and the difference is one call.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames

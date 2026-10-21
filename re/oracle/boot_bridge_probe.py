@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oracle import Oracle, CW_D3D9
 
 
-def run(script, dispatch_result=0, real_link=False):
+def run(script, dispatch_result=0, real_link=False, bound_request=False):
     exe = (
         Path(__file__).resolve().parents[2]
         / "reference/raw/StreetLegal_Redline.bak.exe"
@@ -142,6 +142,17 @@ def run(script, dispatch_result=0, real_link=False):
     hook(0x498B10, 0, 0, "thiscall")
     hook(0x48AE40, 0)
     hook(0x420FF0, 1, 0.0, "thiscall")
+    if real_link and bound_request:
+        # Production shape: the wrapper's node already sits in a container, and
+        # create still allocates a fresh one. Bind node to its own container so
+        # 53a5e0 sees a non-zero +0xc.
+        bound_container = mem(0x120)
+        o.write_u32(bound_container + 0x14, 0)
+        o.write_u32(bound_container + 0x50, 0x777)
+        o.write_u32(node + 0xC, bound_container)
+        # keep the owner container reachable: 53a5e0 links the created node under
+        # it, so its +0x14 must not fault when read
+        o.write_u32(container + 0x14, 0)
     args = [root, request, 0, 0]
     try:
         r = o.call(0x53A5E0, args, limit=100000, fpu_cw=CW_D3D9)
@@ -214,6 +225,19 @@ def run(script, dispatch_result=0, real_link=False):
         # What decides getParentID for the created wrapper: the container the
         # node now sits in, and that container's +0x14 parent word.
         created_container = o.read_u32(native_ptr + 0xC)
+        # Does getParentID work when the container's +0x14 points at itself?
+        saved = o.read_u32(created_container + 0x14)
+        o.write_u32(created_container + 0x14, created_container)
+        from io_vectors import _call_frame, _cell as _c
+        frame_pid = _call_frame(
+            o,
+            "java.util.resource.ResourceRef",
+            "getParentID",
+            "()I",
+            [_c(o, "L", instance)],
+        )
+        self_parent = o.call(0x47D3E0, [frame_pid], fpu_cw=CW_D3D9).eax
+        o.write_u32(created_container + 0x14, saved)
         created_readback = [
             {
                 "container": c,
@@ -239,6 +263,7 @@ def run(script, dispatch_result=0, real_link=False):
             "node_container": created_container,
             "node_container_parent": o.read_u32(created_container + 0x14),
             "node_container_id": o.read_u32(created_container + 0x50),
+            "self_parent_getParentID": self_parent,
         }
     calls = [e["call"] for e in events]
     if script:
@@ -286,7 +311,7 @@ if __name__ == "__main__":
         print(json.dumps(run(script, result), sort_keys=True))
     # real_link: read the new container's parent and id words back, which is what
     # decides getParentID for a created wrapper.
-    row = run(True, 0, real_link=True)
+    row = run(True, 0, real_link=True, bound_request=True)
     print(json.dumps({
         "scope": "real_link container parent/id readback",
         "link_state": row.get("link_state"),
