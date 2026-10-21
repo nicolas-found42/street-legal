@@ -905,6 +905,16 @@ fn control_pass(vm: &mut VmHost, dt: f32) -> Result<(), String> {
 }
 
 /// exe: FUN_00426fd0 over the kind-0x1c list.
+/// Is `container` on the kind-`0x1c` (`animate`) callback list?
+#[must_use]
+pub fn registered_animate(container: u32) -> bool {
+    with(|s| {
+        s.callbacks
+            .get(&0x1c)
+            .is_some_and(|list| list.contains(&container))
+    })
+}
+
 pub fn animate_pass(vm: &mut VmHost) -> Result<(), String> {
     let list = with(|s| s.callbacks.get(&0x1c).cloned().unwrap_or_default());
     for container in list {

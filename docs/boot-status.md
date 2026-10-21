@@ -283,71 +283,93 @@ pool is not a flat string table (offset `0x14a` names `java.render.osd.Menu`,
 `0x14e` names `ALIGN_LEFT`), so the name must be read through `Module::strings`
 plus the pool layout rather than assumed to be a direct index.
 
-Fixing this one line removes the `currentTime` flood, restores the `sleep`-driven
-frame loop, and is the single highest-value change available: it addresses the
-46 % of port native calls that the original does not make.
+Resolving that one site to `sleep` removes the `currentTime` flood and restores
+the `sleep`-driven frame loop; it accounts for 329 of the 338 port `currentTime`
+calls and is the single highest-value change available.
 
-### The trigger is `Osd.iLevel` against `IL_TIPS`
+### Ruled out: the `Osd.iLevel`/`IL_TIPS` guard
 
-`idleFor` node 3 (`0x0024`, line 258) enters `Osd.isFocused()I`, and node 6
-(`0x1015 imm=0x10`) then decides whether to skip the waiting block. The port
-takes the loop-back edge at node 26→0 without blocking, so the wait is never
-entered.
+Kept so the next agent does not repeat it. `idleFor` (body 69) node 3 calls
+`Osd.isFocused()I`; the guard was suspected of being the divergence. It is not.
 
-Resolving the two field references in `Osd.isFocused` (body 127) through
-`Loader::field_reference_of` — the same function the interpreter uses — names
-them exactly:
+`Loader::field_reference_of` names the two references in `isFocused` (body 127)
+exactly, and a temporary binop trace showed the comparison evaluating correctly:
 
-    0 op=0x101b off=0x1f0 -> java.render.Osd iLevel  I
-    1 op=0x101b off=0x256 -> java.render.Osd IL_TIPS I
-    2 op=0x1007 imm=0x9   -> sub-op 9 = `<=`
-    3 op=0x0005           -> `&&` short-circuit
+    BINOP sub=0x9 second=Int/3 first=Int/1
+    LE l=Int/3 r=Int/1 greater=true result=false
 
-So the guard is `iLevel <= IL_TIPS && …`. The port evaluates the left side true
-and falls into the `lastElement()` branch; the original evaluates it false. The
-companion body 84 confirms the same pair with the opposite operator: nodes 0-3
-are `iLevel`, `IL_TIPS`, `0x1007 sub_op 0xa` (`>`), then a conditional jump, i.e.
-the setter branches on `iLevel > IL_TIPS`.
+`iLevel <= IL_TIPS` is false, `0x0005` (`&&`) skips node 4, and the port executes
+nodes 5-6. Re-reading `0x0005`: it skips the **next** node on the short-circuiting
+value, and node 4 is the unconditional jump to 11, so taking 5-6 is correct.
+Both engines reach `lastElement()` here.
 
-This is a **state** divergence, not name resolution, not a residual slot, and not
-a native. `iLevel`/`IL_TIPS` are plain `int` fields of `Osd`.
+`iLevel` is also not stuck. `Osd` declares `int iLevel = IL_MENU`, and its field
+initialiser is body 43:
 
-Measured on the port (`SLR_OSD_PROBE=1`, which dumps every live `Osd`):
+    body 43:  0x101b imm=498 (IL_MENU)  0x0010
+    body 39:  IL_NONE = 0     body 40: IL_TIPS = 1
+    body 41:  IL_KEYS = 2     body 42: IL_MENU = 3
 
-| object | `iLevel` | `IL_TIPS` |
-|---|---|---|
-| `0x101d` | 3 | 1 |
-| `0x1486` | 3 | 1 |
-| `0x104f` | 0 | 1 |
-| `0x1427` | 0 | 1 |
+so `iLevel == 3` on an `Osd` is the stock initial value, not corruption. Three of
+the four `Osd`s read 0 because `alloc_object_id` runs a field initialiser only
+when the layout slot carries one; those instances are not the animating one.
 
-`IL_TIPS` is 1 everywhere. `isFocused`'s guard is therefore `iLevel <= 1`, which
-the two `iLevel == 0` objects satisfy and the two `iLevel == 3` objects do not.
-The port is running `animate` in an `Osd` that never left 0. `Osd.setLevel` is
-never called in the whole boot (`grep -c "Osd.setLevel"` on the step trace is 0),
-so `iLevel` comes only from the field-initialiser bodies; body 84 is the only
-assignment site (`iLevel`, `IL_TIPS`, `0x1007 sub_op 0xa` (`>`), conditional jump,
-then `0x1008` store at line 845), and nothing in the port reaches it.
+### The real chain: `controlMode` is set by `show`, never cleared
 
-Only **four** containers are registered for the `0x1c` (`animate`) callback; the
-port's 331 distinct `THRD-RUNVMI ...Osd;.animate` thread ids are those four being
-re-entered once per frame (4 containers × ~83 frames), because `engine::animate_pass`
-runs each callback through `call_script`, which mints a fresh thread per call.
-So the thread count is not a leak and not a second copy of the loop — the same
-four `Osd` objects animate on both sides.
+The port's `currentTime` flood is 329 calls from `Osd.idleFor(F)I` line 259. The
+call chain is now measured end to end.
 
-That narrows the defect to exactly two of those four objects: their `iLevel` stays
-0 while the other two hold 3. `Osd.setLevel` is never called during boot, so the
-value can only come from the field-initialiser block, and the port reaches the
-assignment path (body 84) for two instances and not the other two. The next step
-is to find what distinguishes those two construction paths.
+1. `Osd.animate()V` (body 76) has **two** `idleFor` call sites. Nodes 19-23
+   (line 515) sit behind the guard chain `pointedGadget || controlMode ||
+   tooltip || tooltipText`; nodes 300-304 (line 559) sit behind `controlMode`
+   alone (node 297 pushes it, node 298 is `0x0004`/`||`). The port takes the
+   second. Nodes 312-315 are `controlMode = 0` at line 562 — the flag's
+   consumer. Note that `0x1014`/`0x1015` operands are **relative** displacements
+   (`jump` adds `delta` to the node index), not absolute targets.
+2. Node 307 is `0x1015 imm=9`: on a zero value it jumps to node 9, which is
+   *above* 312-315, so the clear is skipped entirely. The step trace shows
+   exactly that edge: `303 -> 305 -> 306 -> 307 -> 295`.
+3. `idleFor` returns 0 on the path the port takes, so the clear never runs.
+4. `Osd.show(I)V` (body 81) node 12 writes `controlMode` at line 786, and
+   `changeSelection2(II)V` (body 74) node 20 writes it at line 345. The port
+   calls `show` 52 times and `changeSelection2` 10 times during boot.
+5. With `controlMode` left at 1, `animate` calls `idleFor` every frame, and
+   `idleFor` calls `System.currentTime` on every entry.
 
+`Osd.show(I)V` is a one-shot: node 0 pushes the `init` **field** and node 1
+(`0x1015 imm=14`) jumps past the body when it is already set, so
 
+    0: push init; 1: if (init == 0) goto 15
+    2-5:   init = 1
+    6-8:   resetSelection()
+    10-13: controlMode = 1
 
-Note on reading pool offsets: `0x101b`/`0x1019` immediates are **constant-pool
-byte offsets**, resolved by `Loader::pool_text_of` / `field_reference_of`, not
-indices into `Module::strings`. Indexing `strings` with them returns `None` and
-misleads; use the loader.
+sets `controlMode` only on the first `show`. A write trace on instance slot 52
+confirmed the whole run performs exactly three `controlMode = 1` stores and
+**zero** `controlMode = 0` stores. The clear is dead code: both `idleFor` return
+paths (nodes 18-19 and 50-51) yield 0, and `0x1015` at node 307 jumps on a zero
+value to node 316, stepping over 308-315.
+
+That makes the two engines agree on the *script*, so the 329-versus-16
+`currentTime` gap is not explained by `controlMode` alone. It is recorded here
+as the open question rather than as a fix: either the original's `animate` is
+not entered every frame for this instance (the port's `animate` does reach node
+295 each frame), or `idleFor` returns non-zero on a path the port does not
+model. Resolving it needs the original's per-frame `Osd.animate` entry count,
+which no retained capture currently carries.
+
+The port's `Thread.sleep` counts are already right (333 against the original's
+313), so frame pacing itself is not the divergence.
+
+Measured field values after `animate_pass` on the four `Osd` instances:
+
+    0x101d  iLevel=3  controlMode=1  focusTracker=0
+    0x104f  iLevel=0  controlMode=1  focusTracker=0
+    0x1427  iLevel=0  controlMode=0  focusTracker=0
+    0x1486  iLevel=3  controlMode=1  focusTracker=1   <- the only one animated
+
+Only `0x84f100` (container of `0x1486`) is on the `0x1c` callback list; the other
+three containers the engine animates are `0x84ff00`, `0x850100`, `0x855000`.
 
 ### Why `lastKey` runs: a null check on `Osd.RID_ARROWRG`
 

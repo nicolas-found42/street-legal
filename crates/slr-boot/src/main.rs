@@ -694,7 +694,15 @@ fn probe_osd_levels(vm: &mut VmHost) {
         }
         let level = vm.read_field(word, "iLevel").map(|v| v.payload);
         let tips = vm.read_field(word, "IL_TIPS").map(|v| v.payload);
-        println!("OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?}");
+        let ptr = vm.read_field(word, "ptr").map(|v| v.payload);
+        let ptr = ptr.ok();
+        let container = ptr.and_then(|p| {
+            slr_resource::node::try_observe(|host| host.node(p).map(|n| n.container)).flatten()
+        });
+        let registered = crate::engine::registered_animate(container.unwrap_or(0));
+        println!(
+            "OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?} ptr={ptr:?} container={container:?} animates={registered}"
+        );
     }
 }
 
