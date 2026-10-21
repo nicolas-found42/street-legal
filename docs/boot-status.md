@@ -172,10 +172,31 @@ sites). So `0x48d3d0` registers a mask *with a manager*, not onto the container
 the port's `state.masks` models. `[X+0x70]` is written by some other path, and
 the port's per-container map is not that path.
 
-This is the precise remaining gap: find the writer of `[X+0x70]` (the word the
-delivery test reads) and model it, instead of treating `setEventMask` as
-per-container. The measured facts above are the acceptance inputs for that
-work.
+Reading `0x48d3d0` correctly settles the store. Its body is
+`mov eax,[esp+4]; mov ecx,[eax+0xc]; ... call [vtable+0xc]; or [eax+0x70], mask`,
+so it takes the *container* as its first stack argument, resolves the live
+instance through `vtable+0xc`, and ORs the mask into that instance's `+0x70`.
+Hooking it with `[esp+4]`/`[esp+8]` gives the container and mask pairs, and
+resolving `[container+0xc]` gives the instance each call actually stamps:
+
+    0x203030a0 / 0x10000  -> 0x200041a8     0x205662c0 / 0x10     -> 0x200045bc
+    0x204e6100 / 0x10000  -> 0x20004460     0x2058fb60 / 0x10     -> 0x20004874
+    0x202f9e40 / 0x110000 -> 0x2000404c     0x20a9bb80 / 0x10000  -> 0x200063a4
+    0x202ce300 / 0x10010  -> 0x20003ef0     0x205c86b0 / 0x100080 -> 0x200049d0
+    0x20b065a0 / 0x10000  -> 0x20006e84     0x20b05a40 / 0x110000 -> 0x20006d28
+    0x20b02870 / 0x80     -> 0x20006bcc
+
+Two of those instances, `0x200045bc` and `0x20004874`, are exactly the `ecx`
+values read at `0x426601`. But the delivery test at `0x426653` reads `esi` =
+`0x20004694` / `0x2000494c`, which is *another* object produced by the
+`vtable+0xc` call at `0x426645`. So the original resolves two levels —
+container → gate instance → delivery instance — and the port has one.
+
+That two-level resolution, not the mask bookkeeping, is the remaining gap: the
+port must model the intermediate object `0x426601` tests (whose `+0x4c` carries
+the type) and the second `vtable+0xc` result that carries the mask at `+0x70`.
+The measured table above is the acceptance input for that work; `0x203030a0`
+etc. are the containers the script actually passes to `setEventMask`.
 
 The writer of `[X+0x70]` is now known: `FUN_004819f0` (`GameType.setEventMask`)
 unpacks its arguments with `0x45d910`, resolves `0x42ab50(field id,
