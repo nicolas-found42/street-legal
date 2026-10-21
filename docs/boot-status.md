@@ -557,11 +557,23 @@ So the gap is not in `dispatch`, not in the mask bookkeeping, and not in
 `engine::dispatch` is only ever reached from `queue_event`.
 
 The emitter is `FUN_00460140(int, float)` — a per-frame camera update that takes
-the frame delta as its second argument. It has **no call site anywhere in the
-pseudocode dump**, which is why it was never ported: it is reached through a
-vtable slot, not a direct call. Identifying which vtable slot and which object
-owns it is the next concrete step; that is what turns this from "the counts
-differ" into a bounded implementation task.
+the frame delta as its second argument and writes the camera transform into
+`param_1 + 0x164..0x170` before comparing it against the stored state in
+`PTR_DAT_00610a54`.
+
+Scanning the image for `E8` relative calls finds exactly two, at `0x461c30` and
+`0x461c4e`, and both lie **inside the range the decompiler attributed to
+`FUN_00460140`**. Searching the whole file for the absolute value `0x00460140`
+finds no hits at all, so the address is never stored as a function pointer in
+the image either. `0x461c40` looks like a separate body (`8b 44 24 08` prologue,
+stdcall style) nested inside that same decompiler range, and it has no direct
+caller of its own.
+
+The honest reading: this region is a vtable- or jump-table-driven update
+pipeline, the decompiler merged several functions into one block, and none of it
+is ported — `crates/slr-render-natives` has no camera model at all. Pinning the
+owning object and slot for `0x461c40` is the next concrete step, and it is what
+turns "the counts differ" into a bounded implementation task.
 
 Adding that dispatch pair is the fix, and it is what unblocks the
 `Osd`/`GameRef` `addpart` chain described above.
