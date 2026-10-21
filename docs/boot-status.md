@@ -7,6 +7,36 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 Last updated: 2026-10-21, branch `exact-port`. See the cfg-handler parity section first.
 
+## Boot endpoint: 300 idle frames reached at a 600-frame budget (2026-10-21)
+
+    ./target/debug/slr-boot stock --config-instance-id 0xffff0080 \
+        --game-init-instance-id 0xffff007f --output /tmp/boot --run-id boot \
+        --trace-level metadata --event-ring 4096 --frames 600
+
+prints `BOOT MainMenu dialog complete at frame 179; idle frames=420`, so the
+idle-frame condition is *reachable* at this budget. That run has no
+`--clock-replay`, though, so it is not contract evidence: the replay run
+
+    python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog \
+        --frames 600 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl
+
+still stops at the clock-replay thread-identity check
+(`expected THRD-RUNVMI Dummy.getInfo, got THRD-INSTVAR-INI`) before reaching the
+endpoint. Instrumenting `match_thread` pinned it to replay position 7375
+(expected `java.lang.GameType.getInfo` on `THRD-RUNVMI Dummy.getInfo`, actual
+`java.game.parts.Part.<instance field init>` on `THRD-INSTVAR-INI`). Both are
+`Thread::run` entries that read `ClockSite::ThreadEnter`; the difference is
+ordering — the port reaches a `Part` field-initializer thread before the
+`getInfo` callback thread that the original reaches first. Aligning it means
+matching the original's creation order inside `instantiate`/`register_created`,
+not changing the clock layer.
+
+The earlier note that the dialog completes at frame 31 with 300 idle frames
+by 331 is stale: the current tree reports frame 179, so `--frames 331`
+yields 151 idle frames. Both halves of the boot endpoint therefore remain open:
+the replay mismatch blocks the run, and filtered native-log equality fails at
+record 620 regardless.
+
 ## Boot frontier: record 620, investigated 2026-10-21 (after `fe6f2e5`)
 
 Reproduce:
