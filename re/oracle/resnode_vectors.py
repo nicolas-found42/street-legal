@@ -229,6 +229,7 @@ class World:
         wt_root=None,
         first_child=None,
         ground_precache=0,
+        parent_container_id=None,
     ):
         self.o = Oracle(exe or _default_exe())
         self.events = []
@@ -239,9 +240,15 @@ class World:
         if node:
             self.node = o.alloc(0x10)
             o.write_u32(self.node + 8, node_id & 0xFFFFFFFF)
+        self.parent_container = 0
+        if parent_container_id is not None:
+            self.parent_container = o.alloc(0x120)
+            o.write_u32(self.parent_container + 0x14, 0)
+            o.write_u32(self.parent_container + 0x4C, parent_container_id & 0xFFFFFFFF)
+            o.write_u32(self.parent_container + 0x50, parent_container_id & 0xFFFFFFFF)
         if container is not None:
             self.container = o.alloc(0x120)
-            o.write_u32(self.container + 0x14, parent or 0)
+            o.write_u32(self.container + 0x14, self.parent_container or (parent or 0))
             o.write_u32(self.container + 0x20, first_child or 0)
             o.write_u32(self.container + 0x4C, container & 0xFFFFFFFF)
             o.write_u32(self.container + 0x50, node_id & 0xFFFFFFFF)
@@ -457,6 +464,16 @@ def resnode_cases():
         (
             "parent_id_bound",
             {"addr": GET_PARENT_ID, "params": [], "node_id": 5, "container": 3},
+        ),
+        (
+            "parent_id_with_parent",
+            {
+                "addr": GET_PARENT_ID,
+                "params": [],
+                "node_id": 5,
+                "container": 3,
+                "parent_container_id": 0x2222,
+            },
         ),
         ("parent_no_field", {"addr": GET_PARENT, "params": [], "node": False}),
         ("parent_unbound", {"addr": GET_PARENT, "params": []}),

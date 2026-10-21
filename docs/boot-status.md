@@ -751,6 +751,44 @@ value for three shapes (parent == self, parent == sibling, parent == world).
 and `X` with `+0x14 parent`, `+0x50 id`, so the row is a small addition, not new
 tooling.
 
+**The row now exists and settles the semantics.** `parent_id_with_parent` gives
+the node a container whose `+0x14` points at a second container with `+0x50 =
+0x2222`, and the original returns:
+
+    eax = 8738 = 0x2222
+
+So `getParentID` is `[[R+0xc]+0x14]`'s `+0x50`, i.e. the *parent container's own
+id* - exactly what `node.rs:1802` implements (`containers[containers[node.container].parent].id`).
+`parent_id_bound` keeps faulting `UnmappedAccess` with a null `+0x14`, which is
+the ADR 0007 trigger, so it stays an intentional divergence and must not be
+"fixed" to 0.
+
+That removes `parent_id` itself from suspicion. The port returning `-65419`
+everywhere means the container created by `GameRef.create` is given
+`parent = -65419`'s container, while the original has `parent` pointing at the
+new resource itself after `queueEvent` (hence `-65426`). The question is
+therefore which container is written into `Container::parent` for a created
+instance - `factory.rs:159` (`allocate_configured_instance`) or `factory.rs:346`
+(`create_instance`) - and whether the original rewrites it after creation.
+
+Two dead ends are now closed, so they need not be re-checked:
+
+* `owner == 0` is *not* the difference. `game_ref_create_inner` maps it to
+  `root = world.game`, and `factory.rs:80-99` binds `DEFAULT_RESOURCE_WORD`
+  (`0x636460`, the exe's fallback owner) to a node over that *same* `game`
+  container (id 4). So the port already uses the value the original would.
+* `ResourceRef.set`/`queueEvent` argument shapes, `create` result ids and the
+  three `Container::parent = root.container` sites (`factory.rs:159`, `:346`,
+  `:216`) all match between the two runs.
+
+What remains is that every creation path takes `root` from `owner_container` or
+`world.game` *before* `instantiate` runs, so `parent` can never be the new
+container. The original's `-65426` after `queueEvent` is the new resource's own
+id, which is what a container whose `parent` points at itself would yield. Worth
+checking next: whether the original's `53a5e0` resolves the owner *after*
+allocating the instance identity, in which case a create whose owner argument is
+the not-yet-existing id produces the self-parent.
+
 ### The internal `0x10000` dispatch is still missing, but it is not the count gap
 
 The mask gate is not the problem. A `SLR_DISPATCH_TRACE` run over 60 frames
