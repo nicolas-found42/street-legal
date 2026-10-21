@@ -244,6 +244,12 @@ divergence unambiguous:
 | `Input.lastKey` | 0 | 336 |
 | `Object.wait` | 7 | 4 |
 
+**The port column is stale.** The current tree measures 336 `sleep` / 1014
+`currentTime` / 12 `wait` on a 331-frame run
+(`re/out/boot/runs/20261021T120239.910924Z-eac1ff00040f`), so the `sleep` side has
+already converged and any conclusion drawn from the 112/338 snapshot no longer
+holds. Re-derive the original column before using this table again.
+
 The original drives its main loop with `Thread.sleep`: ordinals 447-531 are an
 almost unbroken run of `sleep` calls, and `currentTime` appears 16 times in the
 whole run. The port inverts it — 338 `currentTime` and 336 `lastKey` against 112
@@ -376,21 +382,56 @@ is correct for the branch it took. `idleFor` has two exit expressions:
 | nodes 7-20 (line 259) | `(lastUserActivityTimeStamp + dt) < currentTime()` | `lt`, node 16 sub-op `0x0b` |
 | nodes 44-49 (line 272) | f32 `0.0` literal | constant 0 |
 
+Measured operands of that `lt` on consecutive entries, via a temporary trace in
+`Alu::lt`:
+
+    LT l=Float/41204dba r=Float/3d12c5f9      l = 10.0189
+    LT l=Float/41204dba r=Float/3d57b204      r = 0.0358 -> 0.0527 -> 0.0695
+    LT l=Float/41204dba r=Float/3d8e63ff
+
+The left operand is **constant at 10.0189 s** and the right operand is the clock
+climbing at roughly one frame step per entry. So `lastUserActivityTimeStamp` was
+stamped at 9.0189 s and never refreshed, and the branch cannot turn true until
+the clock passes 10.0189 s — about 600 frames at `1000/60` ms per frame, which a
+331-frame run never reaches. `Osd.show(I)V` is what stamps it (node 29 calls
+`currentTime`, node 31 pushes the field), so the stamp's absolute value depends
+on how far the simulated clock had advanced when the first `show` ran.
+
 The port takes the line-265/272 branch (`idx=27`, then 38-43), which sets
 `focusTracker = 1`, refreshes `lastUserActivityTimeStamp`, and returns `0.0`
 meaning "nothing left to wait for". `0x1015` at 307 therefore jumps, `controlMode`
 is never cleared, and the next frame re-enters with the flag still set.
 
-Every step of that chain matches the script. So either the original's
-`lastUserActivityTimeStamp + 1.0 < currentTime()` becomes true for this instance
-— which needs its clock to advance differently than the port's per-frame
-`advance_ms(1000/60)` — or the original's `animate` is not entered for this
-container on most frames. Distinguishing them needs the original's per-frame
-`Osd.animate` entry count or its `currentTime` values, neither of which the
-retained captures carry. That is the one genuinely missing input, and it is
-recorded as such rather than papered over.
+Every step of that chain matches the script, so the port is not mis-executing
+`idleFor`. The open question is now narrow and testable: the original's capture
+says `currentTime` appears 16 times across the whole run, yet the port's steady
+state is three per frame. Given the constant left operand above, the port cannot
+leave that branch before the clock passes the stamp plus one second, and the
+stamp inherits whatever the simulated clock had reached at first `show`.
 
-The port's `Thread.sleep` counts are already right (333 against the original's
+Two things would settle it, and both are reachable without running the exe:
+
+1. Re-derive the original column of the native-count table. It is stale on the
+   `sleep` side (112 recorded, 336 measured now), so the 16 may be equally out of
+   date.
+2. Check whether the original's clock advances during boot the same way. The
+   port's `configure_clock(0.01)` model adds `step` on **every read**
+   (`sched::clock_ms`), so a boot phase that reads the clock heavily inflates
+   the absolute time before the first frame. A wall clock would not. If the
+   original's `lastUserActivityTimeStamp` is stamped near zero instead of 9 s,
+   its branch turns true after one second and `controlMode` clears — which is
+   exactly the 16-versus-993 shape.
+
+Candidate 2 is the more promising: it makes the divergence a property of the
+clock model, not of the script or the VM, and it is checkable by printing the
+clock at first `show`.
+
+The call rate is exactly three per frame — one for each `Osd` whose
+`controlMode` is 1 — confirmed across all 331 frames of the run above
+(`{per-frame: 3}` for every frame). So the divergence is not sporadic: it is the
+steady state of three instances that never clear the flag.
+
+The port's `Thread.sleep` counts are already right (336 against the original's
 313), so frame pacing itself is not the divergence.
 
 Measured field values after `animate_pass` on the four `Osd` instances:
