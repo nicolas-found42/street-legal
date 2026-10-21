@@ -571,9 +571,46 @@ caller of its own.
 
 The honest reading: this region is a vtable- or jump-table-driven update
 pipeline, the decompiler merged several functions into one block, and none of it
-is ported — `crates/slr-render-natives` has no camera model at all. Pinning the
-owning object and slot for `0x461c40` is the next concrete step, and it is what
-turns "the counts differ" into a bounded implementation task.
+is ported — `crates/slr-render-natives` has no camera model at all.
+
+`0x461c30` is a two-instruction thunk (`call 0x460140; ret 8`). `0x461c40` is the
+real wrapper, and hand-decoding its bytes gives the shape of the missing work:
+
+    461c40  mov  eax,[esp+8]        ; the float delta
+    461c44  sub  esp,0x12
+    461c47  push esi                ; esi = the object (`this`)
+    461c4c  push eax
+    461c4d  push esi
+    461c4e  call 0x460140           ; camera update -> dispatches 0x10000 twice
+    461c53  mov  eax,[esi+0x7c]
+    461c58  jz   0x461cf8           ; nothing to draw
+    461c5e  mov  eax,[0x6495a4]
+    461c65  jnz  0x461c9d
+    461c67  mov  eax,[esi+0x8c]
+    461c6f  jnz  0x461c9d
+    461c98  call 0x48c4b0           ; formats from this+0x84 / +0xac / +0x2c
+    461c9d  mov  eax,[0x63c83c]
+    461ca4  jz   0x461d16
+    461ca6  mov  eax,[esi+0x9c]
+    461cae  jnz  0x461d16
+
+So the wrapper is a viewport/camera per-frame update: it drives the camera
+transform first (the step that emits the two `0x10000` events), then gates a
+render-flag pass on `this+0x7c`, `this+0x8c` and `this+0x9c`, using the globals at
+`0x6495a4` and `0x63c83c`.
+
+`esi` is a **native container**, not a script object: `java.render.Viewport`
+declares no instance fields at all, so those offsets live in the resource
+record. `FUN_00460140` reads `*(byte *)(param_1 + 0x50) & 1` before doing any
+work, and `+0x50` is the container `id` word in the port's own
+`slr_resource::node::Container`, with `flags` at `+0x54`, `load_state` at `+0x64`
+and `detail` at `+0x6c`. The camera state it reads lives in the global
+`PTR_DAT_00610a54` (`+0xc` position, `+0x48` scale, `+0x6c`/`+0x74` clip planes),
+and the transform it builds is written into `param_1 + 0x164..0x170`.
+
+Implementing `0x460140` plus this wrapper is the bounded task. The port already
+has the container layout it needs; what is missing is the camera-state global and
+the transform step.
 
 Adding that dispatch pair is the fix, and it is what unblocks the
 `Osd`/`GameRef` `addpart` chain described above.
