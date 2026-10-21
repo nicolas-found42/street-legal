@@ -158,10 +158,24 @@ Nine mask targets against four gate hits in a 200M-instruction window also means
 most `queueEvent` calls never reach the gate within that budget, so these counts
 are not yet comparable to the 58/69 of the full accepted run.
 
-The remaining question is the branch layout between `0x426601` and the delivery
-at `0x426800` — specifically which word `0x426653 test [esi+0x70], ecx` reads
-(`esi` there is the value stored at `0x42664b`, not the gate's `ecx`). Reading
-`esi` at `0x426653` on the original is the next concrete probe.
+Reading the mask test itself settles the delivery side. At `0x426653` on the
+same run, `esi` is `0x20004694` (once) and `0x2000494c` (three times) — heap
+containers — `ecx` is `0x10`, and `[esi+0x70]` is `0x10`. The test therefore
+passes and the original delivers. Those containers are again disjoint from the
+nine mask targets.
+
+Tracing the store clarifies why: hooking `0x48d3d0` shows its `ecx` is always
+`0x20066450` — one manager object — while the pushed word is the mask value
+(`0x203030a0`, `0x204e6100`, `0x202f9e40`, `0x202ce300`, `0x20a9bb80`,
+`0x205c86b0`, `0x20b065a0`, `0x20b05a40`, `0x20b02870`, plus two from other
+sites). So `0x48d3d0` registers a mask *with a manager*, not onto the container
+the port's `state.masks` models. `[X+0x70]` is written by some other path, and
+the port's per-container map is not that path.
+
+This is the precise remaining gap: find the writer of `[X+0x70]` (the word the
+delivery test reads) and model it, instead of treating `setEventMask` as
+per-container. The measured facts above are the acceptance inputs for that
+work.
 
 The writer of `[X+0x70]` is now known: `FUN_004819f0` (`GameType.setEventMask`)
 unpacks its arguments with `0x45d910`, resolves `0x42ab50(field id,
