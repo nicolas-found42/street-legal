@@ -145,8 +145,9 @@ class World:
         o.write_u32(0x7686E0, 0)
 
     def _h_resolve(self, oc, a):
-        # (src, dst) -> copy the source text into the destination
-        src, dst = a[0], a[1]
+        # (dst, src) -> copy the source text into the destination
+        # (`0x554860` reads [esp+4]=dst and [esp+0xc]=src).
+        src, dst = a[1], a[0]
         text = oc.read_cstr(src) if src else b""
         oc.write(dst, text + b"\x00")
         self.events.append(["resolve", text.decode(errors="replace")])

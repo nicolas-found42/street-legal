@@ -16,9 +16,9 @@
 //!   oracle** (Unicorn ignores PC; at PC64 both agree except the
 //!   game-irrelevant invalid-operand class). Unnormal inputs are excluded
 //!   (unsupported — both oracles diverge, hardware raises #IA).
-//! - `fld/fst` (identity moves): **SoftFloat is the oracle**, except the −0.0
-//!   operand where the documented Unicorn −0→+0 normalization quirk applies
-//!   (asserted explicitly, not silently passed).
+//! - `fld/fst` (identity moves): **SoftFloat is the oracle**. Signed zero
+//!   must also match Unicorn; the earlier positive-zero result came from
+//!   incorrect input encoding in the oracle harness, not an emulator quirk.
 //! - `fistp`: **SoftFloat i32 is the oracle**; i64 is cross-checked against
 //!   the independent `expected_i64` reference below (mirroring
 //!   `compare.py::expected_i64`, exact for in-range values).
@@ -428,6 +428,13 @@ fn trusted_probes_match_bit_for_bit() {
     let corpus: HashMap<u32, Vector> = read_jsonl(&format!("{OUT_DIR}/corpus.jsonl"));
     let sf: HashMap<u32, SfResult> = read_jsonl(&format!("{OUT_DIR}/sf_results.jsonl"));
     let uc: HashMap<u32, UcResult> = read_jsonl(&format!("{OUT_DIR}/uc_results.jsonl"));
+    // Third leg (ADR 0008 triangulation): translated x86_64 execution under
+    // Rosetta 2. Optional for a checkout without that capture, but when it is
+    // present every arithmetic TRUSTED cell must also match there.
+    let rt: Option<HashMap<u32, UcResult>> =
+        std::path::Path::new(&format!("{OUT_DIR}/rosetta_results.jsonl"))
+            .exists()
+            .then(|| read_jsonl(&format!("{OUT_DIR}/rosetta_results.jsonl")));
     assert_eq!(
         corpus.len(),
         21702,
@@ -511,7 +518,7 @@ fn trusted_probes_match_bit_for_bit() {
                 }
             }
             "fld" | "fst" => {
-                // Identity move: SoftFloat oracle; −0 quirk asserted explicitly.
+                // Identity move: signed zero is exact, without a quirk exemption.
                 let want = s.st.as_ref().expect("sf st");
                 let got = x87_to_reg(a);
                 let neg_zero_input = !is_unnormal(&v.a)
@@ -519,18 +526,18 @@ fn trusted_probes_match_bit_for_bit() {
                     && v.a.sign == 1;
                 if regs_equal(&got, want) {
                     bump(op, v.pc, v.rc, 0);
-                } else if neg_zero_input {
-                    // Documented Unicorn −0→+0 quirk: SoftFloat (and this
-                    // crate) preserve −0; the UC leg reads +0. Record, don't fail.
-                    bump(op, v.pc, v.rc, 3);
                 } else {
                     bump(op, v.pc, v.rc, 1);
                     if failures.len() < 10 {
                         failures.push(format!("{op} id={id} got={got:?} want={want:?}"));
                     }
                 }
-                // fst m64 round-trip sanity vs Unicorn where available.
-                let _ = u;
+                if neg_zero_input {
+                    assert!(
+                        regs_equal(&got, u.st.as_ref().expect("uc st")),
+                        "{op} id={id}: regenerate Unicorn vectors with signed-zero input encoding"
+                    );
+                }
             }
             "fistp" => {
                 let got32 = a.to_i32(rc);
@@ -839,6 +846,40 @@ fn trusted_probes_match_bit_for_bit() {
             }
             other => panic!("unknown op {other}"),
         }
+    }
+
+    // Third-leg corroboration (ADR 0008): for every arithmetic vector whose
+    // SoftFloat result the crate just matched, the Rosetta leg must agree
+    // bit-for-bit. Unnormal operands are excluded exactly as above — that is
+    // the one class where translated x87 takes the SDM #IA path and SoftFloat
+    // computes a finite value.
+    if let Some(rt) = &rt {
+        let mut rosetta_rows = 0u64;
+        for (id, v) in &corpus {
+            let op = v.op.as_str();
+            if !matches!(op, "fadd" | "fsub" | "fmul" | "fdiv" | "fsqrt") {
+                continue;
+            }
+            if is_unnormal(&v.a) || v.b.as_ref().is_some_and(is_unnormal) {
+                continue;
+            }
+            let want = sf.get(id).and_then(|s| s.st.as_ref()).expect("sf st");
+            let got = rt
+                .get(id)
+                .and_then(|r| r.st.as_ref())
+                .unwrap_or_else(|| panic!("missing Rosetta result {id}"));
+            assert!(
+                regs_equal(want, got),
+                "{op} id={id} pc={} rc={}: Rosetta disagrees with SoftFloat on a \
+                 non-unnormal operand (sf={want:?} rosetta={got:?})",
+                v.pc,
+                v.rc
+            );
+            rosetta_rows += 1;
+        }
+        println!("rosetta corroboration: {rosetta_rows} arithmetic rows agree bit-for-bit");
+    } else {
+        println!("rosetta corroboration: SKIP (no rosetta_results.jsonl)");
     }
 
     // Report per-(op × PC × RC) counts.

@@ -4,10 +4,43 @@ mod factory;
 mod gc_runtime;
 mod materialise;
 mod missing_rows;
+mod native_assets;
+mod native_body;
+mod native_camera;
+mod native_car;
+mod native_car_command;
+mod native_defaults;
+mod native_definition;
+mod native_dynamics;
+mod native_entity;
+mod native_factory;
+mod native_file;
+mod native_geometry;
+mod native_mesh_inertia;
+mod native_mesh_resource;
+mod native_message;
+mod native_part;
+mod native_postparse;
+mod native_render_lod;
+mod native_render_resource;
+mod native_render_type;
+mod native_resource_base;
+mod native_resource_load;
+mod native_resource_manager;
+mod native_shape;
+mod native_shape_v4;
+mod native_spatial;
+mod native_spring;
+mod native_stack;
+mod native_world;
+mod part_render;
+mod parts;
 mod resource_identity;
 mod sched;
 mod telemetry;
+mod video;
 mod viewport;
+mod wheel;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{
@@ -288,12 +321,20 @@ fn observe(info: &CallInfo<'_>, result: Option<u32>) {
     let driver_owned = (info.class == "java.render.Viewport"
         && matches!(
             info.name,
-            "create" | "resize" | "getAspect" | "getWidth" | "getHeight" | "getTop" | "getLeft"
+            "create"
+                | "destroy"
+                | "resize"
+                | "getAspect"
+                | "getWidth"
+                | "getHeight"
+                | "getTop"
+                | "getLeft"
         ))
-        || (matches!(info.class, "java.render.Camera" | "java.render.Text")
-            && info.name == "create")
+        || (info.class == "java.render.Camera" && matches!(info.name, "create" | "destroy"))
+        || (info.class == "java.render.Text" && info.name == "create")
         || (info.class == "java.io.Input" && info.name == "getDeviceName")
-        || (info.class == "java.render.GfxEngine" && info.name == "displayModeName");
+        || (info.class == "java.render.GfxEngine"
+            && matches!(info.name, "displayModeName" | "openVideo"));
     if !driver_owned
         && (info.class.starts_with("java.render.")
             || info.class.starts_with("java.sound.")
@@ -594,6 +635,7 @@ fn install(vm: &mut VmHost) {
         .insert(slr_resource::node::SET_ID, resource_set);
     engine::install(vm);
     viewport::install(vm);
+    video::install(vm);
     for row in slr_io::file::FILE_NATIVE_BINDINGS {
         vm.native_impls.insert(row.impl_addr, file_native);
     }
@@ -621,6 +663,8 @@ fn install(vm: &mut VmHost) {
     ] {
         vm.native_impls.insert(address, materialise::load_like);
     }
+    parts::install(vm);
+    wheel::install(vm);
     resource_identity::install(vm);
     slr_lang::seam::with_lang_host(|h| {
         h.clock_source = Some(sched::clock_f32);
@@ -850,6 +894,10 @@ fn run(
             engine::sample_replayed_animation_time();
         }
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        factory::cleanup(vm).map_err(|e| format!("resource cleanup frame {frame}: {e}"))?;
+        //428d91/428da0: the declared successful headless device frame
+        //increments the same generation that GfxEngine.flush advances.
+        slr_render_natives::with_render(|render| render.advance_frame_generation());
         engine::notify_render_waiters(vm)
             .map_err(|e| format!("render notify frame {frame}: {e}"))?;
         if let Some(seconds) = sched::replayed_frame_dt(frame + 1)? {
@@ -900,6 +948,10 @@ fn active_main_menu(vm: &mut VmHost) -> Option<u32> {
     (object.class_name(&vm.loader) == "java.game.MainMenu").then_some(state)
 }
 /// Fresh writable filesystem projection. No script I/O points at stock.
+///
+/// Files are clone-linked where the filesystem supports it: a bundle must not
+/// alias another bundle's bytes, but it also must not pay for a private copy of
+/// a 458 MiB install on every run.
 fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -913,7 +965,7 @@ fn project_stock(source: &Path, destination: &Path) -> std::io::Result<()> {
         } else if kind.is_dir() {
             project_stock(&entry.path(), &target)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), target)?;
+            slr_telemetry::clone_or_copy(&entry.path(), &target)?;
         }
     }
     Ok(())
@@ -936,6 +988,7 @@ fn execute() -> Result<(), String> {
     let mut run_id = None;
     let mut trace_level = "metadata".to_owned();
     let mut event_ring = 4096usize;
+    let mut wall_clock = false;
     let mut snapshot_native = None;
     let mut config_instance_id = None;
     let mut game_init_instance_id = None;
@@ -971,6 +1024,8 @@ fn execute() -> Result<(), String> {
                 }
                 _ => return Err("ArgumentBoundary: trace level must be metadata or full".into()),
             }
+        } else if arg == "--wall-clock" {
+            wall_clock = true;
         } else if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
             let text = args
                 .next()
@@ -1040,8 +1095,15 @@ fn execute() -> Result<(), String> {
     if output.starts_with(&root) {
         return Err("ProjectionBoundary: canonical output is inside the source install".into());
     }
-    telemetry::configure(&output, &run_id, event_ring, trace_level == "full")?;
+    telemetry::configure(
+        &output,
+        &run_id,
+        event_ring,
+        trace_level == "full",
+        wall_clock,
+    )?;
     telemetry::target_native(snapshot_native);
+    slr_telemetry::install_panic_hook(slr_telemetry::crash_context);
     println!("BOOT diagnostics {}", output.display());
     let files = output.join(format!("files/{}-{stamp}", std::process::id()));
     project_stock(&root, &files).map_err(|e| format!("ProjectionBoundary: {e}"))?;
@@ -1076,6 +1138,8 @@ fn execute() -> Result<(), String> {
         )
     }))
     .unwrap_or_else(|panic| {
+        // The panic hook already published `crash.json`; keep the message in
+        // the returned error so `failure.json` and the exit status agree.
         Err(format!(
             "RuntimePanic: {}",
             panic
@@ -1145,9 +1209,11 @@ mod tests {
         let mut vm = VmHost::new();
         slr_render_natives::install_headless(&mut vm);
         viewport::install(&mut vm);
+        resource_identity::install(&mut vm);
         let args = [Value::reference(0x1000)];
         for (address, name, sig) in [
-            (0x0048_1600, "destroy", "()V"),
+            (slr_render_natives::VIEWPORT_DEACTIVATE, "deactivate", "()V"),
+            (resource_identity::VIEWPORT_DESTROY, "destroy", "()V"),
             (viewport::GET_WIDTH, "getWidth", "()F"),
         ] {
             let info = CallInfo {

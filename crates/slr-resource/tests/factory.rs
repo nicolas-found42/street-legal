@@ -346,3 +346,49 @@ fn append_child_original_rows() {
         });
     }
 }
+
+#[test]
+fn type8_lod_scalar_parser_matches_original_words_and_inheritance() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../re/out/boot/gametype-lod-original.json");
+    let fixture: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("run re/oracle/gametype_lod_probe.py"))
+            .unwrap();
+    for row in fixture["rows"].as_array().unwrap() {
+        let mut data = slr_resource::factory::ScriptData::default();
+        for step in row["steps"].as_array().unwrap() {
+            let text = step["text"].as_str().unwrap();
+            data.apply(text, &mut |_| panic!("LOD scalar requested a script"))
+                .unwrap();
+            let expected = [0, 1].map(|i| step["words"][i].as_u64().unwrap() as u32);
+            assert_eq!(data.words, expected, "{text:?}");
+            // The original scalar parser touches payload+18 only. The
+            // envelope's range words and generation fields remain unchanged.
+            for (i, (before, after)) in row["before"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(step["node_words"].as_array().unwrap())
+                .enumerate()
+            {
+                if i * 4 != 0x98 {
+                    assert_eq!(before, after, "{text:?} word {i}");
+                }
+            }
+            assert_eq!(step["generation"], 123);
+        }
+        n::reset_res();
+        let mut factory = Factory::default();
+        let root = Root {
+            resource_id: 1,
+            container: None,
+        };
+        let template = factory.install_script_template(27, root, &data).unwrap();
+        let instance = factory
+            .create_instance(root, template.id, 0, "LOD", &mut || 0xffff0080)
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.words, data.words);
+        assert_eq!(instance.range_bits, [0, 0]);
+    }
+}

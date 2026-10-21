@@ -74,7 +74,14 @@ impl Space {
     }
 
     fn r32_raw(&self, a: u32) -> u32 {
-        u32::from_le_bytes([self.r8(a), self.r8(a + 1), self.r8(a + 2), self.r8(a + 3)])
+        // The original addresses a flat 32-bit space, so a word at the very top
+        // wraps into low addresses instead of trapping.
+        u32::from_le_bytes([
+            self.r8(a),
+            self.r8(a.wrapping_add(1)),
+            self.r8(a.wrapping_add(2)),
+            self.r8(a.wrapping_add(3)),
+        ])
     }
 
     pub fn r8(&self, a: u32) -> u8 {
@@ -95,10 +102,13 @@ impl Space {
     pub fn w32(&mut self, a: u32, v: u32) {
         self.note(a);
         if a & 3 != 0 {
-            self.note(a + 3);
+            self.note(a.wrapping_add(3));
         }
+        // The original is a flat 32-bit space: a word at the top wraps into low
+        // addresses instead of trapping.
         for (i, b) in v.to_le_bytes().into_iter().enumerate() {
-            self.page_mut(a + i as u32)[((a + i as u32) & (PAGE - 1)) as usize] = b;
+            let at = a.wrapping_add(i as u32);
+            self.page_mut(at)[(at & (PAGE - 1)) as usize] = b;
         }
     }
 

@@ -164,6 +164,24 @@ fn collect_suites() -> Vec<Suite> {
             ],
         ),
         (
+            "slr-fmt-cfg",
+            "particle_exceptions",
+            vec![
+                (
+                    "original_stack_domains_are_replaced_by_safe_state_or_absence",
+                    vec!["FUN_005195e0", "FUN_00519110", "FUN_0051a140"],
+                ),
+                (
+                    "original_failed_numeric_scans_retain_prior_values_port_defaults_to_zero",
+                    vec!["FUN_0051a140", "FUN_00553890"],
+                ),
+                (
+                    "original_missing_skid_maxcount_depends_on_heap_port_defaults_to_zero",
+                    vec!["FUN_00521e10"],
+                ),
+            ],
+        ),
+        (
             "slr-fmt-skeleton",
             "oracle",
             vec![
@@ -957,7 +975,9 @@ fn collect(root: &std::path::Path) {
             });
             // Suites whose target consumes Unicorn oracle vectors (rather
             // than the stock corpus) record the `unicorn` oracle.
-            let oracle = if matches!(
+            let oracle = if target == "particle_exceptions" {
+                "unicorn intentional-divergence"
+            } else if matches!(
                 target,
                 "rand_oracle"
                     | "value_oracle"

@@ -685,6 +685,7 @@ impl FileHost {
         // `0x48583f`: the handle-field store, then `return S != 0`.
         self.structs.insert(word, file);
         self.set_handle(object, word);
+        self.trace("open", &name, serde_json::json!({"mode": mode, "ok": true}));
         1
     }
 
@@ -703,6 +704,7 @@ impl FileHost {
             self.set_handle(object, 0);
             return;
         };
+        let closed_name = file.name().to_owned();
         // `0x4858b0`..`0x485a90`: the slot close and the version-dependent
         // footer are M2-05's `close_file`, which writes the slot run
         // (`0x484fa0`) and the resource table (`0x4859dc`) the two lists hold,
@@ -758,6 +760,11 @@ impl FileHost {
                 }
             }
         }
+        self.trace(
+            "close",
+            &closed_name,
+            serde_json::json!({"mode": state.mode}),
+        );
     }
 
     // ---- internals --------------------------------------------------------
@@ -799,7 +806,14 @@ impl FileHost {
         }
         let data = bytes.unwrap_or_default();
         let written = self.layer.write(slot, &data); // `0x48604e`
+        let len = data.len();
         self.events.push(IoEvent::Write { slot, data });
+        let path = self.object(object).name;
+        self.trace(
+            "write",
+            &path,
+            serde_json::json!({"kind": "string", "bytes": len, "written": written}),
+        );
         written
     }
 
@@ -837,6 +851,12 @@ impl FileHost {
             data: data.clone(),
         });
         self.events.push(IoEvent::FreeBuffer); // `0x54f5b0`
+        let path = self.object(object).name;
+        self.trace(
+            "read",
+            &path,
+            serde_json::json!({"kind": "string", "bytes": data.len()}),
+        );
         word
     }
 
@@ -855,7 +875,9 @@ impl FileHost {
     ///
     /// exe: LAB_00486170
     pub fn exists(&self, path: &str) -> u32 {
-        self.layer.exists(path)
+        let result = self.layer.exists(path);
+        self.trace("exists", path, serde_json::json!({"result": result}));
+        result
     }
 
     /// `File.delete(Ljava.lang.String;)I` — `0x486150`. Same shape, calling
@@ -863,7 +885,9 @@ impl FileHost {
     ///
     /// exe: LAB_00486150
     pub fn delete(&mut self, path: &str) -> u32 {
-        self.layer.delete(path)
+        let result = self.layer.delete(path);
+        self.trace("delete", path, serde_json::json!({"result": result}));
+        result
     }
 
     /// `File.copy(Ljava.lang.String;Ljava.lang.String;)I` — `0x4860f0`. The
@@ -873,7 +897,13 @@ impl FileHost {
     ///
     /// exe: FUN_004860f0
     pub fn copy(&mut self, src: &str, dst: &str) -> u32 {
-        self.layer.copy(src, dst)
+        let result = self.layer.copy(src, dst);
+        self.trace(
+            "copy",
+            src,
+            serde_json::json!({"destination": dst, "result": result}),
+        );
+        result
     }
 
     /// `File.move(String;String;)I`: 0 on success, `u32::MAX` on failure.
@@ -882,7 +912,13 @@ impl FileHost {
     ///
     /// exe: FUN_00486120
     pub fn move_file(&mut self, src: &str, dst: &str) -> u32 {
-        self.layer.move_file(src, dst)
+        let result = self.layer.move_file(src, dst);
+        self.trace(
+            "move",
+            src,
+            serde_json::json!({"destination": dst, "result": result}),
+        );
+        result
     }
 
     // ---- the raw-word natives (I4) ----------------------------------------
@@ -894,8 +930,17 @@ impl FileHost {
     /// exe: FUN_00485b20
     pub fn write_int(&mut self, object: u32, value: u32) -> u32 {
         let handle = self.handle_of(object);
-        let mut io = self.io();
-        file_write_int(&mut io, handle, value)
+        let written = {
+            let mut io = self.io();
+            file_write_int(&mut io, handle, value)
+        };
+        let path = self.object(object).name;
+        self.trace(
+            "write",
+            &path,
+            serde_json::json!({"kind": "int", "value": value, "written": written}),
+        );
+        written
     }
 
     /// `File.write(F)I`: the float's four raw IEEE-754 bits through the file
@@ -906,8 +951,17 @@ impl FileHost {
     /// exe: FUN_00485bc0
     pub fn write_float(&mut self, object: u32, value: f32) -> u32 {
         let handle = self.handle_of(object);
-        let mut io = self.io();
-        file_write_float(&mut io, handle, value)
+        let written = {
+            let mut io = self.io();
+            file_write_float(&mut io, handle, value)
+        };
+        let path = self.object(object).name;
+        self.trace(
+            "write",
+            &path,
+            serde_json::json!({"kind": "float", "bits": value.to_bits(), "written": written}),
+        );
+        written
     }
 
     /// `File.readInt()I`: the next four bytes read little-endian; 0 for a
@@ -918,8 +972,17 @@ impl FileHost {
     /// exe: FUN_00485b70
     pub fn read_int(&mut self, object: u32) -> u32 {
         let handle = self.handle_of(object);
-        let mut io = self.io();
-        file_read_int(&mut io, handle).unwrap_or(0)
+        let value = {
+            let mut io = self.io();
+            file_read_int(&mut io, handle).unwrap_or(0)
+        };
+        let path = self.object(object).name;
+        self.trace(
+            "read",
+            &path,
+            serde_json::json!({"kind": "int", "value": value}),
+        );
+        value
     }
 
     /// `File.readFloat()F`: the next four bytes as raw IEEE-754 bits; 0.0 for a
@@ -929,8 +992,17 @@ impl FileHost {
     /// exe: FUN_00485c10
     pub fn read_float(&mut self, object: u32) -> f32 {
         let handle = self.handle_of(object);
-        let mut io = self.io();
-        file_read_float(&mut io, handle).unwrap_or(0.0)
+        let value = {
+            let mut io = self.io();
+            file_read_float(&mut io, handle).unwrap_or(0.0)
+        };
+        let path = self.object(object).name;
+        self.trace(
+            "read",
+            &path,
+            serde_json::json!({"kind": "float", "bits": value.to_bits()}),
+        );
+        value
     }
 
     // ---- internals --------------------------------------------------------
@@ -1104,6 +1176,16 @@ impl FileHost {
     pub fn append_log(&mut self, message: &str) {
         self.log.push(LOG_PREFIX.to_owned());
         self.log.push(message.to_owned());
+    }
+
+    /// Publish one port file-layer operation to the diagnostics stream.
+    ///
+    /// The original's file I/O is not reproduced by the headless
+    /// materialisation, so this stream is deliberately separate from the
+    /// native call log: it describes what *this* implementation touched, and
+    /// is never compared against an original trace.
+    fn trace(&self, op: &str, path: &str, detail: serde_json::Value) {
+        slr_telemetry::file_io(op, path, detail);
     }
 }
 

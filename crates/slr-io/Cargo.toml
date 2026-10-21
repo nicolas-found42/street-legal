@@ -9,6 +9,7 @@ sha2 = "0.10"
 slr-calllog = { path = "../slr-calllog" }
 slr-fmt-sdat = { path = "../slr-fmt-sdat" }
 slr-vm = { path = "../slr-vm" }
+slr-telemetry = { path = "../slr-telemetry" }
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"

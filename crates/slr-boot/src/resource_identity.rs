@@ -12,6 +12,8 @@ pub const RENDER_CREATE: u32 = 0x0048_0ee0;
 pub const PHYSICS_BOX: u32 = 0x0048_05b0;
 pub const CAMERA_CREATE: u32 = 0x0048_61e0;
 pub const TEXT_CREATE: u32 = 0x0048_7050;
+pub const CAMERA_DESTROY: u32 = 0x0048_64c0;
+pub const VIEWPORT_DESTROY: u32 = 0x0048_1600;
 
 fn handle(vm: &mut VmHost, object: u32) -> Result<Option<u32>, String> {
     if object == 0 {
@@ -63,7 +65,7 @@ fn instance(kind: i32, owner: u32, template: Option<u32>, name: &str) -> Result<
     })
 }
 
-fn camera_root() -> Result<u32, String> {
+pub(crate) fn camera_root() -> Result<u32, String> {
     if let Some(root) = node::with_res(|h| h.container_for_id(12)) {
         return Ok(root);
     }
@@ -198,11 +200,52 @@ fn create(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), String> {
     }
 }
 
+fn release(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), String> {
+    let mut words = [0; 2];
+    marshal_args(info, &mut words).map_err(|error| format!("release arguments: {error:?}"))?;
+    let Some(handle) = handle(vm, words[0])? else {
+        return Ok(());
+    };
+    let Some((container, resource)) = resource(handle) else {
+        return Ok(());
+    };
+    match (info.class, info.name) {
+        ("java.render.Camera", "destroy") => {
+            // 4864c0 queues the private runtime camera type before its instance.
+            if let Some(template) = crate::factory::template_container(container) {
+                let runtime = node::with_res(|host| {
+                    host.container(template)
+                        .is_some_and(|entry| entry.id >> 16 == 0xffff)
+                });
+                if runtime {
+                    crate::factory::schedule_release(template, true)?;
+                }
+            }
+            crate::factory::schedule_release(container, true)
+        }
+        (_, "destroy") => crate::factory::schedule_release(container, true),
+        (_, "unload") if resource.type_id == 1 => {
+            crate::factory::schedule_release(container, false)
+        }
+        (_, "unload") => crate::factory::unload_resource(container),
+        _ => Err("unregistered release native".into()),
+    }
+}
+
 fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     if info.class == node::RESOURCE_REF_CLASS && info.name == "duplicate" {
         node::bridge(vm, info);
     }
-    if let Err(error) = create(vm, info) {
+    let releasing = matches!(info.name, "unload" | "destroy");
+    if releasing && info.class != "java.render.Camera" {
+        node::bridge(vm, info);
+    }
+    let result = if releasing {
+        release(vm, info)
+    } else {
+        create(vm, info)
+    };
+    if let Err(error) = result {
         vm.native_failure = Some(format!(
             "{}.{}: ResourceIdentityBoundary: {error}",
             info.class, info.name
@@ -214,6 +257,10 @@ fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 pub fn install(vm: &mut VmHost) {
     for address in [
         node::DUPLICATE,
+        node::UNLOAD,
+        node::DESTROY,
+        CAMERA_DESTROY,
+        VIEWPORT_DESTROY,
         RENDER_CREATE,
         PHYSICS_BOX,
         CAMERA_CREATE,

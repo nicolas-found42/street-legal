@@ -1,8 +1,9 @@
 # re/x87probe
 
 Probe suite for ticket M0-07 (plan id M0-07, issue #8): x87 behavior probes
-with two oracles — Berkeley SoftFloat-3e `extF80` (C harness) and Unicorn
-2.1.4 (x86 stub runner) — plus an `mpmath` tiebreaker for transcendentals.
+with three oracles — Berkeley SoftFloat-3e `extF80` (C harness), Unicorn
+2.1.4 (x86 stub runner) and translated x87 under Rosetta 2 — plus an `mpmath`
+tiebreaker for transcendentals.
 
 ## Layout
 
@@ -21,8 +22,26 @@ with two oracles — Berkeley SoftFloat-3e `extF80` (C harness) and Unicorn
 - `compare.py` — referee. Joins both oracles (+ `mpmath` at 200-bit precision
   for `fsin/fcos/fpatan/f2xm1/fyl2x`) by vector id; writes
   `re/out/x87/results.json` + `re/out/x87/disagreements.json`.
+- `rosetta/` — third oracle: the same per-op stubs written in C with host x87
+  inline asm, built as an x86_64 Mach-O binary and run under Rosetta 2
+  (`build.sh`, no Wine needed; `--win32` builds the mingw PE instead).
+- `test_operand_encoding.py` — regression suite over the two operand encoders
+  (`op_to_f80_bytes` and the C `put80`): zero sign, NaN class, infinities,
+  normals and raw-biased forms, plus a byte-for-byte cross-check between them.
 
 ## Regenerate everything from scratch
+
+Before collecting evidence, run the operand-encoding regression suite:
+
+```sh
+~/slr-oracle-venv/bin/python -m unittest discover -s re/x87probe -p test_operand_encoding.py
+```
+
+Preserve any existing `re/out/x87/` captures before the commands below, which
+write their named outputs. The zero-sign and NaN encoding corrections and the
+current retained capture locations are documented at the top of `docs/x87.md`.
+Old Unicorn and Rosetta captures made by the sign-dropping or NaN-dropping
+encoders are not evidence about either execution engine.
 
 ```sh
 # 0. one-time setup (outside the repo):
@@ -52,6 +71,13 @@ clang -O2 -o re/out/x87/sf_oracle \
 
 # 4. referee:
 ~/slr-oracle-venv/bin/python re/x87probe/compare.py
+
+# 5. Rosetta leg (needs Rosetta 2: softwareupdate --install-rosetta \
+#    --agree-to-license; no Wine required):
+~/slr-oracle-venv/bin/python re/x87probe/gen_subset.py
+sh re/x87probe/rosetta/build.sh
+./re/out/x87/probe-rosetta > re/out/x87/rosetta_results.jsonl
+~/slr-oracle-venv/bin/python re/x87probe/compare_rosetta.py
 ```
 
 Nothing under `re/out/` is committed (git-ignored via `/re/out`).

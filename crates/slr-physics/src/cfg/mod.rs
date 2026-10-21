@@ -97,6 +97,58 @@ pub struct Ctx<'a> {
 /// Signature of a keyword handler: `(line, K)`.
 pub type Handler = fn(&mut Ctx, &[u8]);
 
+/// The part/click keyword table (`0x611368`, 39 rows to `eof`), used by the part
+/// template constructor `FUN_0046b330` through `FUN_0046e570`/`FUN_004b6480`.
+///
+/// It is *not* the car table: `render`/`light`/`deformable` share `FUN_0046bfa0`,
+/// `damage` stays `FUN_0046cf50` while `intdamage` (`FUN_0046cfb0`) replaces the car
+/// `texture` handler, `material`/`wing`/`rollbar` map to the `K+0x11b4`/`K+0x11e8`/
+/// `K+0x1214` tails, `skinned`, `slotturn`, `sfx_loop` exist only here, and the
+/// car-only wheel/vehicle/HUD rows are absent.
+pub fn part_table() -> Vec<(&'static str, Handler)> {
+    vec![
+        ("click", part::click),
+        ("body", part::body),
+        ("bone", part::bone),
+        ("noclick", part::noclick),
+        ("nocollision", part::nocollision),
+        ("buoy", part::buoy),
+        ("render", part::deformable),
+        ("light", part::deformable),
+        ("deformable", part::deformable),
+        ("shadow", part::shadow),
+        ("flags", part::flags),
+        ("trigger", part::trigger),
+        ("lod", part::lod),
+        ("lods", part::lods),
+        ("colors", part::colors),
+        ("category", part::category),
+        ("slot", part::slot),
+        ("bolt", part::bolt),
+        ("attach", part::attach),
+        ("compatible", part::compatible),
+        ("slotdmgmode", part::slotdmgmode),
+        ("slotdeform", part::slotdeform),
+        ("slottype", part::slottype),
+        ("slotflags", part::slottype),
+        ("slotmove", part::slotmove),
+        ("slotturn", part::slotmove2),
+        ("deform", part::deform),
+        ("mesh", part::mesh2),
+        ("texture", part::texture2),
+        ("logo", part::logo),
+        ("damage", vehicle::damage),
+        ("intdamage", part::texture2),
+        ("material", part::material2),
+        ("wing", part::mesh2),
+        ("rollbar", part::lods2),
+        ("skinned", part::skinned),
+        ("linked", part::linked),
+        ("stockpart", part::stockpart),
+        ("sfx_loop", part::stockpart2),
+    ]
+}
+
 /// Every ported keyword handler, in exe table order (`0x60e0f8`).
 ///
 /// Aliases share their handler (`driver`/`controller`, `sw_radius`/`steeringradius`;
@@ -455,31 +507,32 @@ pub fn ref_release(m: &mut Space, slot: u32) {
     if owner == 0 {
         return;
     }
-    let mut cur = m.r32(owner + 0xc);
+    let owner_chain = owner.wrapping_add(0xc);
+    let mut cur = m.r32(owner_chain);
     let mut prev = 0u32;
     if cur == 0 {
         return;
     }
     while cur != slot {
-        let next = m.r32(cur + 4);
+        let next = m.r32(cur.wrapping_add(4));
         prev = cur;
         cur = next;
         if next == 0 {
             return;
         }
     }
-    let next = m.r32(cur + 4);
+    let next = m.r32(cur.wrapping_add(4));
     if prev == 0 {
-        m.w32(owner + 0xc, next);
+        m.w32(owner_chain, next);
     } else {
-        m.w32(prev + 4, next);
+        m.w32(prev.wrapping_add(4), next);
     }
     let o = m.r32(slot);
-    let base = if o == 0 { 0 } else { o + 0xc };
+    let base = if o == 0 { 0 } else { o.wrapping_add(0xc) };
     let n = m.r32(base.wrapping_add(4)).wrapping_sub(1);
     m.w32(base.wrapping_add(4), n);
     m.w32(slot, 0);
-    m.w32(slot + 4, 0);
+    m.w32(slot.wrapping_add(4), 0);
 }
 
 /// The tail every body-creating keyword shares: replace the body in the record slot at

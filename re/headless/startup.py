@@ -280,6 +280,14 @@ class Startup(Oracle):
                 all_path=observe_dir / "script-natives-all.slrlog",
                 steps_path=observe_dir / "script-steps.jsonl",
             )
+        self.files_log = None
+        self.observed_files = None
+        if observe_dir is not None:
+            # Original-side file I/O and the exe's own `diag.log` are evidence
+            # the native-call streams deliberately exclude. Keep them separate
+            # so a native comparison is never polluted by platform records.
+            self.files_log = calllog.Writer(Path(observe_dir) / "script-files.slrlog")
+            self.observed_files = Path(observe_dir) / "files"
         if self.calllog_path is not None:
             self.calllog = calllog.Writer(self.calllog_path)
             self.com.sink = self.record_com_call
@@ -846,6 +854,11 @@ class Startup(Oracle):
                 raise Boundary("stock_symlink_escape", path=key)
         return path
 
+    def file_record(self, op, path, detail):
+        """Publish one original file-layer operation, outside the native stream."""
+        if self.files_log is not None:
+            self.files_log.record(calllog.file_io(op, path, detail))
+
     def file_bytes(self, key):
         if key in self.overlay:
             return bytes(self.overlay[key])
@@ -910,6 +923,7 @@ class Startup(Oracle):
         }
         if self.events:
             self.events[-1]["path"] = key
+        self.file_record(0x00, key, [access, creation])
         return handle
 
     def checked_file(self, handle, access=0):
@@ -957,6 +971,7 @@ class Startup(Oracle):
                 bytes=count,
                 sha256=hashlib.sha256(data).hexdigest(),
             )
+        self.file_record(0x02, key, [position, count])
         return 1
 
     def file_read(self, args):
@@ -978,6 +993,7 @@ class Startup(Oracle):
                 bytes=len(data),
                 sha256=hashlib.sha256(data).hexdigest(),
             )
+        self.file_record(0x01, key, [position, len(data)])
         return 1
 
     def file_close(self, args):
@@ -997,8 +1013,9 @@ class Startup(Oracle):
         if args[0] in self.semaphores:
             del self.semaphores[args[0]]
             return 1
-        self.checked_file(args[0])
+        state = self.checked_file(args[0])
         del self.files[args[0]]
+        self.file_record(0x03, state["path"], [])
         return 1
 
     def file_size(self, args):
@@ -1071,6 +1088,7 @@ class Startup(Oracle):
         ]
         if not values:
             self.last_error = 2
+            self.file_record(0x04, key, [])
             return 0xFFFFFFFF
         if len(self.finds) >= 128:
             raise Boundary("find_handle_limit", limit=128)
@@ -1698,6 +1716,31 @@ class Startup(Oracle):
         self.write(dest, (path + b"\0")[:capacity])
         return min(len(path), capacity)
 
+    def write_observed_files(self):
+        """Retain every file the original wrote, including its own `diag.log`.
+
+        The exe's log sink (`0x5513b0` -> `0x5585e0`) appends to `diag.log`
+        through the same file layer this run intercepts, so the bytes here are
+        what the original actually wrote, not a reconstruction from hooks.
+        Writing them does not participate in the emulated address space.
+        """
+        out = {}
+        self.observed_files.mkdir(parents=True, exist_ok=True)
+        for key, data in sorted(self.overlay.items()):
+            relative = key.replace("\\", "/").lstrip("/")
+            if not relative or ".." in Path(relative).parts:
+                continue
+            destination = (self.observed_files / relative).resolve()
+            if not destination.is_relative_to(self.observed_files.resolve()):
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(bytes(data))
+            out[relative] = {"bytes": len(data), "sha256": hashlib.sha256(bytes(data)).hexdigest()}
+            if relative.lower().endswith("diag.log"):
+                # Convenience copy named for the bundle's discovery rule.
+                (Path(self.observe_dir) / "original-diag.log").write_bytes(bytes(data))
+        return out
+
     def processor_feature(self, args):
         # Conservative single-thread x87 process profile; OS SSE paths disabled.
         features = {0: 0, 1: 0, 2: 1, 3: 1, 6: 0, 7: 0, 8: 1, 9: 0, 10: 0}
@@ -1785,6 +1828,15 @@ class Startup(Oracle):
                 ],
                 "sidecar": str(Path(self.observe_dir) / "original-facts.json"),
             }
+        if self.files_log is not None:
+            self.files_log.close()
+            result["file_log"] = {
+                "path": str(Path(self.observe_dir) / "script-files.slrlog"),
+                "records": self.files_log.records,
+            }
+            written = self.write_observed_files()
+            if written:
+                result["observed_files"] = written
         if self.calllog is not None:
             self.calllog.close()
             result["calllog"] = {"path": str(self.calllog_path), "records": self.calllog.records}

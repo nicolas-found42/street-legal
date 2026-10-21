@@ -78,7 +78,12 @@ def tree_identity(root):
     return {"root": str(root), "files": entries, "sha256": sha(encoded)}
 
 
-def git_identity(repository):
+def git_identity(repository, outputs=()):
+    """Source identity: the commit, the tracked diff and every untracked source
+    file. `outputs` are paths this tool owns; bytes under them are run products,
+    never source, so a run cannot invalidate its own identity by writing them.
+    """
+    excluded = tuple(Path(path).resolve() for path in outputs)
     def git(*args):
         return subprocess.check_output(["git", "-C", str(repository), *args])
     commit = git("rev-parse", "HEAD").decode().strip()
@@ -88,6 +93,9 @@ def git_identity(repository):
     for raw in git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
         if raw:
             path = repository / os.fsdecode(raw)
+            resolved = path.resolve()
+            if any(resolved == root or resolved.is_relative_to(root) for root in excluded):
+                continue
             record = file_identity(path)
             record["path"] = os.fsdecode(raw)
             untracked.append(record)
@@ -299,7 +307,13 @@ def verify_artifacts(bundle, manifest):
     if manifest.get("status") not in ("completed", "failed", "interrupted"):
         raise ValueError("bundle is running or unfinished; no completed-run acceptance")
     artifacts = manifest.get("artifacts", {})
-    if not artifacts or "report.json" not in artifacts: raise ValueError("artifact manifest incomplete")
+    if isinstance(artifacts, list):
+        artifacts = {item["path"]: item for item in artifacts}
+    # The boot runner writes a comparison report; an embedding without native
+    # parity (the frontend) has nothing to report and must not be rejected for
+    # the absence of a file it could never produce.
+    if not artifacts or (manifest.get("embedding", "slr-boot") == "slr-boot" and "report.json" not in artifacts):
+        raise ValueError("artifact manifest incomplete")
     actual_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file() and path != bundle / "manifest.json"}
     if actual_files != set(artifacts): raise ValueError("artifact manifest does not cover bundle files")
     for relative, expected in artifacts.items():
@@ -326,10 +340,20 @@ def verify_artifacts(bundle, manifest):
                 raise ValueError("untracked source archive content differs from source identity")
 
 
+def stream_dir(bundle):
+    """Where a bundle keeps its streams.
+
+    The headless runner nests them under `runtime/`; the shared telemetry crate
+    writes them at the bundle root. One reader must handle both.
+    """
+    nested = bundle / "runtime"
+    return nested if nested.is_dir() else bundle
+
+
 def correlate(bundle, comparisons):
     events, states, parse_errors, missing = [], [], [], []
     for filename, output in [("events.jsonl", events), ("states.jsonl", states)]:
-        path = bundle / "runtime" / filename
+        path = stream_dir(bundle) / filename
         if path.exists():
             offset = 0
             for raw in path.read_bytes().splitlines(keepends=True):
@@ -341,7 +365,7 @@ def correlate(bundle, comparisons):
                     break
                 offset += len(raw)
         if not output: missing.append(filename)
-    manifest = json.loads((bundle / "manifest.json").read_text())
+    manifest = bundle_manifest(bundle)
     previous = -1
     for event_index, event in enumerate(events):
         sequence = event.get("sequence")
@@ -373,7 +397,7 @@ def correlate(bundle, comparisons):
     if candidates: selected = min(candidates, key=lambda candidate:int(dict(candidate["event"]["kind"]["fields"])["all_ordinal"]))
     target_sequence = selected["event"].get("sequence", float("inf")) if selected else float("inf")
     preceding = [state for state in states if state.get("sequence", state.get("event_sequence", 0)) <= target_sequence]
-    failure = bundle / "runtime/failure.json"
+    failure = stream_dir(bundle) / "failure.json"
     failure_value = None
     if failure.exists():
         try: failure_value = json.loads(failure.read_text())
@@ -384,34 +408,263 @@ def correlate(bundle, comparisons):
 
 def analyze(bundle):
     bundle = Path(bundle).resolve(strict=True)
-    manifest = json.loads((bundle / "manifest.json").read_text())
+    manifest = bundle_manifest(bundle)
     if manifest.get("status") == "running":
         context = correlate(bundle,{})
         return {"run_id":manifest.get("run_id"),"status":"unfinished","diagnostic_only":True,"acceptance":False,
             "inventory_verified":False,"inventory_warning":"Wrapper did not finalize; process liveness is unknown and artifact identities are unverified.",
-            "report_present":(bundle / "report.json").exists(),"completion_marker_present":(bundle / "runtime/capture-end.json").exists(),
-            "native_prefixes":{label:native_prefix(bundle / "runtime" / name) for label,name in
+            "report_present":(bundle / "report.json").exists(),"completion_marker_present":(stream_dir(bundle) / "capture-end.json").exists(),
+            "native_prefixes":{label:native_prefix(stream_dir(bundle) / name) for label,name in
                 (("filtered","runtime.calllog"),("unfiltered","runtime-all.calllog"))},**context}
-    verify_artifacts(bundle, manifest)
-    report = json.loads((bundle / "report.json").read_text())
-    context = correlate(bundle, report.get("comparisons", {}))
+    # A reconstructed manifest carries sizes but no hashes: there was no
+    # writer to take them, so verification is reported as unavailable.
+    if not manifest.get("reconstructed"):
+        verify_artifacts(bundle, manifest)
+    report_path = bundle / "report.json"
+    if report_path.exists():
+        report = json.loads(report_path.read_text())
+    else:
+        report = {"status": manifest.get("status"), "error": manifest.get("error"),
+                  "comparisons": manifest.get("comparisons", {}),
+                  "embedding": manifest.get("embedding"), "final": manifest.get("final")}
+    context = correlate(bundle, report.get("comparisons") or {})
     if manifest["status"] == "completed":
-        end = json.loads((bundle / "runtime/capture-end.json").read_text())
+        end = json.loads((stream_dir(bundle) / "capture-end.json").read_text())
         if context["diagnostic_parse_errors"] or context["missing_or_empty_streams"] or not context["has_capture_end_event"] or any(end.get(key) != context[key] for key in ("events_written","states_written","last_sequence")) or end.get("run_id") != manifest["run_id"] or end.get("schema_version") != 1:
             raise ValueError("completed bundle causal stream proof invalid")
     return {"run_id": manifest["run_id"], "status": manifest["status"], "result": report, **context}
 
 
-def snapshot(path, directory, label):
+def archive_root(runs_root):
+    """Index and the content store live beside `runs/`, never inside it.
+
+    Tests and `analyze` treat every `runs/` child as a bundle, so nothing else
+    may appear there.
+    """
+    return Path(runs_root).resolve().parent
+
+
+def store_path(runs_root, digest):
+    return archive_root(runs_root) / "inputs-store" / digest
+
+
+def snapshot(path, directory, label, runs_root=None):
+    """Freeze an input into the bundle, sharing bytes through the content store.
+
+    The bundle keeps a real file (hard link where the filesystem allows) so
+    `verify_artifacts` and `analyze` are unchanged; identical inputs across
+    bundles cost no additional disk.
+    """
     identity = file_identity(path)
     destination = directory / f"{label}-{Path(path).name}"
     data = Path(identity["path"]).read_bytes()
     if sha(data) != identity["sha256"]: raise ValueError("input changed before snapshot")
-    with destination.open("xb") as output: output.write(data)
+    if runs_root is None:
+        runs_root = directory.parent.parent
+    stored = store_path(runs_root, identity["sha256"])
+    if not stored.exists():
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        temporary = stored.with_name(stored.name + ".tmp")
+        with temporary.open("xb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, stored)
+    elif file_identity(stored)["sha256"] != identity["sha256"]:
+        raise ValueError("content store entry has unexpected bytes")
+    # The bundle copy must stay independently mutable: verification hashes
+    # each bundle's own bytes, so a hard link would let one bundle invalidate
+    # another. Reflink (APFS, btrfs, XFS) keeps that independence at no extra
+    # space; every other filesystem gets a plain copy. On macOS `clonefile`
+    # is the reflink primitive; the store is on the same volume by construction.
+    cloned = False
+    if sys.platform == "darwin":
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        cloned = libc.clonefile(os.fsencode(stored), os.fsencode(destination), 0) == 0
+    if not cloned:
+        shutil.copyfile(stored, destination)
+    if file_identity(destination)["sha256"] != identity["sha256"]:
+        raise ValueError("snapshotted input differs from its identity")
     return {**identity, "snapshot": destination.name}
 
 
-def run(args, extra):
+def index_path(runs_root):
+    return archive_root(runs_root) / "runs-index.jsonl"
+
+
+def append_index(runs_root, record):
+    """Append one line per bundle. Best effort: a full disk must not fail a run."""
+    path = index_path(runs_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(record, sort_keys=True, default=str).encode() + b"\n"
+    with path.open("ab") as output:
+        if output.tell() > 0:
+            with path.open("rb") as existing:
+                existing.seek(-1, os.SEEK_END)
+                if existing.read(1) not in (b"\n",):
+                    output.write(b"\n")
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def index_record(bundle, manifest, report):
+    """The searchable summary of one bundle."""
+    comparisons = report.get("comparisons", {})
+    first = next(({"comparison": label, **value} for label, value in comparisons.items()
+                  if value.get("equal") is False), None)
+    # A frontend bundle has no native comparison: it is neither passing nor
+    # failing parity, and must not be read as either.
+    artifacts = manifest.get("artifacts", {})
+    # The headless runner keys artifacts by relative path; the shared crate
+    # writes a list. Accept either so one index covers both embeddings.
+    entries = artifacts.values() if isinstance(artifacts, dict) else artifacts
+    sizes = [item.get("bytes", 0) for item in entries]
+    return {
+        "schema_version": 1,
+        "run_id": manifest.get("run_id"),
+        "bundle": str(bundle),
+        "embedding": manifest.get("embedding", "slr-boot"),
+        "started": manifest.get("started"),
+        "finished": manifest.get("finished"),
+        "status": manifest.get("status"),
+        "error": report.get("error"),
+        "source_commit": (manifest.get("source") or {}).get("commit"),
+        "source_dirty": (manifest.get("source") or {}).get("dirty"),
+        "source_run": (manifest.get("source_run") or {}).get("run_id"),
+        "binary_sha256": (manifest.get("binary") or {}).get("sha256"),
+        "configuration": {key: (manifest.get("configuration") or {}).get(key) for key in
+                          ("frames", "trace_level", "event_ring", "clock_mask", "stock")},
+        "comparisons": {label: {"equal": value.get("equal"), "record": value.get("record"),
+                                "kind": value.get("kind"), "expected_records": value.get("expected_records"),
+                                "actual_records": value.get("actual_records")}
+                        for label, value in comparisons.items()},
+        "first_mismatch": first,
+        "native_call_id": (report.get("divergence_context") or {}).get("event", {}).get("context", {}).get("native", {}).get("call_id"),
+        "targeted_rerun": {key: (report.get("targeted_rerun") or {}).get(key)
+                           for key in ("identical_full_traces", "snapshot_valid")},
+        "flake": manifest.get("flake"),
+        # Present only when the wrapper manifest was lost and the crash
+        # markers supplied the identity instead.
+        "reconstructed": manifest.get("reconstructed"),
+        # True when `started`/`finished` came from the directory mtime rather
+        # than a writer that recorded them.
+        "started_derived": manifest.get("started_derived"),
+        "artifacts": len(artifacts) if not isinstance(artifacts, dict) else len(artifacts),
+        "bytes": sum(sizes),
+    }
+
+
+def prune(runs_root, keep, dry_run=False):
+    """Delete the oldest bundles, newest `keep` retained.
+
+    A `running` bundle is never removed: its writer may still be appending.
+    The index is left intact, so pruning is visible in the history.
+    """
+    root = Path(runs_root).resolve()
+    if keep < 1:
+        raise ValueError("--keep must be at least 1")
+    bundles = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            manifest = json.loads((child / "manifest.json").read_text())
+        except Exception:
+            continue
+        bundles.append((manifest.get("started") or "", child, manifest))
+    bundles.sort()
+    removed, retained = [], []
+    for started, child, manifest in bundles[:-keep] if len(bundles) > keep else []:
+        if manifest.get("status") == "running":
+            retained.append(str(child.resolve()))
+            continue
+        relative = child.name
+        if not dry_run:
+            shutil.rmtree(child)
+        removed.append({"bundle": str(child.resolve()), "name": relative,
+                        "started": started, "status": manifest.get("status")})
+    if not dry_run:
+        # Drop store entries no live bundle links to.
+        store = archive_root(runs_root) / "inputs-store"
+        if store.is_dir():
+            live = set()
+            for child in root.iterdir():
+                for path in child.rglob("*"):
+                    if path.is_file():
+                        try: live.add(str(path.stat().st_ino))
+                        except OSError: pass
+            for entry in store.iterdir():
+                if entry.is_file():
+                    try:
+                        if str(entry.stat().st_ino) not in live: entry.unlink()
+                    except OSError: pass
+    return {"removed": removed, "retained_running": retained, "kept": keep}
+
+
+def environment_identity(repository):
+    """Host and toolchain identity a bundle was produced on."""
+    import platform
+    def tool(*command):
+        try:
+            return subprocess.run(command, cwd=repository, capture_output=True, text=True,
+                                  timeout=30).stdout.strip() or None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    return {
+        "schema_version": 1,
+        "captured": utc(),
+        "uname": {"system": platform.system(), "release": platform.release(),
+                  "machine": platform.machine(), "version": platform.version()},
+        "python": platform.python_version(),
+        "cpus": os.cpu_count(),
+        "rustc": tool("rustc", "--version"),
+        "cargo": tool("cargo", "--version"),
+        "wine": tool("wine", "--version"),
+    }
+
+
+def flake_summary(statuses):
+    """Failure rate over repeated identical executions of one case."""
+    total = len(statuses)
+    failed = sum(1 for status in statuses if status != "completed")
+    return {"iterations": total, "failed": failed, "completed": total - failed,
+            "rate": (failed / total) if total else 0.0, "statuses": list(statuses),
+            "nondeterministic": 0 < failed < total}
+
+
+def file_issue(repository, record, bundle):
+    """Create a GitHub issue for a failed bundle; returns the command to run."""
+    title = f"boot diagnostics: {record.get('error') or 'divergence'} (run {record['run_id']})"
+    mismatch = record.get("first_mismatch") or {}
+    body = "\n".join([
+        f"Automated diagnostic failure from `{bundle}`.",
+        "",
+        f"- status: `{record.get('status')}`",
+        f"- error: `{record.get('error')}`",
+        f"- commit: `{record.get('source_commit')}` (dirty: {record.get('source_dirty')})",
+        f"- binary: `{record.get('binary_sha256')}`",
+        f"- comparison: `{mismatch.get('comparison')}` record {mismatch.get('record')} ({mismatch.get('kind')})",
+        f"- native call id: `{record.get('native_call_id')}`",
+        "",
+        "Reproduce:",
+        "",
+        "```sh",
+        f"python3 re/boot-diagnose.py --replay-from {bundle}",
+        "```",
+        "",
+        "Verify the recorded frontier:",
+        "",
+        "```sh",
+        f"python3 re/boot-diagnose.py --check-regression {bundle}",
+        "```",
+    ])
+    return ["gh", "issue", "create", "--title", title, "--body", body,
+            "--label", "needs-triage"]
+
+
+def run_once(args, extra):
     repository = Path(args.repository).resolve()
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + "-" + uuid.uuid4().hex[:12]
     root = Path(args.runs_root).resolve()
@@ -426,11 +679,16 @@ def run(args, extra):
                 "arguments": sys.argv[1:], "comparison_policy": {**MASK_POLICY,
                     "masked_clock_results": MASK_POLICY["masked_clock_results"] if args.clock_mask == "legacy" else []}, "artifacts": {}}
     manifest["configuration"] = {"frames":args.frames,"trace":args.trace,"trace_level":args.trace_level,
-        "event_ring":args.event_ring,"extra":extra,"clock_mask":args.clock_mask,"stock":args.stock}
+        "event_ring":args.event_ring,"extra":extra,"clock_mask":args.clock_mask,"stock":args.stock,
+        "repeat":args.repeat,"wall_clock":args.wall_clock}
+    manifest["environment"] = environment_identity(repository)
     dump(bundle / "manifest.json", manifest)
     report, exit_code = {"comparisons": {}}, 2
     try:
-        manifest["source"], diff = git_identity(repository)
+        # Only this tool's own products are excluded from source identity.
+        outputs = [Path(args.runs_root), index_path(args.runs_root),
+                   archive_root(args.runs_root) / "inputs-store"]
+        manifest["source"], diff = git_identity(repository, outputs)
         (bundle / "source.diff").write_bytes(diff)
         manifest["source_untracked"] = archive_untracked_sources(repository, bundle, manifest["source"])
         stock = tree_identity(repository / args.stock)
@@ -449,7 +707,7 @@ def run(args, extra):
                     paths["oracle_facts"] = candidate
                     break
         paths.update({f"profile{index}": Path(path) for index, path in enumerate(args.profile)})
-        manifest["inputs"] = {label: snapshot(path if path.is_absolute() else repository / path, inputs, label)
+        manifest["inputs"] = {label: snapshot(path if path.is_absolute() else repository / path, inputs, label, args.runs_root)
                               for label, path in paths.items()}
         for label in ("oracle_filtered", "oracle_unfiltered"):
             records = load_records(inputs / manifest["inputs"][label]["snapshot"])
@@ -463,14 +721,14 @@ def run(args, extra):
             raise ValueError("filtered and unfiltered oracle traces have mismatched inputs or capture boundaries")
         if args.replay:
             replay = Path(args.replay).resolve(strict=True)
-            manifest["inputs"]["replay"] = snapshot(replay, inputs, "replay")
+            manifest["inputs"]["replay"] = snapshot(replay, inputs, "replay", args.runs_root)
             # Save the sibling provenance manifests and tapes as an immutable
             # reference bundle. Rust still validates the original sibling set.
             for path in sorted(replay.parent.glob("*.json*")):
                 if path != replay and path.is_file():
-                    manifest["inputs"]["replay_" + path.name] = snapshot(path, inputs, "replay")
+                    manifest["inputs"]["replay_" + path.name] = snapshot(path, inputs, "replay", args.runs_root)
             source = replay.parent / "observed/original-facts.json"
-            if source.exists(): manifest["inputs"]["replay_source"] = snapshot(source, inputs, "replay")
+            if source.exists(): manifest["inputs"]["replay_source"] = snapshot(source, inputs, "replay", args.runs_root)
             # Keep exact sibling names for the replay provider's manifest-based
             # validation, and execute against these frozen bytes.
             companion = replay.parent / "frame-timer-manifest.json"
@@ -479,7 +737,7 @@ def run(args, extra):
                 for field in ("file", "source_facts"):
                     relative = authority[field]
                     if Path(relative).is_absolute(): raise ValueError("absolute replay companion path cannot be relocated")
-                    identity = snapshot(replay.parent / relative, inputs, "companion_" + field)
+                    identity = snapshot(replay.parent / relative, inputs, "companion_" + field, args.runs_root)
                     identity["replay_relative"] = relative
                     manifest["inputs"]["replay_companion_" + field] = identity
             replay_directory = bundle / "replay/tree/capture"
@@ -504,13 +762,22 @@ def run(args, extra):
                 if label not in manifest["inputs"] or manifest["inputs"][label]["sha256"] != expected["sha256"]:
                     raise ValueError(f"replay input mismatch: {label}")
         if not args.no_build:
-            build = child(["cargo", "build", "-p", "slr-boot"], repository, os.environ.copy(), bundle / "build.stdout.txt", bundle / "build.stderr.txt", args.timeout)
+            # A shared target directory can satisfy cargo while another build
+            # is mid-flight, linking a stale dependency rlib. Acceptance builds
+            # can request a private target directory instead.
+            environment = os.environ.copy()
+            if args.isolated_build:
+                environment["CARGO_TARGET_DIR"] = str(bundle / "target")
+            build = child(["cargo", "build", "-p", "slr-boot"], repository, environment, bundle / "build.stdout.txt", bundle / "build.stderr.txt", args.timeout)
             manifest["build"] = build
             if build["timed_out"] or build["returncode"] != 0: raise ValueError("build failed or timed out")
         binary = Path(args.binary)
-        if not binary.is_absolute(): binary = repository / binary
+        if args.isolated_build and not binary.is_absolute():
+            binary = bundle / "target/debug" / binary.name
+        elif not binary.is_absolute():
+            binary = repository / binary
         manifest["binary"] = file_identity(binary)
-        manifest["binary_snapshot"] = snapshot(binary, inputs, "binary")
+        manifest["binary_snapshot"] = snapshot(binary, inputs, "binary", args.runs_root)
         (inputs / manifest["binary_snapshot"]["snapshot"]).chmod(binary.stat().st_mode & 0o777)
         if "source_run" in manifest:
             manifest["source_run"]["binary_changed"] = prior["binary"]["sha256"] != manifest["binary"]["sha256"]
@@ -531,8 +798,9 @@ def run(args, extra):
                 "--output", str(bundle / "runtime"), "--run-id", run_id,
                 "--trace-level", args.trace_level, "--event-ring", str(args.event_ring)]
         if args.frames is not None: argv.extend(["--frames", str(args.frames)])
+        if args.wall_clock: argv.append("--wall-clock")
         if args.replay: argv.extend(["--clock-replay", manifest["replay_argument"]])
-        if any(arg.split("=", 1)[0] in ("--output", "--run-id", "--trace-level", "--event-ring", "--clock-replay") for arg in extra):
+        if any(arg.split("=", 1)[0] in ("--output", "--run-id", "--trace-level", "--event-ring", "--clock-replay", "--wall-clock") for arg in extra):
             raise ValueError("runner-owned arguments must use their diagnostic options")
         argv.extend(extra)
         manifest["child_arguments"] = argv
@@ -581,7 +849,7 @@ def run(args, extra):
         for label, field in [("filtered", "filtered_records"), ("unfiltered", "all_records")]:
             count = report["comparisons"][label].get("actual_records", report["comparisons"][label].get("records"))
             if end.get(field) != count: raise ValueError("runtime completion record count mismatch")
-        if git_identity(repository)[0] != manifest["source"]: raise ValueError("source changed during run")
+        if git_identity(repository, outputs)[0] != manifest["source"]: raise ValueError("source changed during run")
         if result["timed_out"]: raise ValueError("runtime timeout; child process group terminated")
         if result["returncode"] != 0: raise ValueError(f"runtime exited{result['returncode']}")
         if not all(value.get("equal") for value in report["comparisons"].values()):
@@ -622,7 +890,7 @@ def run(args, extra):
                     for name in ("runtime.calllog", "runtime-all.calllog"):
                         stable = stable and load_records(rerun / "runtime" / name) == load_records(bundle / "runtime" / name)
                     stable = stable and file_identity(binary)["sha256"] == manifest["binary"]["sha256"]
-                    stable = stable and git_identity(repository)[0] == manifest["source"]
+                    stable = stable and git_identity(repository, outputs)[0] == manifest["source"]
                     stable = stable and tree_identity(repository / args.stock)["sha256"] == manifest["stock_inputs_sha256"]
                     for identity in manifest["inputs"].values():
                         stable = stable and file_identity(inputs / identity["snapshot"])["sha256"] == identity["sha256"]
@@ -665,12 +933,233 @@ def run(args, extra):
         manifest["artifacts"] = {path.relative_to(bundle).as_posix(): file_identity(path)
             for path in sorted(bundle.rglob("*")) if path.is_file() and path != bundle / "manifest.json"}
         dump(bundle / "manifest.json", manifest)
-    print(json.dumps({"bundle": str(bundle), "status": manifest["status"], "error": report.get("error"), "comparisons": report["comparisons"]}, default=str))
+    return exit_code, bundle, manifest, report
+
+
+def run(args, extra):
+    """Execute the requested iterations, then index, prune and report once."""
+    repository = Path(args.repository).resolve()
+    iterations = []
+    exit_code = 0
+    for iteration in range(args.repeat):
+        status, bundle, manifest, report = run_once(args, extra)
+        iterations.append((status, bundle, manifest, report))
+        exit_code = exit_code or status
+    flake = (
+        flake_summary([manifest.get("status") for _, _, manifest, _ in iterations])
+        if args.repeat > 1
+        else None
+    )
+    last = iterations[-1]
+    for index, (_, bundle, manifest, report) in enumerate(iterations):
+        manifest["flake"] = {**flake, "iteration": index + 1} if flake else manifest.get("flake")
+        report["flake"] = manifest["flake"]
+        if flake:
+            dump(bundle / "report.json", report)
+            dump(bundle / "manifest.json", manifest)
+        record = index_record(bundle, manifest, report)
+        if flake:
+            record["flake"] = manifest["flake"]
+        append_index(args.runs_root, record)
+        print(json.dumps({"bundle": str(bundle), "status": manifest["status"],
+            "error": report.get("error"), "comparisons": report["comparisons"],
+            "flake": record["flake"]}, default=str))
+    _, bundle, manifest, report = last
+    if args.prune_keep:
+        report["pruned"] = prune(args.runs_root, args.prune_keep)
+        dump(bundle / "report.json", report)
+    if exit_code != 0 and args.file_issue:
+        record = index_record(bundle, manifest, report)
+        command = file_issue(repository, record, bundle)
+        if args.file_issue == "dry-run":
+            report["issue_command"] = command
+        else:
+            try:
+                completed = subprocess.run(command, cwd=repository, capture_output=True, text=True)
+                report["issue"] = {"returncode": completed.returncode,
+                                   "stdout": completed.stdout.strip(),
+                                   "stderr": completed.stderr.strip()}
+            except OSError as error:
+                report["issue"] = {"error": str(error)}
+        dump(bundle / "report.json", report)
+    print(json.dumps({"bundle": str(bundle), "status": manifest["status"],
+        "exit_code": exit_code, "index": str(index_path(args.runs_root)),
+        "flake": report.get("flake"), "pruned": report.get("pruned"),
+        "issue": report.get("issue_command") or report.get("issue")}, default=str))
     return exit_code
+
+
+def directory_utc(bundle):
+    """The bundle directory's mtime as a UTC timestamp.
+
+    A bundle whose writer was killed has no recorded start. The directory's
+    mtime is when its last artifact landed, which is the only clock it has;
+    callers mark it as derived so it is never mistaken for a recorded time.
+    """
+    seconds = Path(bundle).stat().st_mtime
+    return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat()
+
+
+def bundle_manifest(bundle):
+    """The bundle's manifest, reconstructed when the wrapper never wrote one.
+
+    A killed wrapper leaves complete crash-surviving markers and no
+    `manifest.json`. Those bundles are the ones most worth reading, so their
+    identity comes from the markers instead of failing.
+    """
+    manifest_path = bundle / "manifest.json"
+    if manifest_path.exists():
+        return json.loads(manifest_path.read_text())
+    streams = stream_dir(bundle)
+    capture = json.loads((streams / "capture.json").read_text())
+    end = json.loads((streams / "capture-end.json").read_text())
+    failure = streams / "failure.json"
+    return {
+        "schema_version": 1,
+        "run_id": capture.get("run_id") or end.get("run_id"),
+        "status": end.get("status", "failed"),
+        # The markers carry no clock, so the directory mtime stands in and is
+        # labelled: `--since` and `status` must see these bundles, but nothing
+        # may present a derived time as recorded.
+        "started": end.get("started") or directory_utc(bundle),
+        "started_derived": not end.get("started"),
+        "finished": end.get("finished") or end.get("started") or directory_utc(bundle),
+        "error": end.get("error")
+        or (json.loads(failure.read_text()).get("failure") if failure.exists() else None),
+        "artifacts": {path.relative_to(bundle).as_posix(): {
+            "sha256": None, "bytes": path.stat().st_size}
+            for path in bundle.rglob("*") if path.is_file()},
+        "reconstructed": "wrapper manifest missing; identity from capture markers",
+    }
+
+
+def index_bundle(bundle):
+    """Build an index record from a finished bundle already on disk."""
+    bundle = Path(bundle).resolve()
+    manifest = bundle_manifest(bundle)
+    report_path = bundle / "report.json"
+    report = json.loads(report_path.read_text()) if report_path.exists() else {}
+    # Older and frontend bundles store their own completion facts.
+    end_path = stream_dir(bundle) / "capture-end.json"
+    if "error" not in report and end_path.exists():
+        report["error"] = json.loads(end_path.read_text()).get("error")
+    if "status" not in report:
+        report["status"] = manifest.get("status")
+    return index_record(bundle, manifest, report)
+
+
+def index_missing(runs_root, rebuild=False):
+    """Index every bundle that has no record; `rebuild` rewrites the whole file."""
+    root = Path(runs_root).resolve()
+    path = index_path(runs_root)
+    known = set()
+    if path.exists() and not rebuild:
+        known = {record.get("bundle") for record in read_index(runs_root)}
+    added, skipped = [], []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        bundle = child.resolve()
+        if str(bundle) in known:
+            continue
+        try:
+            record = index_bundle(bundle)
+        except (OSError, ValueError) as error:
+            skipped.append({"bundle": str(bundle), "reason": str(error)})
+            continue
+        added.append(record)
+    if rebuild and path.exists():
+        path.unlink()
+    for record in added:
+        append_index(runs_root, record)
+    return {"added": len(added), "skipped": skipped, "records": added}
+
+
+def read_index(runs_root):
+    path = index_path(runs_root)
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            records.append(json.loads(line))
+    # The file is appended in whatever order bundles were discovered. Chronology
+    # is what "latest" and "outstanding" mean, so order by start time and fall
+    # back to the directory's mtime for bundles whose wrapper never started.
+    def started(record):
+        return record.get("started") or ""
+    def mtime(record):
+        try:
+            return Path(record["bundle"]).stat().st_mtime
+        except (OSError, KeyError):
+            return 0.0
+    records.sort(key=lambda record: (started(record), mtime(record)))
+    return records
+
+
+def query_index(runs_root, status=None, source_commit=None, since=None, limit=None):
+    records = read_index(runs_root)
+    if status:
+        records = [record for record in records if record.get("status") == status]
+    if source_commit:
+        records = [record for record in records if (record.get("source_commit") or "").startswith(source_commit)]
+    if since:
+        records = [record for record in records if (record.get("started") or "") >= since]
+    if limit:
+        records = records[-limit:]
+    return records
+
+
+def bundle_status(runs_root):
+    """Latest bundle per state, with the newest failing bundle called out."""
+    records = read_index(runs_root)
+    if not records:
+        return {"records": 0, "latest": None, "latest_failed": None,
+                "outstanding": [], "note": "no indexed bundles"}
+    latest = records[-1]
+    failed = [record for record in records if record.get("status") != "completed"]
+    # A failure is outstanding unless a later completed run exists for the same case.
+    outstanding = []
+    for record in failed:
+        if not any(later.get("status") == "completed"
+                   and later.get("source_commit") == record.get("source_commit")
+                   and later.get("started", "") > record.get("started", "")
+                   for later in records):
+            outstanding.append(record)
+    return {"records": len(records), "latest": latest,
+            "latest_failed": failed[-1] if failed else None,
+            "outstanding": outstanding}
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["index"], ["list"], ["query"], ["status"], ["prune"]):
+        command, rest = argv[0], argv[1:]
+        parser = argparse.ArgumentParser(prog=f"boot-diagnose.py {command}")
+        parser.add_argument("--runs-root", default=str(REPO / "re/out/boot/runs"))
+        parser.add_argument("--status")
+        parser.add_argument("--commit")
+        parser.add_argument("--since")
+        parser.add_argument("--limit", type=int)
+        parser.add_argument("--keep", type=int)
+        parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--rebuild", action="store_true",
+                            help="index: discard the existing index and rebuild it")
+        parser.add_argument("--json", action="store_true")
+        options = parser.parse_args(rest)
+        if command == "prune":
+            if options.keep is None:
+                parser.error("prune needs --keep N")
+            result = prune(options.runs_root, options.keep, options.dry_run)
+        elif command == "index":
+            result = index_missing(options.runs_root, options.rebuild)
+        elif command == "status":
+            result = bundle_status(options.runs_root)
+        else:
+            result = query_index(options.runs_root, options.status, options.commit,
+                                 options.since, options.limit)
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0
     if argv[:1] == ["analyze"]:
         parser = argparse.ArgumentParser()
         parser.add_argument("bundle")
@@ -695,6 +1184,7 @@ def main(argv=None):
     parser.add_argument("--binary", default="target/debug/slr-boot")
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("SLR_BOOT_SECONDS", "120")))
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--isolated-build", action="store_true")
     parser.add_argument("--frames", type=int)
     parser.add_argument("--replay")
     parser.add_argument("--replay-from")
@@ -705,6 +1195,14 @@ def main(argv=None):
     parser.add_argument("--trace", action="append", default=[])
     parser.add_argument("--trace-level", choices=["metadata", "full"], default="metadata")
     parser.add_argument("--event-ring", type=int, default=4096)
+    parser.add_argument("--wall-clock", action="store_true",
+                        help="add a monotonic wall-clock field to every event")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="run the same case N times and record the flake rate")
+    parser.add_argument("--keep", dest="prune_keep", type=int, default=None,
+                        help="after the run, retain only the newest N bundles")
+    parser.add_argument("--file-issue", nargs="?", const="create", choices=["create", "dry-run"],
+                        default=None, help="open a GitHub issue when the run fails")
     args, extra = parser.parse_known_args(argv)
     if extra[:1] == ["--"]: extra = extra[1:]
     if args.check_regression:
@@ -715,8 +1213,11 @@ def main(argv=None):
         prior = json.loads((prior_bundle / "manifest.json").read_text())
         verify_artifacts(prior_bundle, prior)
         configuration = prior["configuration"]
-        for name in ("frames", "trace", "trace_level", "event_ring", "clock_mask", "stock"):
-            setattr(args, name, configuration[name])
+        for name in ("frames", "trace", "trace_level", "event_ring", "clock_mask", "stock", "wall_clock"):
+            if name in configuration:
+                setattr(args, name, configuration[name])
+        # Repetition and retention describe this invocation, not the frozen case.
+        args.repeat, args.prune_keep, args.file_issue = 1, args.prune_keep, args.file_issue
         extra = configuration["extra"]
         def frozen(label): return str(prior_bundle / "inputs" / prior["inputs"][label]["snapshot"])
         args.original, args.oracle_all, args.native_api = frozen("oracle_filtered"), frozen("oracle_unfiltered"), frozen("native_api")
@@ -727,6 +1228,10 @@ def main(argv=None):
     if args.clock_mask is None: args.clock_mask = "strict" if args.replay else "legacy"
     if args.timeout <= 0 or args.event_ring <= 0 or args.frames is not None and args.frames < 0:
         parser.error("timeout/event-ring must be positive and frames nonnegative")
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
+    if args.prune_keep is not None and args.prune_keep < 1:
+        parser.error("--keep must be at least 1")
     previous = {}
     def interrupt(signum, frame): raise InterruptedRun(f"signal{signum}")
     for signum in (signal.SIGINT, signal.SIGTERM): previous[signum] = signal.signal(signum, interrupt)

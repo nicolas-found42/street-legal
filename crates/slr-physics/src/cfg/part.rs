@@ -419,18 +419,20 @@ pub fn shadow(c: &mut Ctx, line: &[u8]) {
     let s = scan(line, "%d %f %f %f %f %f %f");
     let id = s.db(0).unwrap_or(0);
     let v: Vec<u32> = (1..7).map(|i| s.fb(i).unwrap_or(0)).collect();
+    // `esi = K+0x1074`: vec3 at `esi`, matrix at `esi+0xc`, `+0x3c`/`+0x58` flags and the
+    // bound resource at `esi+0x48`.
     vec3_zero(c.m, c.k + 0x1074);
     c.w(c.k + 0x1074, v[0]);
     c.w(c.k + 0x1078, v[1]);
+    c.w(c.k + 0x107c, v[2]);
     c.w(c.k + 0x10b0, 3);
     c.w(c.k + 0x10cc, 0);
-    c.w(c.k + 0x107c, v[2]);
     c.call(
         EXT_EULER_TO_MATRIX,
-        This::Addr(c.k + 0x107c),
+        This::Addr(c.k + 0x1080),
         vec![Arg::U(v[3]), Arg::U(v[4]), Arg::U(v[5])],
     );
-    bind_res(c, c.k + 0x1084, id, 0xe, 0);
+    bind_res(c, c.k + 0x10bc, id, 0xe, 0);
 }
 
 /// `flags a`: ORs `a & 0x1ff` into the current body record's `+0x58`.
@@ -551,11 +553,11 @@ pub fn bolt(c: &mut Ctx, line: &[u8]) {
     let slot = c.kr(0x116c);
     let node = c.m.alloc(0x58);
     list_node_ctor(c.m, node);
-    c.w(node, 0x005f_1294);
     c.w(node + 0x48, 0);
     c.w(node + 0x4c, 0);
     c.w(node + 0x50, 0);
     c.w(node + 0x54, 0);
+    c.w(node, 0x005f_1294);
     let tail = c.r(slot + 0x70);
     c.w(tail + 4, node);
     c.w(node + 8, tail);
@@ -564,7 +566,6 @@ pub fn bolt(c: &mut Ctx, line: &[u8]) {
     c.w(slot + 0x54, c.r(slot + 0x54).wrapping_add(1));
     let s = scan(line, "%f %f %f %f %f %f %d");
     let v: Vec<u32> = (0..6).map(|i| s.fb(i).unwrap_or(0)).collect();
-    let id = s.db(6).unwrap_or(0);
     c.w(node + 0xc, v[0]);
     c.w(node + 0x10, v[1]);
     c.w(node + 0x14, v[2]);
@@ -573,8 +574,9 @@ pub fn bolt(c: &mut Ctx, line: &[u8]) {
         This::Addr(node + 0x18),
         vec![Arg::U(v[3]), Arg::U(v[4]), Arg::U(v[5])],
     );
+    let id = s.db(6).unwrap_or(0);
     if id != 0 {
-        bind_res(c, node + 0x44, id, 0xe, 0);
+        bind_res(c, node + 0x48, id, 0xe, 0);
     }
 }
 
@@ -816,7 +818,7 @@ pub fn logo(c: &mut Ctx, line: &[u8]) {
     }
     let s = scan(line, "%d");
     let id = s.db(0).unwrap_or(0);
-    bind_res(c, c.k + 0x1238, id, 7, 0);
+    bind_res(c, c.k + 0x1118, id, 7, 0);
 }
 
 /// `flap x y z a b c d e f g h i j k l` (15 floats): appends a 0x5c-byte flap node to the
@@ -878,14 +880,14 @@ pub fn flapsfx(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
-    if !(c.r(c.kr(0x115c) + 4) != 0 && c.kr(0x116c) != 0 && c.r(c.kr(0x116c) + 0xac) != 0) {
+    if !(c.r(c.kr(0x115c) + 4) != 0 && c.kr(0x116c) != 0) {
         return;
     }
     let flap = c.r(c.kr(0x116c) + 0xac);
     let s = scan(line, "%d %d");
     let (a, b) = (s.db(0).unwrap_or(0), s.db(1).unwrap_or(0));
     bind_res(c, flap + 0x3c, a, 6, 0);
-    bind_res(c, flap + 0x44, b, 6, 0);
+    bind_res(c, flap + 0x4c, b, 6, 0);
 }
 
 /// `linked a b c`: appends one 12-byte `(a, b, c)` entry to the current body record's
@@ -1042,9 +1044,10 @@ pub fn material2(c: &mut Ctx, line: &[u8]) {
     let a = s.db(1).unwrap_or(0);
     let b = s.db(2).unwrap_or(0);
     c.put(c.k + 0x11b4, s.fb(3));
-    bind_res(c, c.k + 0x10e8, id, 0xe, 0);
-    bind_res(c, c.k + 0x10c8, a, 6, 0);
-    bind_res(c, c.k + 0x10d8, b, 6, 0);
+    // `esi = K+0x1170`: material at `esi+0x20`, the two maps at `esi` and `esi+0x30`.
+    bind_res(c, c.k + 0x1190, id, 0xe, 0);
+    bind_res(c, c.k + 0x1170, a, 6, 0);
+    bind_res(c, c.k + 0x11a0, b, 6, 0);
 }
 
 /// `mesh2` tail (`FUN_0046d470`): `K+0x11e8..0x120c` (id, position, normalized direction,
@@ -1056,6 +1059,7 @@ pub fn mesh2(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
+    // `%d %f` x9 (`0x61201c`).
     let s = scan(line, "%d %f %f %f %f %f %f %f %f %f");
     let id = s.db(0).unwrap_or(0);
     let v: Vec<f32> = (1..7).map(|i| s.f(i).unwrap_or(0.0)).collect();
@@ -1065,15 +1069,79 @@ pub fn mesh2(c: &mut Ctx, line: &[u8]) {
         s.fb(9).unwrap_or(ONE),
     );
     c.kw(0x11e8, id);
-    c.wf(c.k + 0x11ec, v[0]);
-    c.wf(c.k + 0x11f0, v[1]);
-    c.wf(c.k + 0x11f4, v[2]);
+    // The exe re-bases the position through the enclosing record's transposed matrix
+    // (`0x54e4a0` copies `src` transposed into `dst`) and subtracts the record origin.
+    // `0x46d531..0x46d553`: a live body record wins; otherwise the click record at
+    // `K+0x1000` is used (its `+0x40` body pointer is then zero and no matrix is live).
+    let n = c.kr(0xff0) as i32;
+    let rec = if n < 0 {
+        c.k + 0x1000
+    } else {
+        c.k + 0x128 + (n as u32).wrapping_mul(0x74)
+    };
+    // `0x46d559` tests the record's body pointer, not the index sign.
+    let edi = if c.r(rec + 0x40) != 0 {
+        rec
+    } else {
+        c.k + 0x1000
+    };
+    let src = edi + 0xc;
+    // `src` holds the 3x3 rotation as three rows of stride 0x10 (`m[r][c] = src + r*0x10 + c*4`).
+    let mut m = [0.0f32; 9];
+    for r in 0..3 {
+        for col in 0..3 {
+            m[r * 3 + col] = c.rf(src + (r as u32) * 0x10 + (col as u32) * 4);
+        }
+    }
+    let mut p = [c.rf(edi), c.rf(edi + 4), c.rf(edi + 8)];
+    if c.r(edi + 0x40) != 0 && c.rf(edi + 0x14) != 0.0 {
+        let e = c.r(edi + 0x78) + 0x40;
+        p = [p[0] + c.rf(e), p[1] + c.rf(e + 4), p[2] + c.rf(e + 8)];
+    }
+    // Two x87 passes, exactly as `0x46d5d2..0x46d696`:
+    //   1. `b = v - Mt * (pos + body_offset)`      (`fchs` the origin, then the first
+    //      matrix product, then `fadd v`);
+    //   2. `q = M * b`, where `M` is the matrix as stored (row `r` at `src + r*0x10`).
+    // Every partial product/sum rounds to f32 (control word 0x007f).
+    let a3 = [v[0], v[1], v[2]];
+    let mut bias = [0.0f32; 3];
+    // Column `i` of the stored matrix dotted with `-pos`, top row last.
+    for (i, out) in bias.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for j in (0..3).rev() {
+            acc += m[j * 3 + i] * (-p[j]);
+        }
+        *out = a3[i] + acc;
+    }
+    let mut q = [0.0f32; 3];
+    for (i, out) in q.iter_mut().enumerate() {
+        *out = m[i * 3 + 2] * bias[2] + m[i * 3 + 1] * bias[1] + m[i * 3] * bias[0];
+    }
+    for (i, x) in q.iter().enumerate() {
+        c.wf(c.k + 0x11ec + (i as u32) * 4, *x);
+    }
     let len = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5]).sqrt();
+    let dir = [v[3], v[4], v[5]];
     if len != 0.0 {
-        let inv = 1.0 / len;
-        c.wf(c.k + 0x11f8, v[3] * inv);
-        c.wf(c.k + 0x11fc, v[4] * inv);
-        c.wf(c.k + 0x1200, v[5] * inv);
+        // `0x4369b0` normalises the transformed direction in place before it is stored.
+        let mut t = [0.0f32; 3];
+        for (i, out) in t.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for j in (0..3).rev() {
+                acc += m[j * 3 + i] * dir[j];
+            }
+            *out = acc;
+        }
+        let tl = ((t[0] as f64 * t[0] as f64)
+            + (t[1] as f64 * t[1] as f64)
+            + (t[2] as f64 * t[2] as f64))
+            .sqrt() as f32;
+        if tl != 0.0 {
+            let inv = 1.0 / tl;
+            for (i, x) in t.iter().enumerate() {
+                c.wf(c.k + 0x11f8 + (i as u32) * 4, *x * inv);
+            }
+        }
     }
     c.wf(c.k + 0x1204, -a.abs());
     c.w(c.k + 0x120c, d);
@@ -1104,6 +1172,21 @@ pub fn lods2(c: &mut Ctx, line: &[u8]) {
     c.w(e + 12, y);
 }
 
+/// `skinned a b c`: three floats into `K+0x11bc/0x11c0/0x11c4` and the flag at
+/// `K+0x11b8 = 1`.
+///
+/// exe: FUN_0046d840
+pub fn skinned(c: &mut Ctx, line: &[u8]) {
+    if !c.guard() {
+        return;
+    }
+    let s = scan(line, "%f %f %f");
+    c.w(c.k + 0x11bc, s.fb(0).unwrap_or(0));
+    c.w(c.k + 0x11c0, s.fb(1).unwrap_or(0));
+    c.w(c.k + 0x11c4, s.fb(2).unwrap_or(0));
+    c.kw(0x11b8, 1);
+}
+
 /// `stockpart2` tail (`FUN_0046da30`): binds two `6` slots and stores the float at
 /// `K+0x1260`.
 ///
@@ -1114,7 +1197,8 @@ pub fn stockpart2(c: &mut Ctx, line: &[u8]) {
     }
     let s = scan(line, "%d %f");
     let (a, b) = (s.db(0).unwrap_or(0), s.fb(1).unwrap_or(0));
-    bind_res(c, c.k + 0x1248, a, 6, 0);
+    // `esi = K+0x1250`: bound resource at `esi`, speed at `esi+0x10`.
+    bind_res(c, c.k + 0x1250, a, 6, 0);
     c.w(c.k + 0x1260, b);
 }
 

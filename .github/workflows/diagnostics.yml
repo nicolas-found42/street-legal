@@ -1,0 +1,59 @@
+name: diagnostics
+
+# Nothing here needs the licensed stock install or the original executable:
+# those live only on the developer machine. Suites that do need them print an
+# explicit `SKIP:` line and pass, so this job proves the code builds and its
+# data-free tests pass — never that stock parity holds. Parity runs stay on the
+# developer machine, where the data exists.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # The workspace vendor-builds SoftFloat; keep the compiler cache keyed
+      # on the lockfile only.
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      # The runner's own unit and end-to-end tests use a fake child process and
+      # never touch stock/, so they belong in CI.
+      - name: Diagnostic runner tests
+        run: python3 -m unittest discover -s re -p "test_boot_diagnose.py" -v
+      - name: Telemetry crate tests
+        run: cargo test -p slr-telemetry -p slr-io -p slr-game
+      # Proves the archive tooling works from a clean checkout: an empty index
+      # must answer rather than crash, which is what a first CI run sees.
+      - name: Archive tooling smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/runs"
+          python3 re/boot-diagnose.py list --runs-root "$RUNNER_TEMP/runs"
+          python3 re/boot-diagnose.py status --runs-root "$RUNNER_TEMP/runs"
+          python3 re/boot-diagnose.py index --runs-root "$RUNNER_TEMP/runs"
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-failure
+          path: |
+            re/out/boot/test-runs/
+            **/*.log
+          if-no-files-found: ignore
+          retention-days: 14

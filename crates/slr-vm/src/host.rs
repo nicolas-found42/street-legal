@@ -1209,16 +1209,51 @@ impl VmHost {
                 Some(base) => Some(
                     self.loader
                         .request(base)
-                        .map_err(|_| HostError::MissingMember)?
-                        .ok_or(HostError::MissingMember)?,
+                        .map_err(|error| {
+                            crate::diagnostics::emit(crate::diagnostics::EventKind::External {
+                                category: "class_dependency_load_failure".into(),
+                                fields: vec![
+                                    ("owner".into(), metadata.name.clone()),
+                                    ("dependency".into(), base.to_owned()),
+                                    ("kind".into(), "base".into()),
+                                    ("error".into(), format!("{error:?}")),
+                                ],
+                            });
+                            HostError::MissingMember
+                        })?
+                        .ok_or_else(|| {
+                            crate::diagnostics::emit(crate::diagnostics::EventKind::External {
+                                category: "class_dependency_load_failure".into(),
+                                fields: vec![
+                                    ("owner".into(), metadata.name.clone()),
+                                    ("dependency".into(), base.to_owned()),
+                                    ("kind".into(), "base".into()),
+                                    ("error".into(), "class not found".into()),
+                                    (
+                                        "loader_diagnostics".into(),
+                                        format!("{:?}", self.loader.diagnostics()),
+                                    ),
+                                ],
+                            });
+                            HostError::MissingMember
+                        })?,
                 ),
                 None => None,
             };
             let mut interface_ids = Vec::with_capacity(metadata.interfaces.len());
             for interface in &metadata.interfaces {
-                self.loader
-                    .request(interface)
-                    .map_err(|_| HostError::MissingMember)?;
+                self.loader.request(interface).map_err(|error| {
+                    crate::diagnostics::emit(crate::diagnostics::EventKind::External {
+                        category: "class_dependency_load_failure".into(),
+                        fields: vec![
+                            ("owner".into(), metadata.name.clone()),
+                            ("dependency".into(), interface.clone()),
+                            ("kind".into(), "interface".into()),
+                            ("error".into(), format!("{error:?}")),
+                        ],
+                    });
+                    HostError::MissingMember
+                })?;
                 let dependency = self
                     .loader
                     .find(interface)

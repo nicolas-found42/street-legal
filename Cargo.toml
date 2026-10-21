@@ -30,6 +30,7 @@ members = [
     "crates/slr-render-natives",
     "crates/slr-resource",
     "crates/slr-sound",
+    "crates/slr-telemetry",
     "crates/slr-vm",
     "crates/slr-world",
     "crates/slr-x87",

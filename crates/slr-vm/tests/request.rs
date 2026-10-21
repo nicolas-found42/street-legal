@@ -270,3 +270,37 @@ fn stock_package_walk_keeps_package_nodes_separate_and_hits_have_no_side_effects
     }
     assert_eq!(reads, 1);
 }
+
+#[test]
+fn direct_resource_script_registers_its_actual_package_directory() {
+    let Some(root) = stock_root() else {
+        eprintln!("SLR_ORACLE_SKIPPED: direct resource script dependencies");
+        return;
+    };
+    let mut loader = Loader::new();
+    loader.boot();
+    loader.set_reader(FileReader::stock(root.clone()));
+    loader.build_package_cache(&root);
+    assert_eq!(loader.request_filename("java.game.cars.Prime_models"), None);
+    let car = loader
+        .request_path("cars\\racers\\Prime_data\\scripts", "Prime_DLH_500")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loader.class_name(car), Some("java.game.cars.Prime_DLH_500"));
+    assert_eq!(
+        loader
+            .request_filename("java.game.cars.Prime_models")
+            .as_deref(),
+        Some("cars\\racers\\Prime_data\\scripts\\Prime_models.class")
+    );
+    assert!(loader.lookup("java.game.cars.Prime_models").is_none());
+    let base = loader
+        .request("java.game.cars.Prime_models")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loader.class_name(base), Some("java.game.cars.Prime_models"));
+    assert_eq!(
+        loader.request_filename("java.game.parts.Prime_models"),
+        None
+    );
+}

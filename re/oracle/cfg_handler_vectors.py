@@ -170,10 +170,13 @@ def bitsf32(b: int) -> float:
     return struct.unpack("<f", struct.pack("<I", b & MASK))[0]
 
 
-def read_table(o: Oracle):
-    """(keyword, handler) pairs of the keyword table, in exe order."""
+def read_table(o: Oracle, va: int = TABLE_VA):
+    """(keyword, handler) pairs of a keyword table, in exe order.
+
+    TABLE_VA (0x60e0f8) is the car-class table; 0x611368 is the part-class table
+    (`FUN_0046e570` parses part cfgs into the same K through `FUN_004b6480`)."""
     rows = []
-    a = TABLE_VA
+    a = va
     while True:
         k, h = struct.unpack("<II", o.read(a, 8))
         name = o.read_cstr(k).decode("latin-1")
@@ -396,15 +399,16 @@ def tokenize(line: bytes):
     return kw, buf
 
 
-def run_file(fx: Fixture, text: bytes, stack_fill: int = 0):
+def run_file(fx: Fixture, text: bytes, stack_fill: int = 0, table_va: int = TABLE_VA):
     """Run every line of `text` through its handler, in order, on one persistent state.
 
+    `table_va` selects the exe keyword table the dispatch resolves against (car or part).
     `stack_fill`: byte the stack is refilled with before EVERY handler call, so reads of
     uninitialised locals are deterministic (0 = the port's model; another value probes them).
     Returns the list of per-line records (only lines whose keyword is in the table)."""
     fx.restore(stack_fill)
     o, hk = fx.o, fx.hk
-    table = {k.lower(): (k, h) for k, h in fx.table}
+    table = {k.lower(): (k, h) for k, h in read_table(o, table_va)}
     base = o.read(HEAP_BASE, o.heap_ptr - HEAP_BASE)
     rows = []
     for no, line in enumerate(split_lines(text), 1):
@@ -483,12 +487,384 @@ def gen_handlers(which: list) -> dict:
     return stats
 
 
+# ====================================================================== leaves
+# The cfg keywords the stock+modded corpus never exercises (ledger rows `ported (no test
+# yet)` in slr-physics): synthetic files run through the real dispatch over random and edge
+# vectors.  Car-table leaves parse through the table at TABLE_VA, part-table leaves through
+# the part table at 0x611368 (both dispatch into the same K via FUN_004b6480).
+PART_TABLE_VA = 0x611368
+
+_FLOATEDGE = ["nan", "inf", "-inf", "0", "-0.0", "0.1", "1e-45", "3.5e38", "16777217",
+              "16777219", "-1", "1234.5678", "6.02e23", "-273.15"]
+_INTEDGE = ["0", "1", "-1", "2147483647", "-2147483648", "4294967295", "65536", "0x1f",
+            "007", "abc", ""]
+
+
+def _float_battery(n: int, cap: int = None) -> list:
+    """Edge arg vectors for a keyword that scans `n` floats.  `cap` bounds the numeric
+    tokens per line (for formats whose exe conversion count exceeds its destination count,
+    where the surplus would store through uninitialised stack)."""
+    out = ["", " ".join(["1"] * n), " ".join(["-1"] * n), " ".join(["nan"] * n),
+           " ".join(_FLOATEDGE[:n]),
+           " ".join(_FLOATEDGE[n:2 * n] if 2 * n <= len(_FLOATEDGE) else _FLOATEDGE[-n:]),
+           " ".join(["3.4e38", "1e-45", "-0.0", "0.3", "7", "1e6", "2.5", "-9", "0", "4"][:n]),
+           "1.5.5 " + " ".join(["2"] * max(n - 1, 0)),
+           " ".join(["abc"] * n)]
+    if cap is None or n + 2 <= cap:
+        out.insert(-1, " ".join(["1"] * (n + 2)))
+    return out
+
+
+def _int_battery(n: int) -> list:
+    out = ["", " ".join(["1"] * n), " ".join(["0"] * n), " ".join(["-1"] * n),
+           " ".join(_INTEDGE[:n]),
+           " ".join(_INTEDGE[n:2 * n] if 2 * n <= len(_INTEDGE) else _INTEDGE[-n:]),
+           " ".join(["1"] * (n + 2)), " ".join(["abc"] * n)]
+    return out
+
+
+def _fuzz_line(rng: random.Random, nnum: int, strings: int = 0, allow_nan: bool = True) -> str:
+    """A fuzzed argument list: `nnum` numbers (the format's conversion count) + `strings`
+    free words, glued with the delimiters the tokenizer splits on."""
+    parts = []
+    for _ in range(nnum):
+        t = rng.choice(_NUM) if not allow_nan or rng.random() < 0.85 else rng.choice(["nan", "inf", "-inf"])
+        parts.append(t)
+        parts.append(rng.choice(_SEP) if rng.random() < 0.85 else " ")
+    for i in range(strings):
+        n = rng.choice([0, 1, 4, 8, 10])
+        parts.append("".join(rng.choice("abcdefghABCDEF019._-") for _ in range(n)))
+        parts.append(" ")
+    return "".join(parts).rstrip()
+
+
+# keyword -> (table, needs preamble, vector builder).  `preamble` lines run first in the
+# same file (wheel records need a `type`, part-slot keywords need a `slot`, `trigger` a
+# live `body` record, `flapsfx` a flap node on the current slot).
+LEAVES = {
+    # ---- car table: wheel records
+    "friction": ("car", 2, ["type 1000 sphere 1 1 1", "type 200 box 1 1 1"], lambda r: _float_battery(2)),
+    "skid": ("car", 3, [], lambda r: _float_battery(3)),
+    "wheeldeform": ("car", 1, ["type 1000 sphere 1 1 1", "type 200 box 1 1 1"], lambda r: _float_battery(1)),
+    "arm": ("car", 7, ["type 1000 sphere 1 1 1", "type 200 box 1 1 1"], lambda r: _float_battery(7)),
+    "hub": ("car", 10, ["type 1000 sphere 1 1 1", "type 200 box 1 1 1"], lambda r: _float_battery(10)),
+    "instant_center": ("car", 6, ["type 1000 sphere 1 1 1"],
+                       # the exe's format has ten %f but only six destinations: more than
+                       # six numbers would store through uninitialised stack (not modelled).
+                       lambda r: _float_battery(6, cap=6)),
+    # ---- car table: vehicle scalars
+    "sw_radius": ("car", 2, [], lambda r: _float_battery(2)),
+    "mass": ("car", 1, [], lambda r: _float_battery(1)),
+    "torque": ("car", 0, [], lambda r: [
+        "", "0", "1 1000:200", "3 0:1 1e5:2.5 -3:0.5", "2 abc", "-1",
+        "4 0:0 1:1 2:2 3:3", "2 1000:200 nan:inf", "1 5:6 7:8"]
+        # the pair count leads the line; a huge count (e.g. `99999999999`, which sscanf
+        # clamps to INT_MAX) makes the exe walk billions of pairs - an exe-side DoS shape
+        # that is not a testable vector, so the count stays small and only the pairs fuzz.
+        + [f"{r.randint(0, 5)} " + _fuzz_line(r, 2 * r.randint(0, 4), allow_nan=False).strip()
+           for _ in range(6)]),
+    "clutch": ("car", 1, [], lambda r: _float_battery(1)),
+    "rpm_idle": ("car", 1, [], lambda r: _float_battery(1)),
+    "drag": ("car", 4, [], lambda r: _float_battery(4)),
+    "center": ("car", 3, [], lambda r: _float_battery(3)),
+    "nodriver": ("car", 0, [], lambda r: ["", "1", "abc"]),
+    "key": ("car", 0, [], lambda r: ["", "1234", "-1 abc defgh", "0 0", "4294967295 nan"]),
+    "handbrake": ("car", 0, [], lambda r: ["", "1", "-0.5 xyz"]),
+    "turn": ("car", 3, [], lambda r: _float_battery(3)),
+    "velfactor": ("car", 2, [], lambda r: _float_battery(2)),
+    "roll": ("car", 3, [], lambda r: _float_battery(3)),
+    "pitch": ("car", 3, [], lambda r: _float_battery(3)),
+    "cheat_control": ("car", 5, [], lambda r: _float_battery(5)),
+    # ---- car table: HUD gauges and sound records
+    "osd_gauge": ("car", 4, [], lambda r: _int_battery(1) + _float_battery(4)
+                  + [_fuzz_line(r, 4) for _ in range(4)]),
+    "osd_rpmpin": ("car", 8, [], lambda r: _float_battery(8)),
+    "osd_spdpin": ("car", 8, [], lambda r: _float_battery(8)),
+    "osd_nospin": ("car", 8, [], lambda r: _float_battery(8)),
+    "osd_damage": ("car", 4, [], lambda r: _float_battery(4)),
+    "osd_damage_slot": ("car", 1, [], lambda r: ["", "x", "ab", "1", " "]),
+    "osd_gear": ("car", 6, [], lambda r: [
+        "", "1", "1 2 3 4 5 abcdefgh", "1 2 3 4 5 abcdefghij", "1 2 3 4 -5 x",
+        "-2147483648 nan inf -inf 6 z", "1 2 3"]
+        + [_fuzz_line(r, 5, strings=1) for _ in range(4)]),
+    "osd_speed": ("car", 6, [], lambda r: _float_battery(6) +
+                  ["1 2 3 4 5 abcdefghij", "0 0 0 0 0 a"]),
+    "osd_rpm": ("car", 6, [], lambda r: _float_battery(6) +
+                ["1 2 3 4 5 abcdefghij", "0 0 0 0 0 a"]),
+    "osd_nos": ("car", 10, [], lambda r: _float_battery(10) +
+                ["1 2 3 4 5 abcdefgh 6 7 8 9", "1 2 3 4"]),
+    "osd_turbo": ("car", 10, [], lambda r: _float_battery(10) +
+                  ["1 2 3 4 5 abcdefgh 6 7 8 9", "1 2 3 4"]),
+    "osd_mileage": ("car", 10, [], lambda r: _float_battery(10) +
+                    ["1 2 3 4 5 abcdefgh 6 7 8 9", "1 2 3 4"]),
+    "osd_abs": ("car", 5, [], lambda r: _float_battery(5) + ["1 2 3 4 5 abcdefghij"]),
+    "osd_asr": ("car", 5, [], lambda r: _float_battery(5) + ["1 2 3 4 5 abcdefghij"]),
+    "osd_hbrake": ("car", 5, [], lambda r: _float_battery(5) + ["1 2 3 4 5 abcdefghij"]),
+    "osd_emergency": ("car", 5, [], lambda r: _float_battery(5) + ["1 2 3 4 5 abcdefghij"]),
+    "sfx_engine_up": ("car", 6, [], lambda r: _float_battery(6)),
+    "sfx_engine_down": ("car", 6, [], lambda r: _float_battery(6)),
+    "sfx_exhaust": ("car", 6, [], lambda r: _float_battery(6)),
+    "sfx_gearbox_fwd": ("car", 2, [], lambda r: _float_battery(2)),
+    "sfx_gearbox_rev": ("car", 2, [], lambda r: _float_battery(2)),
+    "sfx_wreck": ("car", 1, [], lambda r: _int_battery(1)),
+    "sfx_gearchange": ("car", 2, [], lambda r: _int_battery(2)),
+    # ---- car table: part-record keywords that are car-table rows here
+    "shadow": ("car", 7, ["body 1 2 3 4 5 6 7 sphere 1 1 1"], lambda r: _float_battery(7)),
+    "bolt": ("car", 7, ["slot 1 2 3 4 5 6 7", "slot 8 9 10 11 12 13 0"],
+             lambda r: _float_battery(7)),
+    "flapsfx": ("car", 2, ["slot 1 2 3 4 5 6 7", "flap 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"],
+                lambda r: _int_battery(2)),
+    "slotmove": ("car", 5, ["slot 1 2 3 4 5 6 7"], lambda r: _float_battery(5)),
+    "deform": ("car", 1, [], lambda r: _float_battery(1)),
+    "logo": ("car", 1, [], lambda r: _int_battery(1)),
+    # ---- part table (0x611368): parsed by FUN_0046e570 into the same K
+    "trigger": ("part", 0, ["body 1 2 3 4 5 6 7 sphere 1 1 1"], lambda r: ["", "1", "abc"]),
+    "slotturn": ("part", 6, ["slot 1 2 3 4 5 6 7"], lambda r: _float_battery(6)),
+    "intdamage": ("part", 1, [], lambda r: _float_battery(1)),
+    "material": ("part", 4, [], lambda r: _int_battery(3) + _float_battery(4)),
+    "wing": ("part", 10, ["body 1 2 3 4 5 6 7 sphere 1 1 1"], lambda r: _float_battery(10)),
+    "rollbar": ("part", 4, [], lambda r: _int_battery(2) + _float_battery(4)),
+    "sfx_loop": ("part", 2, [], lambda r: _float_battery(2)),
+}
+# Duplicate-key / count-boundary stress: keywords whose handlers append bounded records
+# (at most 16/8/2) or rebind slots: hammer them past the boundary.
+_OVERFLOW = {"osd_rpmpin": 17, "osd_spdpin": 17, "osd_nospin": 17, "sfx_engine_up": 17,
+             "sfx_engine_down": 17, "sfx_exhaust": 17, "rollbar": 4, "slot": 3, "type": 17}
+
+
+def _leaf_vectors(kw: str, rng: random.Random) -> list:
+    """Hand-written edge vectors plus a seeded fuzz tail shaped by LEAVES_NNUM/LEAVES_SSTR."""
+    vecs = LEAVES[kw][3](rng)
+    vecs += [_fuzz_line(rng, LEAVES_NNUM.get(kw, 4), strings=LEAVES_SSTR.get(kw, 0))
+             for _ in range(6)]
+    return vecs
+
+
+LEAVES_NNUM = {"friction": 2, "skid": 3, "wheeldeform": 1, "arm": 7, "hub": 10,
+               "instant_center": 6, "sw_radius": 2, "mass": 1, "clutch": 1, "rpm_idle": 1,
+               "drag": 4, "center": 3, "turn": 3, "velfactor": 2, "roll": 3, "pitch": 3,
+               "cheat_control": 5, "osd_gauge": 4, "osd_rpmpin": 8, "osd_spdpin": 8,
+               "osd_nospin": 8, "osd_damage": 4, "osd_gear": 5, "osd_speed": 5,
+               "osd_rpm": 5, "osd_nos": 9, "osd_turbo": 9, "osd_mileage": 9, "osd_abs": 5,
+               "osd_asr": 5, "osd_hbrake": 5, "osd_emergency": 5, "sfx_engine_up": 6,
+               "sfx_engine_down": 6, "sfx_exhaust": 6, "sfx_gearbox_fwd": 2,
+               "sfx_gearbox_rev": 2, "sfx_wreck": 1, "sfx_gearchange": 2, "shadow": 7,
+               "bolt": 7, "flapsfx": 2, "slotmove": 5, "slotturn": 6, "deform": 1,
+               "intdamage": 1, "material": 4, "wing": 10, "rollbar": 4, "sfx_loop": 2,
+               "key": 1, "handbrake": 1, "osd_damage_slot": 1}
+LEAVES_SSTR = {"osd_gear": 1, "osd_speed": 1, "osd_rpm": 1, "osd_nos": 1, "osd_turbo": 1,
+               "osd_mileage": 1, "osd_abs": 1, "osd_asr": 1, "osd_hbrake": 1,
+               "osd_emergency": 1}
+
+
+def _leaf_file(kw: str, vecs: list, overflow: int) -> list:
+    """(keyword, args) lines of one leaf scenario: preamble, the battery, the keyword again
+    after the preamble state evolved (duplicate-key re-entry), the overflow block."""
+    preamble = LEAVES[kw][2]
+    lines = list(preamble)
+    for v in vecs:
+        lines.append((kw + " " + v).rstrip())
+    if overflow:
+        for i in range(overflow):
+            lines.append(f"{kw} {i % 7} {0.5 * (i % 5 + 1)} extra{i % 3}")
+        lines.append((kw + " 8 9 tail").rstrip())
+    else:
+        lines.append((kw + " 42 0.25 reentry").rstrip())
+    return lines
+
+
+def gen_leaves() -> dict:
+    fx = Fixture(_exe())
+    rng = random.Random(0x13A7)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stats = {}
+    files = {"car": "leaves_car.jsonl", "part": "leaves_part.jsonl"}
+    texts = {"car": [], "part": []}
+    for kw, (table, _n, _pre, _build) in LEAVES.items():
+        vecs = _leaf_vectors(kw, rng)
+        texts[table].append((kw, _leaf_file(kw, vecs, _OVERFLOW.get(kw, 0))))
+    seen = {t: set() for t in texts}
+    for table, name in files.items():
+        rows = []
+        for kw, lines in texts[table]:
+            text = ("\n".join(lines) + "\n").encode("latin-1")
+            a = run_file(fx, text, 0, PART_TABLE_VA if table == "part" else TABLE_VA)
+            b = run_file(fx, text, 0xCC, PART_TABLE_VA if table == "part" else TABLE_VA)
+            for ra, rb in zip(a, b):
+                if ra != rb:
+                    ra["nondet"] = True
+            rows.append({"table": table, "leaf": kw, "lines": a})
+            seen[table].update(r["kw"] for r in a if r.get("kw"))
+        _write_jsonl(name, rows)
+        n_lines = sum(len(r["lines"]) for r in rows)
+        stats[table] = {"keywords": len(rows), "lines": n_lines}
+        print(table, stats[table])
+    missing = {kw for kw in LEAVES if kw not in seen[LEAVES[kw][0]]}
+    if missing:
+        raise RuntimeError(f"leaf keywords with no dispatch row (not in their table?): {sorted(missing)}")
+    return stats
+
+
+# ====================================================================== direct helpers
+# The six slr-physics cfg helpers that are not keyword handlers, called directly on
+# scratch cells ( Unicorn captures the raw words and the return registers).
+DIRECT_LIST_HEAD = 0x428fd0     # __fastcall, ECX = a
+DIRECT_LIST_NODE = 0x429130     # __fastcall, ECX = a
+DIRECT_VEC3_ZERO = 0x551c60     # __fastcall, ECX = a
+DIRECT_VEC3_SET = 0x551c70      # __thiscall, ECX = a, (x, y, z) on the stack
+DIRECT_REF_RELEASE = 0x4776f0   # __fastcall, ECX = slot
+DIRECT_STRICMP = 0x5d7190       # cdecl, (a, b)
+
+
+def gen_direct() -> dict:
+    rng = random.Random(0x13A7)
+    o = Oracle(_exe(), fpu_cw=CW)
+    rows = []
+
+    def cell(n_words: int, words: list) -> int:
+        p = o.scratch(4 * n_words + 16)
+        o.write_u32s(p, words + [0] * (n_words - len(words)))
+        return p
+
+    def record(name: str, va: int, conv: str, this, args: list, p: int, words: list, r):
+        n = len(words)
+        out = o.read_u32s(p, n)
+        row = {"id": f"direct_{len(rows):05d}", "name": name, "exe_addr": f"0x{va:x}",
+               "conv": conv, "addr": p, "n_words": n,
+               "in_words": words[:n], "out_words": out,
+               "eax": r.eax, "edx": r.edx, "esp_delta": r.esp_delta,
+               "oracle": "unicorn", "unicorn": UC_VER, "cw": hex(CW), "date": _today()}
+        if this is not None:
+            row["this"] = this
+        if args:
+            row["args"] = list(args)
+        rows.append(row)
+
+    def garbage(n: int) -> list:
+        # deterministic mixed garbage: a ctor must overwrite every word it owns, and the
+        # capture must show which words the exe actually writes
+        return [rng.choice([0, 0xCC, rng.randrange(0x100000000), 0xFFFFFFF0 + i])
+                for i in range(n)]
+
+    # ---- list_head_ctor / list_node_ctor / vec3_zero: one 28/12-byte cell of garbage
+    for name, va, n in (("list_head_ctor", DIRECT_LIST_HEAD, 7),
+                        ("list_node_ctor", DIRECT_LIST_NODE, 3),
+                        ("vec3_zero", DIRECT_VEC3_ZERO, 3)):
+        for _ in range(6):
+            words = garbage(n)
+            p = cell(n, words)
+            r = o.call(va, [], "fastcall", regs={"ecx": p}, fpu_cw=CW)
+            record(name, va, "fastcall", p, [], p, words, r)
+
+    # ---- vec3_set: thiscall with three raw words (float bit patterns included)
+    set_args = [0x7FC00000, 0x7F800000, 0xFF800000, 0x00000000, 0x80000000, 0x3F800000,
+                0x3E99999A, 0x7F7FFFFF, 0x00000001, 0xCC]
+    for _ in range(8):
+        words = garbage(3)
+        p = cell(3, words)
+        a = [rng.choice(set_args + [rng.randrange(0x100000000)]) for _ in range(3)]
+        r = o.call(DIRECT_VEC3_SET, a, "thiscall", this=p, fpu_cw=CW)
+        record("vec3_set", DIRECT_VEC3_SET, "thiscall", p, a, p, words, r)
+
+    # ---- ref_release: owner {+0xc chain head, +0x10 refcount}, slots {owner, next}
+    def ref_case(head: int, nexts: list, release: int, refcount: int):
+        """owner + len(nexts) slots; slot i has next nexts[i]; release slot #`release`
+        (or a foreign slot when release == len(nexts))."""
+        n = len(nexts)
+        words = garbage(2 + 2 * n + 8)     # [owner(2), slots(2n), spare(8)]
+        p = cell(2 + 2 * n + 8, words)
+        owner = p
+        slots = [p + 8 + 8 * i for i in range(n)]
+        foreign = p + 8 + 8 * n
+        o.write_u32s(owner, [words[0], words[1]])
+        o.write_u32(owner + 0xC, slots[head] if head is not None and n else 0)
+        o.write_u32(owner + 0x10, refcount & 0xFFFFFFFF)
+        for i, s in enumerate(slots):
+            nxt = nexts[i]
+            o.write_u32s(s, [owner, slots[nxt] if nxt is not None else 0])
+        o.write_u32s(foreign, [owner, 0])
+        target = foreign if release >= n else slots[release]
+        # `in_words` must be the memory the call actually sees. The layout above
+        # writes owner and slot words that the garbage list does not carry.
+        words = o.read_u32s(p, len(words))
+        r = o.call(DIRECT_REF_RELEASE, [], "fastcall", regs={"ecx": target}, fpu_cw=CW)
+        record("ref_release", DIRECT_REF_RELEASE, "fastcall", target, [], p, words, r)
+
+    ref_case(None, [], 0, 1)                    # empty chain: early return, no writes
+    ref_case(None, [], 0, 0)                    # owner == chain head NULL
+    ref_case(0, [None], 0, 1)                   # single slot at the head
+    ref_case(0, [1, None], 0, 2)                # head of two
+    ref_case(0, [1, None], 1, 2)                # tail of two
+    ref_case(0, [1, 2, None], 1, 3)             # middle of three
+    ref_case(0, [1, None], 1, 0)                # refcount 0 -> 0xffffffff
+    ref_case(0, [None], 1, 5)                   # foreign slot: no writes
+    ref_case(0, [1, 2, None], 3, 3)             # foreign slot behind a chain: no writes
+    ref_case(0, [None, None], 0, 2)             # two disjoint singletons, release head
+    ref_case(0, [None, 0], 1, 2)                # slot 1 -> slot 0 cycle tail
+    ref_case(0, [0], 0, 1)                      # self-cycle
+    for _ in range(8):                          # random valid chains
+        n = rng.randint(1, 6)
+        order = list(range(n))
+        rng.shuffle(order)
+        # build a 0-terminated chain walking the shuffled order: nexts[order[k]] = order[k+1]
+        nexts = [None] * n
+        for k in range(n - 1):
+            nexts[order[k]] = order[k + 1]
+        ref_case(order[0], nexts, rng.randint(0, n), rng.choice([0, 1, 2, 5, 0xFFFFFFFF]))
+
+    # ---- stricmp: (a, b) C strings; the port asserts the equality bit, the oracle the
+    # full int3 return.  The exe's locale branch (DAT_0079d6b0) is 0 in the file image and
+    # at cfg-parse time (setlocale is never called), so the pure byte loop runs.
+    assert o.read_u32(0x79D6B0) == 0, "exe stricmp locale flag must be the default"
+    str_pairs = [
+        (b"driver", b"driver"), (b"DRIVER", b"driver"), (b"driver", b"DRIVER"),
+        (b"Driver", b"dRiVeR"), (b"driverx", b"driver"), (b"driver", b"driverx"),
+        (b"drive", b"driver"), (b"driver", b"drive"), (b"", b""), (b"", b"a"),
+        (b"a", b""), (b"driver\0x", b"driver"), (b"driver", b"driver\0x"),
+        (b"sphere", b"sphere"), (b"ball", b"sphere"), (b"BOX", b"box"),
+        (b"rodx", b"rody"), (b"a", b"z"), (b"z", b"a"), (b"1", b"2"),
+        (b"\x80", b"\x80"), (b"\x80", b"\xa0"), (b"\xc1", b"\xe1"), (b"\xe1", b"\xc1"),
+        (b"a.b", b"a b"), (b"osd_gear", b"osd_gear"), (b"osd_gea", b"osd_gear"),
+        (b" ", b" "), (b" ", b""), (b"~", b"\x01"),
+    ]
+    alpha = b"abcXYZ019_. -/\\:>~"
+    for _ in range(40):
+        na, nb = rng.randint(0, 12), rng.randint(0, 12)
+        a = bytes(rng.choice(alpha) for _ in range(na))
+        b = bytes(rng.choice(alpha) for _ in range(nb))
+        if rng.random() < 0.4 and a:
+            b = a[:nb]  # force prefixes / equal shapes
+        str_pairs.append((a, b))
+    for a, b in str_pairs:
+        pa = o.scratch(len(a) + 8)
+        o.write(pa, a + b"\0" * 8)
+        pb = o.scratch(len(b) + 8)
+        o.write(pb, b + b"\0" * 8)
+        r = o.call(DIRECT_STRICMP, [pa, pb], "cdecl", fpu_cw=CW)
+        rows.append({"id": f"direct_{len(rows):05d}", "name": "stricmp_eq",
+                     "exe_addr": f"0x{DIRECT_STRICMP:x}", "conv": "cdecl",
+                     "a": a.hex(), "b": b.hex(), "eax": r.eax,
+                     "esp_delta": r.esp_delta,
+                     "oracle": "unicorn", "unicorn": UC_VER, "cw": hex(CW),
+                     "date": _today()})
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(os.path.join(OUT_DIR, "leaves_direct.jsonl"), "w") as f:
+        for row in rows:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    stats = {}
+    for row in rows:
+        stats[row["name"]] = stats.get(row["name"], 0) + 1
+    print("direct", stats)
+    return stats
+
+
 # ====================================================================== main
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gen")
-    g.add_argument("what", choices=["sscanf", "handlers", "all"])
+    g.add_argument("what", choices=["sscanf", "handlers", "leaves", "direct", "all"])
     sub.add_parser("verify")
     a = ap.parse_args(argv)
     if a.cmd == "gen":
@@ -498,6 +874,10 @@ def main(argv=None):
             print(f"sscanf: {len(rows)} rows")
         if a.what in ("handlers", "all"):
             gen_handlers(["stock", "modded"])
+        if a.what in ("leaves", "all"):
+            gen_leaves()
+        if a.what in ("direct", "all"):
+            gen_direct()
     return 0
 
 

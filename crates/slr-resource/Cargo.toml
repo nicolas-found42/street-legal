@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+slr-fmt-cfg = { path = "../slr-fmt-cfg" }
 slr-fmt-rpak = { path = "../slr-fmt-rpak" }
 sha2 = "0.10"
 slr-calllog = { path = "../slr-calllog" }

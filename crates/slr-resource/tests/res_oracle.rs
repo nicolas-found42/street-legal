@@ -241,6 +241,9 @@ fn action(v: &Value) -> Action {
         counter: u32_of(&v["counter"]),
         rate: u32_of(&v["rate"]),
         domain,
+        domain1: None,
+        domain2: None,
+        bone: 0,
     }
 }
 

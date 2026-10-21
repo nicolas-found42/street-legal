@@ -47,6 +47,17 @@ fn command(output: &std::path::Path, frames: &str) -> Command {
 
 #[test]
 fn failed_run_has_correlated_state_and_durable_end_marker() {
+    // The licensed install is not in CI or fresh worktrees; this suite would
+    // otherwise fail on a missing stock directory rather than skip.
+    let stock = std::env::var_os("SLR_STOCK")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stock")
+        });
+    if !stock.join(slr_io::stock::MANIFEST_NAME).is_file() {
+        eprintln!("SKIP: no verified stock install at {}", stock.display());
+        return;
+    }
     let output = output("failure");
     let result = command(&output, "1").output().unwrap();
     assert_eq!(

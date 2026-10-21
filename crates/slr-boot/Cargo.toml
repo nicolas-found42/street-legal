@@ -6,7 +6,9 @@ license.workspace = true
 default-run = "slr-boot"
 
 [dependencies]
+slr-fmt-scx = { path = "../slr-fmt-scx" }
 slr-vm = { path = "../slr-vm" }
+slr-telemetry = { path = "../slr-telemetry" }
 slr-fmt-tufa = { path = "../slr-fmt-tufa" }
 slr-calllog = { path = "../slr-calllog" }
 slr-fmt-rpak = { path = "../slr-fmt-rpak" }
@@ -17,6 +19,7 @@ slr-render-natives = { path = "../slr-render-natives" }
 slr-input = { path = "../slr-input" }
 slr-sound = { path = "../slr-sound" }
 slr-x87 = { path = "../slr-x87" }
+slr-physics = { path = "../slr-physics" }
 
 serde_json = "1"
 serde = "1"

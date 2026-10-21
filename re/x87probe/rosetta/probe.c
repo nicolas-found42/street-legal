@@ -36,7 +36,15 @@ static void set_cw(unsigned short cw) { __asm__ __volatile__ ("fldcw %0" : : "m"
 static unsigned short get_sw(void) { unsigned short sw = 0; __asm__ __volatile__ ("fstsw %0" : "=m" (sw)); return sw; }
 static unsigned get_eflags(void) {
     unsigned f = 0;
+#if defined(__x86_64__)
+    {
+        unsigned long long wide = 0;
+        __asm__ __volatile__ ("pushfq; popq %0" : "=r" (wide));
+        f = (unsigned)wide;
+    }
+#else
     __asm__ __volatile__ ("pushfl; popl %0" : "=r" (f));
+#endif
     return f;
 }
 
@@ -44,11 +52,19 @@ static unsigned get_eflags(void) {
 static void put80(unsigned char *dst, int sign, int kind, int exp, unsigned long long sig) {
     unsigned short w;
     memset(dst, 0, 16);
-    if (kind == 1) { /* zero: all bits zero (sign intentionally dropped: +0) */
+    if (kind == 1) { /* signed zero must preserve the corpus operand */
+        w = (unsigned short)(sign << 15);
+        memcpy(dst + 8, &w, 2);
         return;
     }
     if (kind == 2) { /* inf */
         memcpy(dst, "\0\0\0\0\0\0\0\x80", 8);
+        w = (unsigned short)(0x7FFF | (sign << 15));
+        memcpy(dst + 8, &w, 2);
+        return;
+    }
+    if (kind == 3) { /* NaN: keep the corpus payload and class bit */
+        memcpy(dst, &sig, 8);
         w = (unsigned short)(0x7FFF | (sign << 15));
         memcpy(dst + 8, &w, 2);
         return;

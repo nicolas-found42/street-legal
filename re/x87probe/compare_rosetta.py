@@ -1,11 +1,13 @@
-"""Referee for the Rosetta leg: SoftFloat vs Rosetta-probe (Wine) results.
+"""Referee for the Rosetta leg: SoftFloat vs Rosetta-probe results.
 
 Joins re/out/x87/sf_results.jsonl (M0-07 SoftFloat oracle) with the Rosetta
-probe output (re/out/wine/logs/probe-stdout.log, copied to
-re/out/x87/rosetta_results.jsonl by run_rosetta.sh) by vector id, using the
-same NaN-tolerant rules as compare.py (imported). Writes
-re/out/x87/rosetta_results.json + rosetta_disagreements.json and prints the
-per-op agree/mismatch table that docs/x87.md's Rosetta leg reports.
+probe output by vector id, using the same NaN-tolerant rules as compare.py
+(imported). The probe is the x86_64 Mach-O build run under Rosetta 2
+(`re/x87probe/rosetta/build.sh`, output `re/out/x87/rosetta_results.jsonl`);
+a Wine capture at `re/out/wine/logs/probe-stdout.log` is copied in first when
+present. Writes re/out/x87/rosetta_results.json + rosetta_disagreements.json
+and prints the per-op agree/mismatch table that docs/x87.md's Rosetta leg
+reports.
 
 Transcendentals compare Rosetta vs mpmath (same mpmath_ref as compare.py),
 since SoftFloat has no transcendentals.
@@ -27,7 +29,7 @@ ROSETTA_COPY = os.path.join(OUT_DIR, "rosetta_results.jsonl")
 
 def main() -> None:
     import shutil
-    if os.path.exists(ROSETTA_IN):
+    if os.path.exists(ROSETTA_IN) and not os.path.exists(ROSETTA_COPY):
         shutil.copyfile(ROSETTA_IN, ROSETTA_COPY)
     sf = C.load_results(os.path.join(OUT_DIR, "sf_results.jsonl"))
     rt = C.load_results(ROSETTA_COPY)

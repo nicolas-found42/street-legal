@@ -10,6 +10,7 @@ mod app;
 mod autotest;
 mod render3d;
 mod session;
+mod telemetry;
 mod ui;
 
 use app::{App, Args};
@@ -38,6 +39,8 @@ fn parse_args() -> Args {
     let mut autotest = false;
     let mut shots = PathBuf::from("target/autotest");
     let mut time_scale = 1.0;
+    let mut diagnostics = None;
+    let mut diagnostics_interval = 30;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -46,8 +49,17 @@ fn parse_args() -> Args {
             "--autotest" => autotest = true,
             "--shots" => shots = it.next().map(PathBuf::from).unwrap_or(shots),
             "--time-scale" => time_scale = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "--diagnostics" => {
+                diagnostics = it.next().map(PathBuf::from).or(diagnostics);
+            }
+            "--diagnostics-interval" => {
+                diagnostics_interval = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(diagnostics_interval);
+            }
             "--help" | "-h" => {
-                println!("street-legal [--reference DIR] [--save-dir DIR] [--autotest [--shots DIR] [--time-scale N]]");
+                println!("street-legal [--reference DIR] [--save-dir DIR] [--autotest [--shots DIR] [--time-scale N]] [--diagnostics DIR [--diagnostics-interval N]]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -59,6 +71,8 @@ fn parse_args() -> Args {
         autotest,
         shots,
         time_scale,
+        diagnostics,
+        diagnostics_interval,
     }
 }
 
@@ -101,6 +115,10 @@ async fn main() {
         .ok();
     let autotest_on = args.autotest;
     let mut app = App::new(args, cat, loaded, font);
+    if let Err(error) = app.start_diagnostics() {
+        eprintln!("street-legal: {error}");
+        std::process::exit(1);
+    }
     let mut test = autotest_on.then(autotest::Autotest::new);
     loop {
         if let Some(t) = test.as_mut() {
@@ -117,6 +135,9 @@ async fn main() {
     }
     if let Some(t) = test {
         let ok = t.report();
+        app.diagnostics.autotest(&t.passes, &t.failures);
+        app.finish_diagnostics((!ok).then_some("autotest failures"));
         std::process::exit(if ok { 0 } else { 1 });
     }
+    app.finish_diagnostics(None);
 }

@@ -520,6 +520,11 @@ impl FindHost {
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .unwrap_or_default();
         let handle = self.open_search(&pattern);
+        self.trace(
+            "find",
+            &pattern,
+            serde_json::json!({"op": "first", "flags": flags, "handle": handle}),
+        );
         // `0x487cf7`/`0x487d0b`: both fields are stored whatever the search
         // answered, negative handles included.
         self.set_handle(object, handle);
@@ -556,17 +561,24 @@ impl FindHost {
     pub fn next(&mut self, object: u32) -> u32 {
         let handle = self.handle(object);
         let flags = self.flags(object);
-        if handle < 0 {
-            return 0;
-        }
-        loop {
-            let Some(entry) = self.advance(handle) else {
-                return 0;
-            };
-            if !is_dot_entry(&entry.name) && accepts(&entry, flags) {
-                return self.intern(&entry.name);
+        let word = if handle < 0 {
+            0
+        } else {
+            let mut found = 0;
+            while let Some(entry) = self.advance(handle) {
+                if !is_dot_entry(&entry.name) && accepts(&entry, flags) {
+                    found = self.intern(&entry.name);
+                    break;
+                }
             }
-        }
+            found
+        };
+        self.trace(
+            "find",
+            "",
+            serde_json::json!({"op": "next", "handle": handle, "word": word}),
+        );
+        word
     }
 
     /// `FindFile.close()V`: clear the object's `handle` field to `-1` and, when
@@ -580,9 +592,20 @@ impl FindHost {
         if handle >= 0 {
             self.free(handle);
         }
+        self.trace(
+            "find",
+            "",
+            serde_json::json!({"op": "close", "handle": handle}),
+        );
     }
 
     // ---- internals --------------------------------------------------------
+
+    /// Publish one directory-search operation to the diagnostics stream (the
+    /// file layer's sibling; never compared against an original trace).
+    fn trace(&self, op: &str, path: &str, detail: serde_json::Value) {
+        slr_telemetry::file_io(op, path, detail);
+    }
 
     fn slot_mut(&mut self, handle: i32) -> Option<&mut FindSlot> {
         let index = usize::try_from(handle).ok()?;

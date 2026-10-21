@@ -144,17 +144,23 @@ pub fn osd_gauge(c: &mut Ctx, line: &[u8]) {
     c.load(c.k + 0x1ba0, id, 0xe, 0);
 }
 
-/// `osd_rpmpin id x y z a b c d`: floats at `K+0x1a64..0x1a80`, always bound at
-/// `K+0x1a80`.
+/// `osd_rpmpin id x y z a b c d`: seven floats and one `float` pair slot.
 ///
 /// exe: FUN_00444e80
 pub fn osd_rpmpin(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
-    // `%d %f %f %f %f %f %f %f` (0x60f780).
+    // `%d %f %f %f %f %f %f %f` (0x60f780); the scanf targets are
+    // `1a64 1a68 1a6c 1a9c 1aa0 1aa4 1aa8`, so the eight parsed values are not
+    // contiguous in `K`.
     let s = scan(line, "%d %f %f %f %f %f %f %f");
-    osd8(c, &s, 0x1a64, 0x1a80);
+    osd7(
+        c,
+        &s,
+        &[0x1a64, 0x1a68, 0x1a6c, 0x1a9c, 0x1aa0, 0x1aa4, 0x1aa8],
+        0x1a80,
+    );
 }
 
 /// `osd_spdpin id x y z a b c d`: floats at `K+0x1aac..0x1ac8`, always bound at
@@ -167,7 +173,12 @@ pub fn osd_spdpin(c: &mut Ctx, line: &[u8]) {
     }
     // `%d %f %f %f %f %f %f %f` (0x60f798).
     let s = scan(line, "%d %f %f %f %f %f %f %f");
-    osd8(c, &s, 0x1aac, 0x1ac8);
+    osd7(
+        c,
+        &s,
+        &[0x1aac, 0x1ab0, 0x1ab4, 0x1ae4, 0x1ae8, 0x1aec, 0x1af0],
+        0x1ac8,
+    );
 }
 
 /// `osd_nospin id x y z a b c d`: floats at `K+0x1af4..0x1b10`, always bound at
@@ -180,16 +191,22 @@ pub fn osd_nospin(c: &mut Ctx, line: &[u8]) {
     }
     // `%d %f %f %f %f %f %f %f` (0x60f7b0).
     let s = scan(line, "%d %f %f %f %f %f %f %f");
-    osd8(c, &s, 0x1af4, 0x1b10);
+    osd7(
+        c,
+        &s,
+        &[0x1af4, 0x1af8, 0x1afc, 0x1b2c, 0x1b30, 0x1b34, 0x1b38],
+        0x1b10,
+    );
 }
 
-/// Shared tail of the always-bound eight-float gauges (`osd_rpmpin`,
-/// `osd_spdpin`, `osd_nospin`): the id and seven floats go to `base..`,
-/// the resource binds at `slot`.
-fn osd8(c: &mut Ctx, s: &Scan, base: u32, slot: u32) {
+/// The shared tail of the always-bound gauges: the id and seven floats go to
+/// the original's scan targets, and the resource binds at `slot`.
+/// Original `505240` scan targets are not contiguous in `K`, so the seven
+/// floats are placed by explicit offset rather than by stride.
+fn osd7(c: &mut Ctx, s: &Scan, offsets: &[u32], slot: u32) {
     let id = s.db(0).unwrap_or(0);
-    for (i, o) in [0, 4, 8, 0xc, 0x10, 0x14, 0x18].into_iter().enumerate() {
-        c.put(c.k + base + o, s.fb(1 + i));
+    for (i, o) in offsets.iter().enumerate() {
+        c.put(c.k + *o, s.fb(1 + i));
     }
     c.load(c.k + slot, id, 0xe, 0);
 }
@@ -240,9 +257,13 @@ fn osd_cond(
     c.put(c.k + int, s.db(4));
     if let Some(t0) = text {
         if let Some(t) = s.s(5) {
-            for (i, b) in t.iter().take(8).enumerate() {
+            // `%8s`: at most 8 characters plus the `sscanf` NUL terminator.
+            let bytes = t.split(|b| *b == 0).next().unwrap_or(&[]);
+            let n = bytes.len().min(8);
+            for (i, b) in bytes.iter().take(n).enumerate() {
                 c.m.w8(c.k + t0 + i as u32, *b);
             }
+            c.m.w8(c.k + t0 + n as u32, 0);
         }
     }
     for (o, i) in more.iter() {
@@ -497,6 +518,7 @@ fn sfx3(c: &mut Ctx, line: &[u8], fmt: &str, base: u32, count: u32) {
     let s = scan(line, fmt);
     let id = s.db(0).unwrap_or(0);
     let f = s.f(1).unwrap_or(1000.0);
+    // Defaults are the exe's pre-set stack slots: 1.0, 1e6, 1.0, 1.0.
     let v = [
         s.fb(2).unwrap_or(0x3f80_0000),
         s.fb(3).unwrap_or(0x4974_2400),
@@ -520,8 +542,8 @@ pub fn sfx_engine_up(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
-    // `%d %f %f %f %f %f` (0x60f8f4).
-    sfx3(c, line, "%d %f %f %f %f %f", 0xf8, 0x338);
+    // `%d %f %f %f %f` (0x60f8f4).
+    sfx3(c, line, "%d %f %f %f %f", 0xf8, 0x338);
 }
 
 /// `sfx_engine_down id f a b c d`: engine-down record (`P+0x340`, count
@@ -554,12 +576,12 @@ pub fn sfx_gearbox_fwd(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
-    // `%d %f` (0x60f92c).
+    // `%d %f` (0x60f92c); the exe pre-sets the float slot to 1000.0.
     let s = scan(line, "%d %f");
     let id = s.db(0).unwrap_or(0);
     let p = c.p();
     c.load(p + 0x7d4, id, 6, 0);
-    c.put(p + 0x804, s.fb(1));
+    c.w(p + 0x804, s.fb(1).unwrap_or(0x447a_0000));
 }
 
 /// `sfx_gearbox_rev id f`: float at `P+0x808`, resource bound at `P+0x7e4`.
@@ -569,12 +591,12 @@ pub fn sfx_gearbox_rev(c: &mut Ctx, line: &[u8]) {
     if !c.guard() {
         return;
     }
-    // `%d %f` (0x60f934).
+    // `%d %f` (0x60f934); the exe pre-sets the float slot to 1000.0.
     let s = scan(line, "%d %f");
     let id = s.db(0).unwrap_or(0);
     let p = c.p();
     c.load(p + 0x7e4, id, 6, 0);
-    c.put(p + 0x808, s.fb(1));
+    c.w(p + 0x808, s.fb(1).unwrap_or(0x447a_0000));
 }
 
 /// `sfx_wreck id`: resource bound at `P+0x884`.

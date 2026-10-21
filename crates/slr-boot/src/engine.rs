@@ -491,11 +491,40 @@ fn call_script(vm: &mut VmHost, script: u32, method: &str, args: &[Value]) -> Re
 /// Original427210 queries getInfo8,9,28 in order after script construction.
 /// A nonzero scalar registers one callback record; these are real script calls.
 pub fn register_created(vm: &mut VmHost, container: u32, script: u32) -> Result<(), String> {
-    if crate::factory::native_class(container).as_deref() == Some("player") {
-        // Nativeplayer vtable5f12f0+3c→47b220: cases8/28 branch47b325
-        // returns1; case9 branches47b401 returning0. No script is dispatched.
+    if let Some(class) = crate::factory::native_class(container) {
+        if class == "player" {
+            // Nativeplayer vtable5f12f0+3c→47b220: cases8/28 branch47b325
+            // returns1; case9 branches47b401 returning0. No script is dispatched.
+            with(|state| {
+                for kind in [8, 0x1c] {
+                    state.callbacks.entry(kind).or_default().push(container);
+                }
+            });
+            return Ok(());
+        }
+        // Original426470 routes the query to the native payload's vtable+0x3c
+        // when the container carries a native object, so no script getInfo call
+        // is emitted. The template payload holds the actual class query.
+        let template = crate::factory::instance_template_container(container)
+            .ok_or("postcreate native template link missing")?;
+        let mut registered = Vec::new();
+        crate::native_body::with_world_memory(|m| {
+            let payload = crate::native_body::template_payload(template).ok_or_else(|| {
+                format!(
+                    "postcreate {class}BOUNDARY: native class template has no constructed payload; the class constructor integration is required before query routing"
+                )
+            })?;
+            for kind in [8, 9, 0x1c] {
+                let value = crate::native_message::template_query(m, payload, &class, kind, 0, 0)?;
+                if value != 0 {
+                    registered.push(kind);
+                }
+            }
+            Ok::<(), String>(())
+        })??;
+        //427210 saves all three query results before appending any callback record.
         with(|state| {
-            for kind in [8, 0x1c] {
+            for kind in registered {
                 state.callbacks.entry(kind).or_default().push(container);
             }
         });
@@ -895,21 +924,49 @@ pub fn animate_pass(vm: &mut VmHost) -> Result<(), String> {
     Ok(())
 }
 
-/// exe: FUN_004a5190 for a world with no rigid bodies: the accumulated step is
-/// consumed and simulated time advances by it.
-fn world_step(dt: f32) -> bool {
-    with(|s| {
-        let accumulated = dt + s.world_acc;
-        s.world_acc = accumulated;
-        if accumulated < STEP_THRESHOLD {
-            return false;
-        }
-        s.world_acc -= accumulated;
-        s.sim_time += accumulated;
-        let now = s.sim_time;
-        slr_lang::seam::with_lang_host(|h| h.sim_time = now);
-        true
-    })
+/// `FUN_00426f60` reached from `4a52d0` dispatches the class vtable's
+/// `+0x30` slot for every kind-9 entry. For every stock class that slot is a
+/// diagnostic (`429d80` writes `"drive"`), never a script call, so the port
+/// keeps the world step and performs no callback.
+struct Drive;
+impl crate::native_spatial::IndexHost for Drive {
+    fn access(
+        &mut self,
+        memory: &mut slr_physics::space::Space,
+        resource: u32,
+        flags: u32,
+    ) -> Result<u32, String> {
+        crate::native_assets::prepare(
+            memory,
+            resource,
+            crate::native_resource_load::Access {
+                flags,
+                quality: 0,
+                priority: 0,
+                time: 0,
+            },
+        )
+    }
+}
+impl crate::native_dynamics::Host for Drive {
+    fn drive(&mut self, _memory: &mut slr_physics::space::Space, _dt: u32) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn world_step(dt: f32) -> Result<bool, String> {
+    let mut drive = Drive;
+    let (stepped, now, accumulated) = crate::native_body::with_world_memory(|memory| {
+        let stepped = crate::native_dynamics::step(memory, dt.to_bits(), &mut drive)?;
+        let world = slr_physics::cfg::PHYSICS_WORLD;
+        Ok::<_, String>((stepped, memory.rf(world), memory.rf(world + 4)))
+    })??;
+    with(|state| {
+        state.sim_time = now;
+        state.world_acc = accumulated;
+    });
+    slr_lang::seam::with_lang_host(|host| host.sim_time = now);
+    Ok(stepped)
 }
 
 /// exe: FUN_00428450. One frame's control callbacks, world steps and timers.
@@ -933,6 +990,7 @@ pub fn step(vm: &mut VmHost) -> Result<(), String> {
         control_pass(vm, acc)?;
     }
     let max_step = config.max_step * config.time_scale;
+    let mut stepped = false;
     while remaining > 0.0 {
         let chunk = if remaining < max_step {
             remaining
@@ -941,13 +999,32 @@ pub fn step(vm: &mut VmHost) -> Result<(), String> {
         } else {
             max_step
         };
-        if !world_step(chunk) {
+        if !world_step(chunk)? {
             break;
         }
+        stepped = true;
         remaining -= chunk;
         timer_pass(vm)?;
+        crate::factory::cleanup(vm)?;
     }
+    if !stepped {
+        crate::factory::cleanup(vm)?;
+    }
+    drain_file_worker()?;
     Ok(())
+}
+
+/// `554ea0` runs on its own OS thread in the original. The port serializes it
+/// at the frame boundary: one request quantum per call, which is where
+/// `428450` gives the file manager its turn.
+fn drain_file_worker() -> Result<(), String> {
+    loop {
+        let step = crate::native_body::with_world_memory(crate::native_file::pump)??;
+        if step != crate::native_file::Step::Idle {
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 pub fn install(vm: &mut VmHost) {

@@ -481,7 +481,7 @@ impl RenderHost {
             text_color: -1,
             video_playing: 0,
             dirty: 0,
-            frame: 0,
+            frame: 1,
             events: Vec::new(),
             records: Vec::new(),
             headless_results: HashMap::new(),
@@ -541,6 +541,12 @@ impl RenderHost {
     #[must_use]
     pub fn frame(&self) -> u32 {
         self.frame
+    }
+
+    /// Original428d91/428da0 successful device-frame generation increment.
+    /// The driver calls this after its device flush and before Frontend.render.
+    pub fn advance_frame_generation(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
     }
 
     /// The render-layer effects so far, in order.
@@ -932,7 +938,10 @@ mod tests {
         reset_render();
         let mut vm = VmHost::new();
         install(&mut vm);
-        with_render(|r| r.dirty = 0xDEAD);
+        with_render(|r| {
+            assert_eq!(r.frame(), 1, "original image global6200a4");
+            r.set_flush_state(0xDEAD, 0);
+        });
         call(&mut vm, &[], "forceRendering");
         with_render(|r| {
             assert_eq!(r.dirty(), 0);
@@ -940,7 +949,11 @@ mod tests {
             assert_eq!(r.events().len(), 3 * 7);
         });
         call(&mut vm, &[], "flush");
-        with_render(|r| assert_eq!(r.frame(), 14));
+        with_render(|r| {
+            assert_eq!(r.frame(), 14);
+            r.advance_frame_generation();
+            assert_eq!(r.frame(), 15, "normal frames share the flush generation");
+        });
     }
 
     /// `changeVideoMode` records its three marshalled words in order.

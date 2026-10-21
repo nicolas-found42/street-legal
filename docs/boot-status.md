@@ -1,12 +1,340 @@
-# Boot to MainMenu: canonical state and recovery
+# Street Legal reconstruction: canonical state and recovery
 
-Goal: unchanged stock scripts, run by the Rust runtime, reach MainMenu, with an
-inspectable comparison against the strongest available original oracle.
+Goal: the complete stock single-player reconstruction passes all P01–P30 and
+the cross-cutting gates in [fidelity.md](fidelity.md#whole-game-completion-contract).
+Boot to MainMenu is a required intermediate milestone.
 This file is the handoff. Update it at every milestone; do not keep a second copy.
 
-Last updated: 2026-10-20, branch `exact-port`.
+Last updated: 2026-10-21, branch `exact-port`. See the cfg-handler parity section first.
 
-## What runs now
+## cfg handler oracle: full leaf parity (2026-10-21, later than the section below)
+
+`cargo test -p slr-physics --test cfg_handlers_oracle` is green: 1091 leaf rows
+exercised, 1080 replayed bit-exactly against the Unicorn vectors, 10 rows the
+generator records as `nondet` (skipped and applied), 0 unknown keywords.
+Reproduce the vectors first:
+
+    ~/slr-oracle-venv/bin/python re/oracle/cfg_handler_vectors.py gen leaves
+
+Fixes in this pass (all verified against `re/out/cfg_handlers/leaves_*.jsonl`):
+
+- `osd_rpmpin` / `osd_spdpin` / `osd_nospin`: the seven scanned floats are not
+  contiguous in the object. Offsets now come from the exe (`0x444e80`,
+  `0x444f30`, `0x444fd0`): `1a64,1a68,1a6c,1a9c,1aa0,1aa4,1aa8` (bind `1a80`);
+  `1aac,1ab0,1ab4,1ae4,1ae8,1aec,1af0` (bind `1ac8`);
+  `1af4,1af8,1afc,1b2c,1b30,1b34,1b38` (bind `1b10`).
+- `osd_gear` / `osd_speed` / `osd_cond`: `%8s` stores the converted characters
+  plus the `sscanf` NUL, capped at eight (matches `505240`).
+- `sfx_engine_up` / `sfx_engine_down` / `sfx_exhaust`: the format is four `%f`
+  (`0x60f8f4`), not five; defaults are `1.0, 1e6, 1.0, 1.0`.
+- `sfx_gearbox_fwd` / `sfx_gearbox_rev`: the float slot is pre-set to `1000.0`
+  and is written even when `%f` does not convert.
+- `shadow` (`0x46c1a0`): `esi = K+0x1074`; matrix at `esi+0xc`, flags at
+  `esi+0x3c` / `esi+0x58`, bind at `esi+0x48`.
+- `bolt` (`0x46c4e0`) is a 0x58-byte list node (not the two-bind handler);
+  `flapsfx` (`0x46ca70`) is the two-bind handler with slots `flap+0x3c` and
+  `flap+0x4c`.
+- `material` tail (`0x46cff0`): `esi = K+0x1170`, binds at `esi+0x20`, `esi`,
+  `esi+0x30`.
+- `logo` (`0x46d400`): bind slot is `K+0x1118`.
+- `sfx_loop` (`0x46da30`): bind slot is `K+0x1250`, speed at `K+0x1260`.
+- `wing` (`0x46d470`): the format is `%d %f` x9 (`0x61201c`), the record is
+  selected by the body pointer at `+0x40`, and the position is re-based through
+  the transposed matrix then multiplied by the stored matrix (`0x46d5c4`
+  through `0x46d696`).
+
+Still open on this frontier: nothing in the leaf vectors. The wider handler
+run (`cfg_handlers_match_unicorn_vectors`) and the rest of P01-P30 remain as
+described below.
+
+## Active ownership and verified baseline (2026-10-21, superseding 2026-10-20 pause)
+
+Work resumed under a single owner. HEAD/origin remain `6b63613`; the complete
+inherited dirty tree is still uncommitted (do not reset it). Before new edits
+the tree was archived at `re/out/boot/ownership-20261021T021707Z/`.
+
+- **Stale-binary correction.** Earlier notes said the runtime stopped at
+  type8 `lod_amp 3.000`. That was a stale `slr-resource` rlib linked by a build
+  racing another cargo invocation; bundles `…T024444…` and `…T035108…` are
+  affected. After a clean sequential rebuild the descriptor parses and the
+  actual frontier was, and is, part-template construction. `ScriptData::apply`
+  accepts the stock phase text (`script …class`, `native part …cfg`,
+  `lod_amp 3.000`); the executed replay is in
+  `slr-boot::native_message` tests.
+- **Integrated correction: native-class postcreate queries.** Original
+  `FUN_00426470` routes getInfo8/9/0x1c to the native payload (`vtable+0x3c`)
+  for native-class containers, so no script `getInfo` native records are
+  emitted. The port now does the same in `engine::register_created` using
+  `factory::instance_template_container` and
+  `native_body::template_payload`. Car template `45c510` messages 8/9/0x1c
+  return 1 (executed rows: `re/out/boot/native-class-query-original.json`,
+  probe `re/oracle/native_class_query_probe.py`; replay test
+  `native_message::tests::original_car_template_queries_8_9_28_return_one`).
+  Part template `4769e0` messages 8/9/0x1c take the default dispatch returning
+  0; the executed part rows still require a real constructed payload and are
+  reported as unavailable by the probe.
+- **Verified strict frontier (2026-10-21, superseding 20261021T04…).** Bundle
+  `re/out/boot/runs/20261021T101620.536318Z-ad4aa764504f` reaches the main
+  loop (frame 31, `Osd.animate`/`MainMenuDialog.animate`) with 4,236 filtered
+  and 6,346 unfiltered records (was 614/903). It matches the native trace to
+  record 619 and then diverges: the original emits
+  `GameRef.getScriptInstance` before `queueEvent` at that point, and the port
+  does not.
+  - Root cause: the original's `FUN_004265c0` reads the event target's live
+    instance through `vtable+0xc` before the mask test, and the hook layer
+    records that read. The port's `engine::dispatch` resolves the same
+    instance without a call-log record.
+  - A second, larger gap: the original runs `Part.addpart` 58 times (one per
+    `getScriptInstance`); the port never runs it. `Part.addPart(
+    I,String,Descriptor)` branches at bytecode node 135 on the created part
+    being non-null and only then calls `addStockParts` (node 141) and
+    `setTexture` (node 154). The port's executed lines for that method are
+    685, 690, 691, 695, 698, 702, 703, 712, 714, 725 — no 717/719 — so the
+    part it creates is the null that node 135 tests, and the original's
+    part is not.
+- **Resolved this checkpoint.** `slr-boot` unit tests pass, the whole
+  workspace test suite passes, and `stock_menu_prefix` (the stock menu boot
+  integration test) passes. Strict clippy and rustfmt are clean.
+- **Open, in priority order.**
+  1. `Part.addPart` must create a live part instance: fix the node-135 path so
+     `addStockParts`, `setTexture`, `addpart`/`getScriptInstance`,
+     `partOnSlot`, `getSlotID`, `disableSlot` and `setTexture` appear in the
+     native trace at their original counts (58/112/119/76/20).
+  2. Clock-replay thread identity. The original enters `THRD-RUNVMI
+     Dummy.getInfo` (class `java.lang.GameType`) immediately after each
+     `THRD-CREATE` constructor; the port goes straight into
+     `THRD-INSTVAR-INI` part field initialization. `register_created` takes
+     the native-template branch for a `native car` container, but the
+     original still dispatches the `GameType.getInfo` script query.
+  3. `getScriptInstance` before `queueEvent`. Original `4265c0` calls the
+     event target's vtable `+0xc` (`486f30`) at `426642`, after the
+     `cmp eax,1` type gate and before the `426647` mask test, and `41fbc0`
+     records that nested native on return. The port now emits the same
+     record from `engine::dispatch`. Original counts are 58
+     `getScriptInstance` against 69 `queueEvent`; each of the 58 returns the
+     script instance object that the preceding `GameRef.create` returned,
+     and the 11 without one are events whose target is not type 1 or whose
+     nested call is separated by `arraycopy`.
+  4. Thread-interleaving at frame 31. After record 445 the original
+     interleaves the frame thread's `Object.wait` with the "Game time
+     refresher" thread's `System.currentTime`; the port runs `wait` first.
+     This is the current first divergence (filtered 447, unfiltered 647).
+  5. The endpoint remains 6,508/9,209 and 300 idle frames; no boot acceptance
+     is claimed.
+  6. The file worker now runs. `engine::step` drains one `native_file::pump`
+     quantum per frame, which is where `428450` gives the file manager its
+     turn, so `505c00` file completion and `544540` descriptor completion are
+     live. The shape main-thread pass (`505cd0`/`505db0`/`505da0`) and the
+     synchronous `505960` constructor still have no caller: every entry point
+     needs a graphics-device collaborator that creates materials and finalizes
+     objects, and `slr-d3d9` provides none. Stock boot issues no shape request
+     before MainMenu. Those items are annotated with that reason and fail
+     closed rather than report geometry as ready.
+  7. `Part.addpart`/`addStockParts` never run. Original counts are 754 and
+     1,508 executed steps; the port executes none. `GameRef.command` runs 174
+     times and reaches its `queueEvent` node, but the resulting `dispatch`
+     never delivers the `addpart` message that appends to `attachedParts`, so
+     `isComplex` stays zero and `addPart`'s node 135 always branches to
+     `destroy`. Fixing this is required before the part graph can match.
+
+## Historical pause (2026-10-20)
+
+- Before new edits, the complete tracked diff and untracked files were archived
+  under ignored `re/out/boot/ownership-20261021T021707Z/`.
+- Fresh strict baseline `re/out/boot/runs/20261021T021737.728442Z-036476be59fc/`
+  stops at frame31 on the missing original file-worker request bridge for
+  `cars\\racers\\Prime_data\\meshes\\chassis.scx`. Its 600 filtered/889 unfiltered
+  native records match the accepted prefix; the full 6,508/9,209 endpoint remains
+  incomplete. Use the reproduction command below.
+- The inherited combined tree does not pass checkpoint validation. Initial
+  Clippy receipt `re/out/boot/owner-clippy-initial.txt` reports unused unintegrated
+  helpers and style failures. Initial workspace receipt
+  `re/out/boot/owner-workspace-initial.txt` also identifies a stale mesh progress
+  fixture. Preserve these failures; resolve their causes before committing.
+- Validated checkpoint `6b63613`: raw particle oracle output is preserved; only
+  confirmed malformed-input corrections use separately checked exceptions.
+  Diagnostic bundles now archive untracked source bytes, including nested
+  `manifest.json` files, and verify their integrity. Isolated workspace formatting,
+  strict Clippy, workspace tests and the normal commit hook passed; diagnostics
+  Python25/25, serialization Python3/3, collector470/470. Receipts are
+  `re/out/boot/checkpoint-evidence-*`. The automated review exceeded its input
+  limit; independent manual review found and corrected the nested-manifest
+  defect before accepting this limited checkpoint. No whole-game credit follows.
+- Current runtime strict bundle
+  `re/out/boot/runs/20261021T024444.425865Z-0fc69beb141c/` stops frame31 at
+  unsupported type8 descriptor `lod_amp 3.000` while adding stock parts.
+  It records617 filtered/906 unfiltered calls, with the first mismatch at602/891.
+  This is not a passing prefix claim. The completed outer creation is preceded
+  by three extra `GameRef.getInfo` calls (8/9/28). Investigation traced these to
+  `engine::register_created` dispatching scripts for a native car. Original
+  `426470` routes native payload queries; direct original `45c510` observations
+  return1 for all three. The production correction is not yet implemented.
+- Integrated but not yet checkpoint-validated runtime changes include actual
+  asynchronous resource requests (pending access returns null), synchronous
+  descriptor read/reuse, live typee cloning, Part render/texture retargeting,
+  callback-visible render initialization order, and active spatial processing.
+  Focused original probes pass; full boot remains failed. The file/shape worker
+  scheduling and synchronous shape decoding are still explicit integration gaps.
+- Independent audit found that x87 probe input encoders discarded negative
+  zero. The audit agent corrected both encoders and generated a fresh21,702-row
+  Unicorn capture; old capture bytes were preserved. These changes remain
+  uncommitted and need integrated review. **Authority correction:** ADR0008
+  amends ADR0007: local Apple Silicon validation triangulates SoftFloat,
+  Unicorn and Rosetta, and pins transcendentals to a documented implementation.
+  Physical Intel hardware is not a required input. Earlier notes claiming it
+  was required are withdrawn. Current Rosetta execution availability still
+  needs assessment against that amended contract.
+- Last agent work after the strict capture: type8 `lod_amp` parser/probes and
+  logical-to-raw LOD projection were in progress; shape synchronous/retry
+  helpers were tested but production decoding/material integration remained
+  open; malformed-particle and x87 evidence corrections were in progress.
+  Inspect the actual dirty tree and rerun checks before crediting any of these.
+- Required final verification remains a separate run on frozen integrated
+  source and unchanged stock inputs covering the entire acceptance contract,
+  including human listening evidence and review of screenshot failures where
+  required by ADR0009. No unavailable human evidence is assumed to have passed.
+
+## Historical fresh-session handoff (2026-10-20)
+
+The user requested a fresh session. The three delegated agents are interrupted;
+do not assume their pending work or integration is complete. HEAD remains
+`56d0663`; no new validated checkpoint was committed or pushed this session.
+Preserve and assess the entire dirty tree before continuing.
+
+The latest strict capture below predates subsequent asset-loader, template-cache,
+shape/file and spatial work. In particular, `native_assets` is now connected,
+but the real file-worker bridge and render initialization ordering still need
+integration and fresh strict verification. Inspect the current sources rather
+than treating focused helper receipts as production acceptance. The template
+cache ownership regression passed in `re/out/boot/owner-template-cache-tests.txt`;
+combined repository checks remain outstanding.
+
+## Ownership continuation evidence (2026-10-20)
+
+Whole-game authority is now operationally collected in
+[fidelity.md](fidelity.md#whole-game-completion-contract). All P01–P30 remain
+open. The active objective is the entire reconstruction; boot remains one
+required milestone. No whole-game or boot acceptance is claimed here.
+
+The inherited working tree was preserved before edits in ignored
+`re/out/boot/ownership-start/` (tracked binary patch and untracked archive).
+HEAD/origin remain `56d0663`; the following integration is uncommitted.
+
+- Fresh strict bundle `re/out/boot/runs/20261020T194819.605586Z-b2a51aed66c9/`
+  confirms the directory-registration fix passes the previous missing
+  `Prime_models` frontier. All 600 filtered/889 unfiltered emitted calls still
+  match, stopping at the configured native constructor boundary.
+- Bundle `re/out/boot/runs/20261020T195637.258753Z-97e59e6a3f9b/` subsequently
+  executes the actual Prime chassis template constructor/defaults, cfg handlers,
+  mesh bodies, type-9 collision definition and postparse processing. It retains
+  the same 600/889 native prefix and stops at the explicit runtime graph boundary.
+  This bundle contains temporary mesh diagnostic stderr, subsequently removed.
+- Latest strict bundle `re/out/boot/runs/20261020T205334.253198Z-3faae856a7cf/`
+  retains the exact 600 filtered/889 unfiltered emitted native-call prefix.
+  It passes configured Part/compound construction, slot query/add_mslot
+  commands, wheel setup and camera attachment, then stops at the type-e render
+  mesh bounds/get-data collaborator. The full 6,508/9,209 endpoint is still
+  outstanding; this is not boot acceptance.
+- The configured runtime now uses actual raw resource constructors, original
+  loaded/unloaded registration lists, persistent template ownership and raw
+  intrusive references. Successful publication occurs only after all car stages
+  return successfully. Current production still stops on missing asset/file or
+  physics work. Template and render payload unloads retain explicit boundaries
+  until their actual native class destructors are integrated.
+- Composed car tests cover the unhooked physics prefix, the constructor epilogue
+  with declared render callbacks, and camera-bearing attachment arguments.
+  They caught and corrected a root-versus-backbone transform bug and a camera
+  caller that overwrote the backbone reference. Full raw Part, nested compound,
+  world and repeated-spring tests retain every word, including original scratch
+  provenance modeled by `native_stack`. These scoped tests do not grant whole
+  constructor/render/physics acceptance.
+- Additional original probes cover resource constructors and tree ownership,
+  collision definitions, actual mesh inertia, native query/commands, render LOD
+  retargeting, type-e descriptors/shadows/cloning and file/shape request queues.
+  Probes are durable under `re/oracle/`; fixtures and qualified receipts remain
+  in ignored `re/out/boot/`. No captured output replaces runtime logic.
+- Original4a5190 empty-world stepping is connected. Independent and compound
+  bodies, RK4, kinematic branches and no-contact spring phases have differential
+  vectors. Real drive callbacks, spatial indexing, contacts and solver paths
+  remain unfinished. Active bodies are never silently advanced by the former
+  empty-world approximation.
+- Passive original generation capture `re/out/headless/generation-investigation/`
+  uses the accepted executable/profile identities and observes the original
+  counter writes and car entry without replacing execution. It confirms image
+  default6200a4=1, shared flush/normal-frame increments and car entry generation39.
+  Production shares the render host counter with native memory; render native
+  unit/oracle tests pass in `owner-generation-render-suite.txt`.
+- Validation remains partial. Focused native suites pass at recorded source
+  states, including `native-focused-combined-tests.txt` and later focused
+  dynamics/LOD/resource receipts. `owner-workspace-rest-tests.txt` passed the
+  workspace excluding boot earlier. A fresh combined formatting/clippy/workspace
+  run and strict full endpoint are required before a checkpoint can be called
+  validated. Current unintegrated helpers still produce warnings; suppressing
+  them or weakening `stock_menu_prefix` is not an acceptance path.
+
+Continue from the actual current tree, not just the historical handoff below.
+Keep stock/reference read-only, preserve every failed capture, and retain the
+strict full endpoint and workspace acceptance requirements.
+
+## Earlier fresh-agent handoff (2026-10-20)
+
+The user now intends to hand ownership of the **entire game decompilation** to a
+fresh agent. Work so far remains focused on this boot milestone; neither boot
+parity nor whole-game completion has been achieved. This milestone's Definition
+of Done below is authoritative for boot, not a whole-game acceptance specification.
+
+- **Committed and pushed:** branch `exact-port`, HEAD/origin `56d0663` (raw boot
+  clocks and callback lifetimes), preceded by `71fd874` (VM String-backed thread
+  names) and `2cd52dd` (preserved diagnostics/replay/regression tooling). The last
+  committed checkpoint passed the repository hook's formatting, clippy and
+  workspace tests; historical receipts are under `re/out/boot/`.
+- **Last strict evidence:** bundle
+  `re/out/boot/runs/20261020T192655.117211Z-12381134c173/` consumes7,011 raw clock
+  requests and emits600 filtered/889 unfiltered native records, each an exact
+  accepted-original prefix, then stops at frame31 vehicle creation. The diagnostic
+  timeline identifies missing base class `java.game.cars.Prime_models`. An
+  uncommitted original-derived directory-registration fix has focused tests, but
+  has not yet been validated by a subsequent strict run.
+- **Uncommitted work:** video COM failure behavior; deferred resource destruction,
+  alias invalidation and ID recycling; cfg resource bindings; loader diagnostics
+  and package directory registration; native car template/default initialization;
+  shared native-body memory/ownership; geometry, Part/render and wheel projections;
+  supporting original probes and passive lifecycle observers. Inspect `git diff`
+  and untracked files: these are real work in progress, not an integrated release.
+- **Validation limits:** current `cargo check -p slr-boot` passes with40 warnings
+  (`re/out/boot/fresh-agent-handoff-check.txt`). Focused receipts pass video3,
+  factory5, PartRender3, Parts3, wheel5, defaults1 and geometry2 tests. These were
+  run at different intermediate source states. The combined tree has not passed
+  fresh workspace formatting/clippy/tests or strict acceptance. Later resource
+  unload/recycle ordering still needs strict comparison.
+- **Principal remaining boot blocker:** integrate actual configured car/part
+  runtime construction and its physics/resource graph. Original functions
+  `46eae0` (base Part) and `44a250` (car instance) remain to be completed/integrated;
+  raw physics entity/compound helpers were investigated but no `native_part.rs`
+  or `native_entity.rs` implementation exists at handoff. Template postparse
+  behavior and nonempty Part render retargeting also remain incomplete. Keep
+  existing explicit boundaries until backed by original evidence.
+
+Stock/reference inputs remain read-only. Oracle captures are ignored local
+artifacts under `re/out/`; durable probe programs are under `re/oracle/` and
+`re/headless/`. Available tools include `~/slr-oracle-venv/bin/python`, Kuna and
+retained `re/out/all_pseudo.c`. No active subagent should be assumed to continue
+work after this handoff.
+
+Reproduce strict boot comparison with:
+
+```sh
+python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 331 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl
+```
+
+The runner verifies source/input identities; keep sources stable during capture.
+The accepted endpoint contains6,508 filtered/9,209 unfiltered native records and
+300 idle frames after completed MainMenu construction. Subsequent sections retain
+historical baselines and evidence; use this handoff and fresh diagnostics for the
+current frontier. Choose the implementation sequence freely, resolving underlying
+systems rather than treating each historical mismatch as a separate task.
+
+## Earlier runnable baseline
 
 ```sh
 cargo run -p slr-boot -- stock --config-instance-id 0xffff0080 --game-init-instance-id 0xffff007f
@@ -522,3 +850,55 @@ scores (safe-to-apply0.33). Independent source reviews and literal executable
 checks support the measured prefixes and empty-branch projection. The advisory
 gate is retained as `re/out/boot/parity-continuation-gate.json`; it does not
 certify full parity or automatically approve the remaining implementation.
+
+## Deferred resource lifetime integration (pending strict replay)
+
+The passive `resource_lifetime_probe.py` preserves the standard startup scenario
+and observes original queue/reference state without changing execution. Its
+110M-instruction capture is retained under
+`re/out/headless/resource-lifetime-investigation/observed/`; the verification
+receipt compares all648 native records (39,444 bytes) exactly with the accepted
+original menu capture's prefix. This is capture validation, not port parity.
+
+Original `Camera.destroy` (`4864c0`) retains the private runtime camera template
+first, then its render instance. `427620` appends real embedded four-word
+references to the FIFO destroy queue. At instruction99,534,212, cleanup
+`4277f0` (caller`4285f4`, before frame0 physics) sees the two pairs queued as
+`ffff006b,ffff006a,ffff006f,ffff006e`. These values document the capture; the
+implementation derives every ID from the live containers and never supplies
+this list to the allocator. The four recycle entries occur at99,534,311,
+99,535,592,99,536,081 and99,537,362, respectively.
+
+Cleanup drains unload requests before destroy requests and repeats for requests
+created during callbacks. Script resources receive event2 before unload.
+Derived destructor `544e20` releases its embedded template reference; base
+`544700` recycles the actual runtime ID through `536f90`, then `545f70` zeros
+all four words of every retained alias. `5517f0` destroys children in list order
+and unlinks the resource from its parent. Owning script `Native.ptr` cells keep
+their existing reference allocation, now zeroed. Runtime ID recycling therefore
+uses the existing allocator's LIFO free stack, following actual deletion order.
+The port now executes cleanup after successful physics/timer passes, also when
+no physics step succeeds, and after animation before render notification.
+
+Focused factory regressions cover deferred alias validity, duplicate queued
+requests, FIFO deletion/LIFO reuse, recursive parent-before-child deletion and
+parent/tail-sentinel repair. The passive observer has two bounds/read-only tests.
+Fixed package resource destruction remains an explicit boundary. The original
+third callback cleanup queue and held-JVM-object free phase are not yet modeled;
+they are not part of the captured first four resource recycles. A fresh strict
+replay must establish the resulting native/resource frontier before accepting
+this integration.
+
+A second passive capture through360M instructions retains301 lifetime events
+and810 native records (47,319 bytes), again an exact accepted-original prefix;
+see `resource-lifetime-investigation/later/verification.json`. It distinguishes
+loaded script unload from the generic base destructor. The observed type1
+resource vtable `5f375c` points its unload slot to `53ec20`. That function first
+recursively unloads script children, then deletes eligible owned children before
+the enclosing resource's base destructor runs. The port now follows this order;
+a focused regression checks leaf→script-child→parent recycling for loaded
+scripts, while retaining parent→child base destruction for an unloaded graph.
+`4274d0` is a bare return in this build, so unloading does not synthesize callback
+unregistration. `Viewport.destroy` (`481600`) also queues its actual resource
+through `48a8d0`; its release now participates in cleanup. These corrections
+still require the next strict trace's later resource-recycle comparison.

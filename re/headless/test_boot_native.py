@@ -119,9 +119,31 @@ class ScriptPrefixTests(unittest.TestCase):
         self.assertGreater(create, 0)
         self.assertEqual(self.result["calllog"]["records"], len(records))
 
+    def test_original_file_io_and_own_diagnostics_are_retained(self):
+        """The exe's file layer and its own `diag.log` are evidence, not gaps.
+
+        `docs/call-log.md` records that the original writes `diag.log` through
+        `0x5513b0`; this run intercepts the same writes, so the bytes are the
+        original's own output rather than a hook-side reconstruction.
+        """
+        self.assertGreater(self.result["file_log"]["records"], 0)
+        records = calllog.Reader(Path(self.result["file_log"]["path"]).read_bytes()).records()
+        operations = {record[1] for record in records if record[0] == "file"}
+        self.assertEqual(operations, {0, 1, 2, 3}, "open/read/write/close are all recorded")
+        opened = [record for record in records if record[0] == "file" and record[1] == 0]
+        self.assertTrue(any(record[2].endswith("diag.log") for record in opened))
+        diag = Path(self.observe) / "original-diag.log"
+        self.assertTrue(diag.exists())
+        text = diag.read_text()
+        self.assertIn("SL2 build 606", text)
+        self.assertIn("diag.log", self.result["observed_files"])
+
     def test_prefix_is_repeatable_byte_for_byte(self):
+        # `calllog`, `observer`, `file_log` and `observed_files` describe the
+        # capture this particular invocation asked for, not the emulated run.
         _, again = run_prefix(4_000_000)
-        keep = lambda r: {k: v for k, v in r.items() if k not in ("calllog", "observer")}
+        keep = lambda r: {k: v for k, v in r.items()
+                          if k not in ("calllog", "observer", "file_log", "observed_files")}
         digest = lambda r: hashlib.sha256(json.dumps(keep(r), sort_keys=True).encode()).hexdigest()
         self.assertEqual(digest(self.result), digest(again))
 

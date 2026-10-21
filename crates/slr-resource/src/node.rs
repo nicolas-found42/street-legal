@@ -836,6 +836,95 @@ impl ResHost {
         Ok(())
     }
 
+    /// Original545f70: invalidate every retained four-word reference, while
+    /// leaving its owning Native.ptr cell and allocation in place.
+    pub fn invalidate_container_references(&mut self, container: u32) -> Result<(), String> {
+        let mut cursor = self
+            .containers
+            .get(&container)
+            .ok_or("destroyed container missing")?
+            .head;
+        let mut seen = std::collections::HashSet::new();
+        while cursor != 0 {
+            if !seen.insert(cursor) {
+                return Err("resource head list cycle".into());
+            }
+            let node = self
+                .nodes
+                .get(&cursor)
+                .ok_or("resource head link missing")?;
+            if node.container != container {
+                return Err("resource head link has another owner".into());
+            }
+            let next = node.next;
+            self.nodes.insert(cursor, Node::zeroed());
+            cursor = next;
+        }
+        self.containers.get_mut(&container).unwrap().head = 0;
+        Ok(())
+    }
+
+    /// Release an engine-owned embedded reference, not a script object.
+    pub fn release_embedded_link(&mut self, node: u32) {
+        self.delete_native(node);
+    }
+
+    /// Remove one resource after its children and head references are gone.
+    /// The typed tail sentinel stays with a surviving parent and is freed with
+    /// its own parent. This is5517f0's parent unlink after child destruction.
+    pub fn remove_empty_container(&mut self, container: u32) -> Result<Container, String> {
+        let current = self
+            .containers
+            .get(&container)
+            .ok_or("resource container missing")?
+            .clone();
+        if current.head != 0 || current.first_child != 0 {
+            return Err("resource destructor requires empty child/head lists".into());
+        }
+        if current.parent != 0 {
+            let parent = self
+                .containers
+                .get(&current.parent)
+                .ok_or("resource parent missing")?;
+            let tail = parent.children_sentinel;
+            let previous = current.previous_sibling;
+            let next = current.next_sibling;
+            if previous == current.parent {
+                self.containers
+                    .get_mut(&current.parent)
+                    .unwrap()
+                    .first_child = if next == tail { 0 } else { next };
+            } else if previous != 0 {
+                self.containers
+                    .get_mut(&previous)
+                    .ok_or("previous resource sibling missing")?
+                    .next_sibling = next;
+            }
+            if next != 0 {
+                self.containers
+                    .get_mut(&next)
+                    .ok_or("next resource sibling missing")?
+                    .previous_sibling = previous;
+            }
+            if self.containers[&current.parent].last_child == container {
+                self.containers.get_mut(&current.parent).unwrap().last_child =
+                    if previous == current.parent {
+                        0
+                    } else {
+                        previous
+                    };
+            }
+        }
+        if current.children_sentinel != 0 {
+            self.containers.remove(&current.children_sentinel);
+        }
+        self.lookups.retain(|_, word| *word != container);
+        self.container_gates.remove(&container);
+        self.containers
+            .remove(&container)
+            .ok_or("resource disappeared during destruction".into())
+    }
+
     /// The container behind a word.
     #[must_use]
     pub fn container(&self, word: u32) -> Option<&Container> {
@@ -915,6 +1004,22 @@ impl ResHost {
     /// Take the call records.
     pub fn take_records(&mut self) -> Vec<LogRecord> {
         core::mem::take(&mut self.records)
+    }
+
+    /// Pop and return the most recent call record.
+    ///
+    /// The original writes a native's call record when the native *returns*
+    /// (`FUN_0041fbc0` records after the vtable call), so any native calls the
+    /// row makes through other vtables are already in the log. A ported path
+    /// that dispatches nested natives after `call` has already pushed the
+    /// outer record uses this to re-append it in the original's order.
+    pub fn pop_record(&mut self) -> Option<LogRecord> {
+        self.records.pop()
+    }
+
+    /// Append a previously popped record.
+    pub fn append_record(&mut self, record: LogRecord) {
+        self.records.push(record);
     }
 
     /// Seed the `ground_precache` count `load` tests.

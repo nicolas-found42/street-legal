@@ -346,6 +346,53 @@ pub struct FileReader {
 }
 
 impl FileReader {
+    fn class_names(&self, directory: &str) -> Vec<String> {
+        let prefix = format!("{}\\", directory.trim_end_matches('\\'));
+        let mut names: Vec<String> = self
+            .overlay
+            .keys()
+            .filter_map(|path| {
+                let relative = path.strip_prefix(&prefix)?;
+                (!relative.contains('\\'))
+                    .then(|| relative.strip_suffix(".class").map(str::to_owned))
+                    .flatten()
+            })
+            .collect();
+        if let Some(root) = &self.stock_root {
+            let mut path = root.clone();
+            for component in directory.split('\\').filter(|c| !c.is_empty()) {
+                let next = std::fs::read_dir(&path).ok().and_then(|entries| {
+                    entries.filter_map(Result::ok).find(|entry| {
+                        entry.path().is_dir()
+                            && entry.file_name().to_str().is_some_and(|name| {
+                                name == component
+                                    || (component.eq_ignore_ascii_case("scripts")
+                                        && name.eq_ignore_ascii_case(component))
+                            })
+                    })
+                });
+                let Some(next) = next else { return names };
+                path = next.path();
+            }
+            if let Ok(entries) = std::fs::read_dir(path) {
+                names.extend(
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.path().is_file())
+                        .filter_map(|entry| {
+                            entry
+                                .file_name()
+                                .to_str()?
+                                .strip_suffix(".class")
+                                .map(str::to_owned)
+                        }),
+                );
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
     /// Read through the real `stock/` tree rooted at `root`.
     #[must_use]
     pub fn stock(root: std::path::PathBuf) -> Self {
@@ -603,6 +650,9 @@ impl Loader {
             return Ok(None);
         };
         let ids = self.load_file(&bytes)?;
+        if let Some((id, _)) = ids.first() {
+            self.register_loaded_directory(directory, *id);
+        }
         Ok(ids.first().map(|(id, _)| *id))
     }
 
@@ -645,7 +695,10 @@ impl Loader {
         // every module, then the ordinary cache lookup for the requested
         // name (post-load `FUN_0041cfe0` package check omitted: the port
         // cache carries no package-conflict topology yet).
-        self.load_file(&bytes)?;
+        let ids = self.load_file(&bytes)?;
+        if let Some((id, _)) = ids.first() {
+            self.register_loaded_directory(&directory, *id);
+        }
         let selected = self.lookup(name);
         if selected.is_none() {
             self.diagnostics.push(format!(
@@ -653,6 +706,38 @@ impl Loader {
             ));
         }
         Ok(selected)
+    }
+
+    /// 410430 registers the successfully read file's directory against the
+    /// first parsed class's package through41cfe0. Directory entries are names
+    /// only; dependencies still load on request through the ordinary cache.
+    fn register_loaded_directory(&mut self, directory: &str, first: ClassId) {
+        let Some(package) = self
+            .class_name(first)
+            .and_then(|name| name.rsplit_once('.').map(|(package, _)| package.to_owned()))
+        else {
+            return;
+        };
+        let directory = directory.trim_end_matches('\\');
+        if self
+            .package_entries
+            .iter()
+            .any(|(node, path, _)| *node == package && path.trim_end_matches('\\') == directory)
+        {
+            return;
+        }
+        if self
+            .packages
+            .iter()
+            .any(|(path, node)| path.trim_end_matches('\\') == directory && *node == package)
+        {
+            return;
+        }
+        self.packages.push((directory.to_owned(), package.clone()));
+        for name in self.reader.class_names(directory) {
+            self.package_entries
+                .push((package.clone(), directory.to_owned(), name));
+        }
     }
 
     /// Exact package-node lookup followed by the first directory entry
@@ -682,6 +767,10 @@ impl Loader {
 
     /// Drain the accumulated log-and-continue diagnostics.
     #[must_use]
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
     pub fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)
     }

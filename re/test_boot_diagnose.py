@@ -36,6 +36,7 @@ for name in ['runtime.calllog','runtime-all.calllog']:
 (out/'capture.json').write_text(json.dumps({'schema_version':1,'run_id': 'wrong' if mode=='wrong-id' else rid}))
 (out/'capture-end.json').write_text(json.dumps({'schema_version':1,'run_id':rid,'events_written':3,'states_written':1,'last_sequence':11,'status':'completed','truncated':mode=='truncated','pending_records':0,'filtered_records':0 if mode=='short' else 1,'all_records':0 if mode=='short' else 1}))
 event={'schema_version':1,'run_id':rid,'sequence':10,'context':{'native':{'call_id':55}},'kind':{'event':'external','category':'native-call','fields':[['filtered_ordinal','0'],['all_ordinal','0']]}}
+if '--wall-clock' in args: event['wall_ns']=123456
 if mode=='event-id': event['run_id']='wrong'
 if '--clock-replay' in args:
  tape=pathlib.Path(args[args.index('--clock-replay')+1]);assert json.loads((tape.parent/'clock-verification.json').read_text())['fixture']==1;assert (tape.parent/'observed/original-facts.json').exists()
@@ -46,7 +47,7 @@ if mode=='empty-states': (out/'states.jsonl').write_text('')
 if mode=='missing-events': (out/'events.jsonl').unlink()
 '''
 
-class RunTests(unittest.TestCase):
+class Fixture(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.repo=Path(self.temp.name)
   (self.repo/'stock').mkdir();(self.repo/'stock/a').write_bytes(b'stock')
@@ -65,6 +66,7 @@ class RunTests(unittest.TestCase):
   result=subprocess.run(self.argv(mode,timeout),capture_output=True,text=True)
   bundle=next(iter((self.repo/'runs').iterdir()))
   return result,bundle,json.loads((bundle/'manifest.json').read_text()),json.loads((bundle/'report.json').read_text())
+class RunTests(Fixture):
  def test_equal_complete_and_immutable_analysis(self):
   result,bundle,manifest,report=self.invoke()
   self.assertEqual(result.returncode,0,result.stderr+result.stdout)
@@ -268,5 +270,191 @@ class RunTests(unittest.TestCase):
   _,bundle,manifest,_=self.invoke();manifest['artifacts']={}
   (bundle/'manifest.json').write_text(json.dumps(manifest))
   with self.assertRaisesRegex(ValueError,'incomplete'):diag.analyze(bundle)
+
+class ArchiveTests(Fixture):
+ def test_index_records_every_bundle_and_queries(self):
+  self.invoke()
+  first=next(iter((self.repo/'runs').iterdir()))
+  self.invoke()
+  index=json.loads(subprocess.run([sys.executable,str(COMMAND),'list','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(len(index),2)
+  self.assertEqual(index[0]['status'],'completed')
+  self.assertEqual(index[0]['source_commit'],diag.git_identity(self.repo)[0]['commit'])
+  failed=subprocess.run([sys.executable,str(COMMAND),'query','--runs-root',str(self.repo/'runs'),'--status','failed'],capture_output=True,text=True,check=True)
+  self.assertEqual(json.loads(failed.stdout),[])
+  latest=json.loads(subprocess.run([sys.executable,str(COMMAND),'status','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(latest['records'],2);self.assertIsNone(latest['latest_failed'])
+  self.assertTrue((self.repo/'runs-index.jsonl').exists())
+  self.assertEqual(len(list((self.repo/'runs').iterdir())),2)
+ def test_index_backfills_a_bundle_written_before_the_index_existed(self):
+  _,bundle,_,_=self.invoke()
+  (self.repo/'runs-index.jsonl').unlink()
+  added=json.loads(subprocess.run([sys.executable,str(COMMAND),'index','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(added['added'],1);self.assertEqual(added['skipped'],[])
+  self.assertEqual(added['records'][0]['run_id'],bundle.name)
+  again=json.loads(subprocess.run([sys.executable,str(COMMAND),'index','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(again['added'],0)
+ def test_index_reconstructs_a_bundle_whose_wrapper_was_killed(self):
+  _,bundle,_,_=self.invoke('mismatch')
+  # A wrapper killed before it could write its files leaves only the
+  # crash-surviving markers behind.
+  (bundle/'manifest.json').unlink();(bundle/'report.json').unlink()
+  (self.repo/'runs-index.jsonl').unlink()
+  added=json.loads(subprocess.run([sys.executable,str(COMMAND),'index','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(added['skipped'],[])
+  record=added['records'][0]
+  self.assertEqual(record['run_id'],bundle.name)
+  self.assertEqual(record['status'],'completed')
+  self.assertIn('capture markers',record.get('reconstructed',''))
+  self.assertIsNone(record['comparisons'].get('filtered',{}).get('equal'))
+ def test_reconstructed_bundle_gets_a_labelled_derived_start(self):
+  _,bundle,_,_=self.invoke()
+  (bundle/'manifest.json').unlink();(bundle/'report.json').unlink()
+  (self.repo/'runs-index.jsonl').unlink()
+  added=json.loads(subprocess.run([sys.executable,str(COMMAND),'index','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  record=added['records'][0]
+  # A killed wrapper records no clock. Without a fallback the bundle would be
+  # invisible to `--since` and to the ordering in `status`.
+  self.assertTrue(record['started'])
+  self.assertTrue(record['started_derived'])
+  since=json.loads(subprocess.run([sys.executable,str(COMMAND),'query','--runs-root',str(self.repo/'runs'),'--since','2000-01-01'],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(len(since),1)
+  recorded=json.loads(subprocess.run([sys.executable,str(COMMAND),'query','--runs-root',str(self.repo/'runs'),'--since','2999-01-01'],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(recorded,[])
+ def test_index_orders_by_start_time_not_append_order(self):
+  self.invoke()
+  self.invoke()
+  # `invoke` returns an arbitrary bundle; the newest is the one to expect.
+  second=max((self.repo/'runs').iterdir(),
+             key=lambda path:json.loads((path/'manifest.json').read_text())['started'])
+  path=self.repo/'runs-index.jsonl'
+  lines=path.read_text().splitlines()
+  path.write_text('\n'.join(reversed(lines))+'\n')
+  latest=json.loads(subprocess.run([sys.executable,str(COMMAND),'status','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(latest['latest']['run_id'],second.name)
+ def test_index_records_the_first_mismatch_and_native_call(self):
+  _,_,_,report=self.invoke('mismatch')
+  record=json.loads((self.repo/'runs-index.jsonl').read_text().splitlines()[-1])
+  self.assertEqual(record['status'],'failed')
+  self.assertEqual(record['first_mismatch']['comparison'],'filtered')
+  self.assertEqual(record['first_mismatch']['record'],1)
+  self.assertEqual(record['native_call_id'],55)
+  self.assertTrue(record['targeted_rerun']['snapshot_valid'])
+ def test_status_calls_out_an_outstanding_failure(self):
+  _,bundle,_,_=self.invoke('mismatch')
+  latest=json.loads(subprocess.run([sys.executable,str(COMMAND),'status','--runs-root',str(self.repo/'runs')],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(latest['latest_failed']['run_id'],bundle.name)
+  self.assertEqual(len(latest['outstanding']),1)
+ def test_identical_inputs_share_content_store_bytes(self):
+  self.invoke()
+  self.invoke()
+  bundles=sorted((self.repo/'runs').iterdir())
+  first,second=[next(bundle.glob('inputs/native_api-*')) for bundle in bundles]
+  self.assertEqual(first.read_bytes(),second.read_bytes())
+  # Each bundle owns independent bytes (a hash must never be shared through a
+  # hard link); on a reflink filesystem the store's blocks are still shared.
+  self.assertNotEqual(first.stat().st_ino,second.stat().st_ino,
+                      "bundles must stay independently verifiable")
+  stored=self.repo/'inputs-store'
+  unique=set()
+  for bundle in bundles:
+   manifest=json.loads((bundle/'manifest.json').read_text())
+   unique.update(record['sha256'] for record in manifest['inputs'].values())
+   unique.add(manifest['binary_snapshot']['sha256'])
+  self.assertEqual({entry.name for entry in stored.iterdir()},unique,
+                   "the store holds exactly the distinct input contents")
+  self.assertEqual(diag.analyze(bundles[0])['status'],'completed')
+  self.assertEqual(diag.analyze(bundles[1])['status'],'completed')
+  (bundles[0]/'inputs/native_api-native.tsv').write_bytes(b'changed')
+  with self.assertRaisesRegex(ValueError,'artifact changed'):diag.analyze(bundles[0])
+  self.assertEqual(diag.analyze(bundles[1])['status'],'completed',"a hard link is a real file, per-bundle verification still applies")
+ def test_retention_keeps_newest_and_spares_running(self):
+  for _ in range(4):self.invoke()
+  bundles=sorted((self.repo/'runs').iterdir())
+  running=bundles[0];manifest=json.loads((running/'manifest.json').read_text())
+  manifest['status']='running';(running/'manifest.json').write_text(json.dumps(manifest))
+  result=subprocess.run([sys.executable,str(COMMAND),'prune','--runs-root',str(self.repo/'runs'),'--keep','2'],capture_output=True,text=True,check=True)
+  pruned=json.loads(result.stdout)
+  self.assertEqual([row['name'] for row in pruned['removed']],[bundles[1].name])
+  self.assertEqual(pruned['retained_running'],[str(running.resolve())])
+  self.assertEqual(sorted(path.name for path in (self.repo/'runs').iterdir()),
+                   sorted([running.name,bundles[-2].name,bundles[-1].name]),
+                   "a running bundle is never removed, even beyond the keep count")
+  index=[json.loads(line) for line in (self.repo/'runs-index.jsonl').read_text().splitlines()]
+  self.assertEqual(len(index),4,"history survives pruning")
+ def test_prune_dry_run_removes_nothing_and_drops_orphaned_store_entries(self):
+  self.invoke();self.invoke()
+  dry=json.loads(subprocess.run([sys.executable,str(COMMAND),'prune','--runs-root',str(self.repo/'runs'),'--keep','1','--dry-run'],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(len(dry['removed']),1);self.assertEqual(len(list((self.repo/'runs').iterdir())),2)
+  pruned=json.loads(subprocess.run([sys.executable,str(COMMAND),'prune','--runs-root',str(self.repo/'runs'),'--keep','1'],capture_output=True,text=True,check=True).stdout)
+  self.assertEqual(len(pruned['removed']),1)
+  kept=next(iter((self.repo/'runs').iterdir()))
+  self.assertEqual(diag.analyze(kept)['status'],'completed',"the retained bundle still verifies")
+  kept_paths={path.resolve() for path in (self.repo/'runs').rglob('*') if path.is_file()}
+  for entry in (self.repo/'inputs-store').iterdir():
+   self.assertIn(entry.stat().st_ino,{path.stat().st_ino for path in kept_paths},
+                 "every surviving store entry is linked from a live bundle")
+ def test_keep_prunes_after_the_run(self):
+  self.invoke();self.invoke()
+  result=subprocess.run(self.argv()[:-2]+['--keep','1'],capture_output=True,text=True)
+  self.assertEqual(result.returncode,0,result.stdout)
+  self.assertEqual(len(list((self.repo/'runs').iterdir())),1)
+ def test_repeat_records_flake_rate(self):
+  argv=self.argv()
+  result=subprocess.run(argv[:-2]+['--repeat','3'],capture_output=True,text=True)
+  self.assertEqual(result.returncode,0,result.stdout)
+  records=[json.loads(line) for line in (self.repo/'runs-index.jsonl').read_text().splitlines()]
+  self.assertEqual(len(records),3)
+  self.assertEqual([record['flake']['iteration'] for record in records],[1,2,3])
+  self.assertEqual(records[0]['flake']['iterations'],3)
+  self.assertEqual(records[0]['flake']['failed'],0)
+  self.assertFalse(records[0]['flake']['nondeterministic'])
+  self.assertEqual(len(list((self.repo/'runs').iterdir())),3)
+ def test_repeat_surfaces_an_intermittent_failure(self):
+  binary=self.repo/'fake'
+  source=binary.read_text().replace("mode=next((x.split('=',1)[1] for x in args if x.startswith('--mode=')),'equal')",
+   "mode=next((x.split('=',1)[1] for x in args if x.startswith('--mode=')),'equal')\nimport pathlib as _p\ncounter=out.parent.parent/'flaky-counter'\nn=int(counter.read_text())+1 if counter.exists() else 1\ncounter.write_text(str(n))\nif n==2: mode='mismatch'")
+  binary.write_text(source);binary.chmod(0o755)
+  subprocess.run(['git','-C',str(self.repo),'add','fake'],check=True)
+  subprocess.run(['git','-C',str(self.repo),'-c','user.name=Test','-c','user.email=test@example.test','commit','-qm','flaky'],check=True)
+  result=subprocess.run(self.argv()[:-2]+['--repeat','3'],capture_output=True,text=True)
+  self.assertNotEqual(result.returncode,0)
+  records=[json.loads(line) for line in (self.repo/'runs-index.jsonl').read_text().splitlines()]
+  self.assertEqual(records[0]['flake']['failed'],1)
+  self.assertTrue(records[0]['flake']['nondeterministic'])
+  self.assertEqual(records[0]['flake']['statuses'].count('failed'),1)
+ def test_issue_dry_run_names_reproduction_commands(self):
+  argv=self.argv('mismatch')
+  marker=argv.index('--')
+  result=subprocess.run(argv[:marker]+['--file-issue','dry-run']+argv[marker:],capture_output=True,text=True)
+  self.assertNotEqual(result.returncode,0)
+  bundle=max((self.repo/'runs').iterdir(),key=lambda path:path.name)
+  report=json.loads((bundle/'report.json').read_text())
+  command=report['issue_command']
+  self.assertEqual(command[:3],['gh','issue','create'])
+  self.assertIn('--replay-from',command[6])
+  self.assertIn(str(bundle),command[6])
+  self.assertIn('--check-regression',command[6])
+ def test_wall_clock_is_recorded_and_ignored_by_comparison(self):
+  result=subprocess.run(self.argv()[:-2]+['--wall-clock'],capture_output=True,text=True)
+  self.assertEqual(result.returncode,0,result.stdout)
+  bundle=next(iter((self.repo/'runs').iterdir()))
+  manifest=json.loads((bundle/'manifest.json').read_text())
+  self.assertTrue(manifest['configuration']['wall_clock'])
+  self.assertIn('--wall-clock',manifest['child_arguments'])
+  self.assertTrue(manifest['environment']['rustc'].startswith('rustc '))
+  self.assertIn('uname',manifest['environment'])
+  events=[json.loads(line) for line in (bundle/'runtime/events.jsonl').read_text().splitlines()]
+  native=[event for event in events if event['kind'].get('category')=='native-call']
+  self.assertTrue(native and all(isinstance(event['wall_ns'],int) for event in native))
+  stamps=[event['wall_ns'] for event in native]
+  self.assertEqual(sorted(stamps),stamps,"timestamps are monotonic")
+ def test_environment_is_captured_even_without_wall_clock(self):
+  self.invoke()
+  manifest=json.loads((next(iter((self.repo/'runs').iterdir()))/'manifest.json').read_text())
+  self.assertEqual(manifest['environment']['schema_version'],1)
+  self.assertIsNone(manifest['environment']['wine'])
+  events=(next(iter((self.repo/'runs').iterdir()))/'runtime/events.jsonl').read_text().splitlines()
+  self.assertTrue(events and all('wall_ns' not in line for line in events))
 
 if __name__=='__main__':unittest.main()

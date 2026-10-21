@@ -16,12 +16,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::telemetry::Diagnostics;
+
 pub struct Args {
     pub reference: PathBuf,
     pub save_dir: PathBuf,
     pub autotest: bool,
     pub shots: PathBuf,
     pub time_scale: f32,
+    /// Per-run diagnostic bundle directory (`--diagnostics`).
+    pub diagnostics: Option<PathBuf>,
+    /// Frames between periodic checkpoints (`--diagnostics-interval`).
+    pub diagnostics_interval: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,6 +93,7 @@ pub struct App {
     pub reference_loaded: bool,
     pub frame_no: u64,
     stash: f32,
+    pub diagnostics: Diagnostics,
 }
 
 fn fallback_visual() -> CarVisual {
@@ -154,7 +161,35 @@ impl App {
             reference_loaded,
             frame_no: 0,
             stash: 0.0,
+            diagnostics: Diagnostics::disabled(),
         }
+    }
+
+    /// Close the bundle: snapshot the final state, then publish the manifest
+    /// and the completion marker.
+    pub fn finish_diagnostics(&mut self, failure: Option<&str>) {
+        if !self.diagnostics.enabled {
+            return;
+        }
+        let snapshot = self.snapshot("final", self.diagnostics.sessions);
+        let configuration = serde_json::json!({
+            "reference": self.args.reference.display().to_string(),
+            "save_dir": self.args.save_dir.display().to_string(),
+            "time_scale_bits": self.args.time_scale.to_bits(),
+            "autotest": self.args.autotest,
+            "diagnostics_interval": self.args.diagnostics_interval,
+        });
+        self.diagnostics.announce();
+        self.diagnostics.finish(snapshot, configuration, failure);
+    }
+
+    /// Open the diagnostic bundle, if one was requested.
+    pub fn start_diagnostics(&mut self) -> Result<(), String> {
+        let Some(directory) = self.args.diagnostics.clone() else {
+            return Ok(());
+        };
+        self.diagnostics = Diagnostics::start(&directory, self.args.diagnostics_interval)?;
+        Ok(())
     }
 
     pub fn autotest_stash_money(&mut self) {
@@ -174,9 +209,42 @@ impl App {
         self.toast_t = 3.0;
     }
 
+    /// Write the save through the one traced path, so every save in a
+    /// diagnostic session appears in `file-io.jsonl` with its state.
+    pub(crate) fn write_save(&mut self, what: &str) -> Option<Result<(), std::io::Error>> {
+        let path = self.save_path();
+        let gs = self.state.as_ref()?;
+        let result = gs.save(&path);
+        let bytes = result
+            .as_ref()
+            .ok()
+            .and_then(|()| std::fs::metadata(&path).ok())
+            .map_or(0, |metadata| metadata.len());
+        let fields = serde_json::json!({"ok": result.is_ok(), "bytes": bytes,
+            "money_bits": gs.money.to_bits(), "day": gs.day, "reason": what});
+        self.diagnostics.file("save", &path, fields);
+        Some(result)
+    }
+
     pub fn save(&mut self) {
-        if let Some(gs) = &self.state {
-            match gs.save(&self.save_path()) {
+        if self.state.is_some() {
+            let path = self.save_path();
+            let result = self.write_save("player").unwrap_or(Ok(()));
+            self.diagnostics.event(
+                "save",
+                vec![
+                    ("path", path.display().to_string()),
+                    ("ok", result.is_ok().to_string()),
+                    (
+                        "error",
+                        result
+                            .as_ref()
+                            .err()
+                            .map_or_else(String::new, |error| error.to_string()),
+                    ),
+                ],
+            );
+            match result {
                 Ok(()) => self.say("Game saved"),
                 Err(e) => self.say(format!("Save failed: {e}")),
             }
@@ -222,6 +290,8 @@ impl App {
 
     pub fn new_game(&mut self) {
         let seed = (get_time() * 1000.0) as u64 ^ 0xA5A5_1234;
+        self.diagnostics
+            .event("new-game", vec![("seed", seed.to_string())]);
         self.state = Some(GameState::new_game(&self.cat, seed));
         self.screen = Screen::Garage;
         self.tab = Tab::Overview;
@@ -230,7 +300,18 @@ impl App {
     }
 
     pub fn continue_game(&mut self) {
-        match GameState::load(&self.save_path()) {
+        let path = self.save_path();
+        let loaded = GameState::load(&path);
+        self.diagnostics
+            .file("load", &path, serde_json::json!({"ok": loaded.is_ok()}));
+        self.diagnostics.event(
+            "load",
+            vec![
+                ("path", path.display().to_string()),
+                ("ok", loaded.is_ok().to_string()),
+            ],
+        );
+        match loaded {
             Ok(gs) => {
                 // A save made with a different catalog may reference unknown cars.
                 if gs.cars.iter().all(|c| self.cat.car(&c.model).is_some()) {
@@ -269,6 +350,11 @@ impl App {
         let mut s = RaceSession::new(race, None, vec![r], vec![PAINTS[paint].1], false, true);
         s.light = Light::day();
         self.screen = Screen::Session(Box::new(s));
+        self.diagnostics
+            .event("test-drive", vec![("model", model.clone())]);
+        self.diagnostics.session_started(self.frame_no);
+        let snapshot = self.snapshot("session-start", self.diagnostics.sessions);
+        self.diagnostics.checkpoint(&snapshot);
     }
 
     pub fn start_event(&mut self, id: &str) {
@@ -304,6 +390,11 @@ impl App {
                     false,
                 );
                 self.screen = Screen::Session(Box::new(s));
+                self.diagnostics
+                    .event("event-start", vec![("event", ev.id.to_string())]);
+                self.diagnostics.session_started(self.frame_no);
+                let snapshot = self.snapshot("session-start", self.diagnostics.sessions);
+                self.diagnostics.checkpoint(&snapshot);
             }
             Err(e) => self.say(e.to_string()),
         }
@@ -323,7 +414,15 @@ impl App {
                     gs.day += 1;
                 }
             }
-            let _ = gs.save(&self.args.save_dir.join("slot1.json"));
+            let result = self.write_save("session-finish").unwrap_or(Ok(()));
+            self.diagnostics.event(
+                "session-finish",
+                vec![
+                    ("forfeit", forfeit.to_string()),
+                    ("settled", s.settled.to_string()),
+                    ("ok", result.is_ok().to_string()),
+                ],
+            );
         }
         self.perf_cache = None;
         self.tab = Tab::Overview;
@@ -370,6 +469,8 @@ impl App {
                 .text_centered(&self.toast.clone(), VW / 2.0, 668.0, 22.0, WARN);
         }
         self.ui.end();
+        let snapshot = self.snapshot("frame", self.diagnostics.sessions);
+        self.diagnostics.tick(self.frame_no, &snapshot);
     }
 
     fn draw_title(&mut self) {
@@ -1741,7 +1842,7 @@ impl App {
             let out = gs.settle_race(&s.race, ev);
             s.outcome = Some(out);
             s.settled = true;
-            let _ = gs.save(&self.args.save_dir.join("slot1.json"));
+            self.write_save("race-settled");
         }
         if let Some(out) = &s.outcome {
             let ui = &mut self.ui;

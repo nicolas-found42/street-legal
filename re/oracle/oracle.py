@@ -58,6 +58,7 @@ IMPORT_STDCALL_BYTES = {
     "QueryPerformanceCounter": 4, "QueryPerformanceFrequency": 4, "GetTickCount": 0,
     "timeGetTime": 0, "GetLastError": 0, "SetLastError": 4, "EnterCriticalSection": 4,
     "LeaveCriticalSection": 4, "InitializeCriticalSection": 4, "DeleteCriticalSection": 4,
+    "CloseHandle": 4, "CreateDirectoryA": 4,
     "GetCurrentThreadId": 0, "GetProcessHeap": 0, "HeapAlloc": 12, "HeapFree": 12,
     "Sleep": 4, "GetModuleHandleA": 4, "GetProcAddress": 8, "lstrlenA": 4,
 }

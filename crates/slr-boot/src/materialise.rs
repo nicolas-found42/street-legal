@@ -94,6 +94,14 @@ fn materialise(container: u32, request: &str) -> Result<(), String> {
         let size = std::fs::metadata(&path)
             .map_err(|e| format!("sourcefile {source}: {e}"))?
             .len();
+        // The original opens and reads this source in the resource manager;
+        // the headless port only stats it. Publish that difference instead of
+        // pretending an original read happened.
+        slr_telemetry::file_io(
+            "materialise",
+            source,
+            serde_json::json!({"id": id, "type": type_id, "bytes": size, "read": false}),
+        );
         note.push_str(&format!(" sourcefile={source} bytes={size}"));
     } else {
         note.push_str(&format!(" descriptor={descriptor:?}"));

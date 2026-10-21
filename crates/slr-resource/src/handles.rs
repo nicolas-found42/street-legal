@@ -91,8 +91,19 @@ pub struct Action {
     /// Rate word (`+0x54`). `setCounter` zeroes it when it appends a node
     /// and leaves it untouched when it reuses one.
     pub rate: u32,
-    /// Domain extents (`+0x10/+0x14` of the `0x20`-byte domain object).
+    /// Domain extents (`+0x10/+0x14` of the `0x20`-byte domain object);
+    /// `+0x60` on counter (type `0xd`) nodes.
     pub domain: Option<Domain>,
+    /// First extent domain (`+0x58`, source nodes only — the same word the
+    /// counter nodes use for [`Action::counter`]; a node carries one or the
+    /// other depending on its type).
+    pub domain1: Option<Domain>,
+    /// Second domain (`+0x5c`, source nodes only): the velocity extents the
+    /// source setters build from their second `Vector3`/float pair.
+    pub domain2: Option<Domain>,
+    /// Bone id (`+0x60`, source nodes only): the `0x48bc40` lookup of the
+    /// bone-name argument, `0` when the argument was null.
+    pub bone: u32,
 }
 
 /// One `0x20`-byte domain object (vtable `0x5f113c`).
@@ -179,6 +190,28 @@ impl HandleTable {
     /// exe: LAB_0047eba0
     pub fn free(&mut self, id: u32) -> bool {
         self.entries.remove(&id).is_some()
+    }
+
+    /// Insert a handle under an explicit id (the runtime keys RenderRef and
+    /// ParticleSystem envelopes by the receiver's `ptr` word, which the exe
+    /// resolves through `FUN_0042ab50` instead of allocating). Replaces an
+    /// existing entry with the same id, like a re-`init` overwrites the
+    /// exe's particle object.
+    pub fn admit(&mut self, id: u32, kind: HandleKind, words: Vec<u32>) {
+        if id == 0 {
+            return;
+        }
+        self.entries.insert(
+            id,
+            HandleEntry {
+                kind,
+                words,
+                queue: Vec::new(),
+                actions: Vec::new(),
+                flags: 0,
+                freq_bits: 0,
+            },
+        );
     }
 }
 
@@ -381,6 +414,9 @@ pub fn psys_set_counter(table: &mut HandleTable, id: u32, label: String, domain:
             counter: 0,
             rate: 0,
             domain: Some(domain),
+            domain1: None,
+            domain2: None,
+            bone: 0,
         });
         return true;
     };
@@ -388,6 +424,61 @@ pub fn psys_set_counter(table: &mut HandleTable, id: u32, label: String, domain:
         return false;
     }
     e.actions[i].domain = Some(domain);
+    true
+}
+
+/// `ParticleSystem.setSource`/`setDirectSource` node link
+/// (`LAB_0047f660`/`LAB_0047f270` after their gate chain): walk the action
+/// list to the first node whose label matches (case-insensitive,
+/// `FUN_005d7190`) and, when its type equals `type_id`, replace its
+/// `+0x54` rate, `+0x58`/`+0x5c` domains and `+0x60` bone. A first match of
+/// another type aborts the call. With no label match a fresh node of
+/// `type_id` is appended carrying all four words.
+///
+/// exe: LAB_0047f270 (direct source, type `0xb`)
+/// exe: LAB_0047f660 (source, type `0xa`)
+#[allow(clippy::too_many_arguments)] // The original call site passes all eight.
+pub fn psys_link_source(
+    table: &mut HandleTable,
+    id: u32,
+    type_id: u32,
+    label: String,
+    rate: u32,
+    domain: Domain,
+    domain2: Domain,
+    bone: u32,
+) -> bool {
+    let Some(e) = table.get_mut(id) else {
+        return false;
+    };
+    if e.kind != HandleKind::ParticleSystem {
+        return false;
+    }
+    let matched = e
+        .actions
+        .iter()
+        .position(|a| a.label.eq_ignore_ascii_case(&label));
+    let Some(i) = matched else {
+        e.actions.push(Action {
+            type_id,
+            label,
+            counter: 0,
+            rate,
+            domain: None,
+            domain1: Some(domain),
+            domain2: Some(domain2),
+            bone,
+        });
+        return true;
+    };
+    if e.actions[i].type_id != type_id {
+        return false;
+    }
+    let node = &mut e.actions[i];
+    node.rate = rate;
+    node.domain1 = Some(domain);
+    node.domain2 = Some(domain2);
+    node.bone = bone;
     true
 }
 
@@ -811,6 +902,9 @@ mod tests {
             counter,
             rate,
             domain: None,
+            domain1: None,
+            domain2: None,
+            bone: 0,
         }
     }
 

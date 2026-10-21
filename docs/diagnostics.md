@@ -158,17 +158,206 @@ primitive/reference positions retain raw words for diagnosis and prevent full
 acceptance. Primitive resource IDs remain significant. Always read the recorded
 comparison policy before interpreting a match.
 
+## The run index
+
+Every bundle is summarized in one line of `<runs-root>/../runs-index.jsonl`:
+
+```sh
+python3 re/boot-diagnose.py list   --runs-root re/out/boot/runs
+python3 re/boot-diagnose.py query  --runs-root re/out/boot/runs --status failed
+python3 re/boot-diagnose.py query  --runs-root re/out/boot/runs --commit 6b63613 --limit 5
+python3 re/boot-diagnose.py status --runs-root re/out/boot/runs
+```
+
+A record carries the run ID and bundle path, start/finish, status and error,
+source commit and dirty flag, binary hash, the effective configuration, both
+comparisons with their first mismatching record, the correlated native call
+ID, whether the targeted rerun reproduced the first run, the artifact count and
+total bytes, and the flake summary for repeated runs. `status` additionally
+names the newest failure and every failure with no later completed run of the
+same commit.
+
+The index is append-only: pruning bundles leaves the history readable, so
+`list` still answers "what ran, and what happened" after the bytes are gone.
+Bundles that predate the index, or that a killed wrapper never registered, are
+added explicitly:
+
+```sh
+python3 re/boot-diagnose.py index --runs-root re/out/boot/runs
+python3 re/boot-diagnose.py index --runs-root re/out/boot/runs --rebuild
+```
+
+`index` skips bundles already recorded and is safe to rerun. A bundle whose
+wrapper manifest is missing because the process was killed is reconstructed
+from its crash-surviving `capture.json`/`capture-end.json`/`failure.json`, and
+the record is marked `reconstructed` — those runs are the ones most worth
+finding. Records without a recorded start fall back to the bundle directory's
+mtime, so `status` still means "newest" rather than "last appended".
+
+## Retention and disk
+
+Bundles are still local and explicit, but they are no longer unbounded:
+
+```sh
+python3 re/boot-diagnose.py prune --runs-root re/out/boot/runs --keep 20 --dry-run
+python3 re/boot-diagnose.py prune --runs-root re/out/boot/runs --keep 20
+# or prune automatically after a run:
+python3 re/boot-diagnose.py ORIGINAL --keep 20
+```
+
+`prune` deletes the oldest finished bundles beyond `--keep`; a bundle whose
+manifest still says `running` is never removed, because its writer may still
+be appending. The index is untouched.
+
+Inputs are content-addressed in `<runs-root>/../inputs-store/<sha256>`. Each
+bundle still holds a real file of its own bytes — verification hashes the
+bundle, so two bundles must never share a mutable inode — and on a filesystem
+with reflinks (APFS, btrfs, XFS) those files share blocks, costing no
+additional disk. The store entry is removed once no bundle references it.
+
+The headless projection of `stock/` is clone-linked the same way. Three
+successive 30-frame runs cost about 100 MiB in total rather than three copies
+of the 458 MiB install.
+
+## Repeated runs and flakiness
+
+```sh
+python3 re/boot-diagnose.py ORIGINAL --repeat 5
+```
+
+Each iteration gets its own bundle and index record. Every record carries a
+`flake` block with the iteration number, the failure count over the batch, the
+rate, and `nondeterministic` when some but not all iterations failed. The
+existing divergence rerun already proves whether a single failing case
+reproduces; `--repeat` turns that into a rate over identical invocations. The
+command exits nonzero if any iteration failed.
+
+## Filing the failure
+
+```sh
+python3 re/boot-diagnose.py ORIGINAL --file-issue dry-run   # print the gh command
+python3 re/boot-diagnose.py ORIGINAL --file-issue            # create the issue
+```
+
+On a failure, the runner builds the issue from the index record it just wrote:
+status, error, commit and dirty flag, binary hash, the first mismatch with its
+comparison label and one-based record number, the correlated native call ID,
+and the two commands that reproduce it (`--replay-from`) and re-check the
+frontier (`--check-regression`). It is labelled `needs-triage`, per
+`docs/agents/issue-tracker.md`. `dry-run` records the exact argv under
+`report.json`'s `issue_command` instead of calling `gh`, so the command can be
+inspected and reviewed before anything is published. A failure to reach `gh`
+becomes `report.issue`; it never changes the run's own exit status.
+
+## Wall clock and the environment
+
+The timeline is execution ordering, never duration, unless wall time is asked
+for:
+
+```sh
+python3 re/boot-diagnose.py ORIGINAL --wall-clock
+```
+
+`--wall-clock` adds `wall_ns` (monotonic, nanoseconds since process start) to
+every `events.jsonl` line and to divergence artifacts. It is off by default
+because it is the one field that legitimately differs between identical runs;
+comparison never reads it.
+
+Every bundle also carries `environment.json` inside `runtime/` and an
+`environment` block in the manifest: OS, release, machine, Python, `rustc`,
+`cargo`, `wine` (when present), CPU count, and the diagnostic `SLR_*`/`RUST_*`
+environment variables the child saw. Unrelated variables — credentials included
+— are never recorded.
+
+## The interactive frontend
+
+The macroquad frontend has the same streams behind an explicit flag:
+
+```sh
+cargo run -p slr-game -- --diagnostics re/out/frontend/runs/session-1
+cargo run -p slr-game -- --autotest --diagnostics re/out/frontend/runs/autotest-1
+```
+
+* `events.jsonl` — screen changes, new game, save, load, test drive, event
+  start, session finish, every checkpoint, and the autotest verdict.
+* `states.jsonl` — the player-visible state at each checkpoint: money, day,
+  reputation, car condition, and for a driving session the race phase, elapsed
+  time, and every racer's position, velocity, gear, RPM, lap, progress, finish
+  time and penalty, as exact `f32` bit patterns.
+* `file-io.jsonl` — the save and load operations, with the resulting byte count
+  and the state that was written.
+* `manifest.json` — written from the first frame (`"status":"running"`) and
+  rewritten atomically on exit, so a killed session is still discoverable and
+  its file identities are still recorded. It carries the same
+  `schema_version`/`run_id`/`started`/`finished`/`status`/`configuration`/
+  `artifacts` fields the boot runner writes, plus `final`, the closing
+  checkpoint. `embedding` is `slr-game`, which is how the archive tools tell it
+  from a boot bundle.
+* `autotest.json` — the pass/fail lists, written when `--autotest` finishes.
+* `crash.json` — written by the panic hook, naming the panic and the last
+  checkpoint. A fatal signal (`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`,
+  `SIGFPE`) writes a minimal `{"reason":"signal","signal":N}` marker from an
+  async-signal-safe handler before re-raising, so an abort mid-frame is
+  distinguishable from a clean exit.
+
+`--diagnostics-interval N` sets the checkpoint period in frames (default 30;
+`0` checkpoints only on transitions). The directory must be empty or absent: a
+diagnostic run never overwrites evidence.
+
+A frontend bundle indexes, lists, queries and prunes through the same tools as
+a boot bundle:
+
+```sh
+python3 re/boot-diagnose.py index  --runs-root re/out/frontend/runs
+python3 re/boot-diagnose.py list   --runs-root re/out/frontend/runs
+python3 re/boot-diagnose.py status --runs-root re/out/frontend/runs
+python3 re/boot-diagnose.py analyze re/out/frontend/runs/session-1
+```
+
+Its `comparisons` are `null`, not `false`: there is no original-side native
+stream to match, so a frontend session neither passes nor fails parity.
+
+## Original-side evidence
+
+The original's own file layer and its `diag.log` are now captured with oracle
+runs rather than reconstructed:
+
+* `observed/script-files.slrlog` — the original's `CreateFileA`/`ReadFile`/
+  `WriteFile`/`CloseHandle`/`FindFirstFileA` operations, as `file` records in the
+  existing format. They are deliberately a separate stream from
+  `script-natives*.slrlog`, so a native-record comparison never meets a
+  platform record.
+* `observed/files/` — the bytes the original wrote, by repository-relative path,
+  with sizes and hashes in the result's `observed_files` block.
+* `observed/original-diag.log` — the original's `diag.log`, copied for
+  convenience. It is the exe's own output: the log sink at `0x5513b0` reaches
+  `0x5585e0`, which appends through the intercepted file layer.
+
 ## Verification and limits
 
 ```sh
 python3 -m unittest discover -s re -p test_boot_diagnose.py -v
 cargo test -p slr-boot --test diagnostic_capture
+cargo test -p slr-telemetry
 cargo test -p slr-vm diagnostics
+python3 -m unittest discover -s re/headless -p test_boot_native.py -v   # needs the licensed install
 ```
 
-These exercise immutable outputs, crash survival, causal snapshots, exact-word
-preservation, replay provenance and false-acceptance rejection. The stock-menu
-integration test also uses a unique output directory. Diagnostics do not turn
-uncaptured historical runs into recoverable history, provide full memory
-rewind, establish real-device fidelity, or establish boot parity without the
-complete oracle comparison.
+These exercise immutable outputs, crash survival (including a real fatal
+signal raised in a child process), causal snapshots, exact-word preservation,
+replay provenance, false-acceptance rejection, the index, pruning, content
+sharing, repeated-run flake accounting, wall-clock isolation and the frontend
+manifest. The stock-menu integration test also uses a unique output directory.
+
+`.github/workflows/diagnostics.yml` runs formatting, linting, the workspace
+tests, the runner's own suite and an archive smoke test on every push. Suites
+that need the licensed install or the original executable print an explicit
+`SKIP:` line and pass when that data is absent, which is what CI sees; the job
+therefore proves the code builds and its data-free tests pass, never that stock
+parity holds. Parity runs stay on the developer machine, where the data exists.
+
+Diagnostics do not turn uncaptured historical runs into recoverable history,
+provide full memory rewind, establish real-device fidelity, or establish boot
+parity without the complete oracle comparison. The frontend does not run the
+original VM, so its native call log stays an empty valid header; its value is
+the gameplay state history and the crash record, not script parity.

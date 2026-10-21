@@ -16,6 +16,11 @@ struct State {
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
+/// Script object held by original native Config anchor63643c.
+pub fn config_script() -> Option<u32> {
+    STATE.with(|state| state.borrow().roots.map(|roots| roots[0]))
+}
+
 /// Configure the script words retained through Config (63643c) and GameInit
 /// (63642c). The middle native anchor63646c is a separate unresolved input.
 pub fn configure_roots(

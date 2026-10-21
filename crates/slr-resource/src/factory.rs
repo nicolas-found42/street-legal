@@ -40,6 +40,8 @@ pub struct Template {
     /// Engine-native class named by a `native <name>` descriptor line. The
     /// headless runtime creates no engine object for it (see `NATIVE_CLASSES`).
     pub native_class: Option<String>,
+    /// Optional configuration filename supplied to the native constructor.
+    pub native_config: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Instance {
@@ -173,6 +175,7 @@ impl Factory {
             words: [1.0f32.to_bits(), 0],
             compiled_constructor: false,
             native_class: None,
+            native_config: None,
         };
         self.templates.insert(id, template.clone());
         Ok(Some(template))
@@ -220,6 +223,7 @@ impl Factory {
             words: data.words,
             compiled_constructor: false,
             native_class: data.native.clone(),
+            native_config: data.native_config.clone(),
         };
         self.templates.insert(id, t.clone());
         Ok(t)
@@ -260,6 +264,39 @@ impl Factory {
         name: &str,
         allocate: &mut impl FnMut() -> u32,
     ) -> Result<Option<Instance>, String> {
+        self.create_instance_identity(root, request, script, name, allocate, false)
+    }
+
+    /// Allocate the resource identity for a configured instance before its
+    /// native constructor runs. The embedding host must execute the actual
+    /// constructor and must not report successful creation on a boundary.
+    pub fn allocate_configured_instance(
+        &mut self,
+        root: Root,
+        request: u32,
+        script: u32,
+        name: &str,
+        allocate: &mut impl FnMut() -> u32,
+    ) -> Result<Option<Instance>, String> {
+        if self
+            .templates
+            .get(&request)
+            .is_none_or(|template| template.native_config.is_none())
+        {
+            return Err("configured identity allocation requires a configured template".into());
+        }
+        self.create_instance_identity(root, request, script, name, allocate, true)
+    }
+
+    fn create_instance_identity(
+        &mut self,
+        root: Root,
+        request: u32,
+        script: u32,
+        name: &str,
+        allocate: &mut impl FnMut() -> u32,
+        configured: bool,
+    ) -> Result<Option<Instance>, String> {
         if request == 0 {
             return Ok(None);
         }
@@ -268,6 +305,9 @@ impl Factory {
         })?;
         if template.compiled_constructor {
             return Err("compiled GameType constructor is not installed".into());
+        }
+        if template.native_config.is_some() && !configured {
+            return Err("configured native GameType constructor is not installed".into());
         }
         // A loaded type1 parent is inherited from without any load work
         // (`piVar1[0x19] & 1` set skips the parent load calls); the two range
@@ -359,6 +399,7 @@ pub struct ScriptData {
     pub class: Option<ClassId>,
     pub words: [u32; 2],
     pub native: Option<String>,
+    pub native_config: Option<String>,
 }
 impl Default for ScriptData {
     fn default() -> Self {
@@ -366,6 +407,7 @@ impl Default for ScriptData {
             class: None,
             words: [1f32.to_bits(), 0],
             native: None,
+            native_config: None,
         }
     }
 }
@@ -388,9 +430,28 @@ impl ScriptData {
             let mut words = line.split_whitespace();
             match (words.next(), words.next(), words.next()) {
                 (Some("script"), Some(name), None) => self.class = request(name)?,
-                (Some("lod_amp"), Some("1.000"), None) => self.words[0] = 1f32.to_bits(),
-                (Some("native"), Some(name), None) if NATIVE_CLASSES.contains(&name) => {
+                (Some(key), _, _) if key.eq_ignore_ascii_case("lod_amp") => {
+                    //5461a0 scans directly into payload+18. Failed conversions
+                    //retain the inherited value; trailing text is not checked.
+                    if let Some(value) = slr_fmt_cfg::scan::sscanf(
+                        line.as_bytes(),
+                        b"%*s %f",
+                        slr_fmt_cfg::Precision::F32,
+                    )
+                    .f(0)
+                    {
+                        self.words[0] = value.to_bits();
+                    }
+                }
+                //Type8 has no lod_bias branch:5461a0 ignores this key, unlike
+                //the render/camera resource parsers that recognize it.
+                (Some(key), _, _) if key.eq_ignore_ascii_case("lod_bias") => {}
+                (Some("native"), Some(name), config) if NATIVE_CLASSES.contains(&name) => {
+                    if words.next().is_some() {
+                        return Err(format!("unsupported native descriptor tail {line:?}"));
+                    }
                     self.native = Some(name.to_owned());
+                    self.native_config = config.map(str::to_owned);
                 }
                 _ => return Err(format!("unsupported type8 descriptor line {line:?}")),
             }

@@ -67,7 +67,7 @@ def op_to_f80_bytes(o: dict) -> bytes:
     if isinstance(o.get("exp"), str):
         k = o["exp"]
         if k == "zero":
-            return struct.pack("<Q", 0) + struct.pack("<H", 0) + b"\x00" * 6
+            return struct.pack("<Q", 0) + struct.pack("<H", sign << 15) + b"\x00" * 6
         if k == "inf":
             return struct.pack("<Q", 0x8000000000000000) + struct.pack("<H", 0x7FFF | (sign << 15)) + b"\x00" * 6
         # nan
