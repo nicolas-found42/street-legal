@@ -81,9 +81,13 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 fn collect_suites() -> Vec<Suite> {
     vec![
         ("slr-boot", "bin:slr-boot", vec![
+            ("native_query::tests::instance_routing_and_registration_match_original_mutating_graphs", vec!["FUN_00426470"]),
             ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
             ("native_car_update::tests::original_active_update_matches_complete_memory_and_call_order", vec!["FUN_00448430", "FUN_0043c520", "FUN_004707d0", "FUN_004479d0"]),
             ("native_car_update::tests::original_suspended_update_completes_with_all_memory_words_equal", vec!["FUN_00448430", "FUN_004479d0"]),
+        ]),
+        ("slr-resource", "create_link_oracle", vec![
+            ("original_creation_wrappers_rebind_to_created_resource_with_live_neighbors", vec!["LAB_0047d7b0", "LAB_0047d900"]),
         ]),
         ("slr-vm", "initializers", vec![("initializer_constructor_original_rows",vec!["FUN_00403e80","FUN_00407da0","FUN_00408a30","FUN_0041fbc0"])]),
         ("slr-resource", "factory", vec![
@@ -991,7 +995,11 @@ fn collect(root: &std::path::Path) {
             });
             // Suites whose target consumes Unicorn oracle vectors (rather
             // than the stock corpus) record the `unicorn` oracle.
-            let oracle = if target == "bin:slr-boot" {
+            let oracle = if target == "create_link_oracle"
+                || target == "bin:slr-boot" && name.starts_with("native_query::")
+            {
+                "unicorn controlled resource/script/native collaborators"
+            } else if target == "bin:slr-boot" {
                 "unicorn controlled collaborators; finite dyadic arithmetic"
             } else if target == "particle_exceptions" {
                 "unicorn intentional-divergence"

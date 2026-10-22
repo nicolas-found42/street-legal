@@ -372,12 +372,12 @@
       "kind": "gate",
       "title": "VM and natives (B): per-opcode/helper/native differential evidence, all 353 natives implemented and registered by original address, complete boot native-log equality",
       "status": "partial",
-      "note": "All 353 original natives and complete boot equality remain unaccepted. Chassis.forceUpdate now executes the complete active parameter projection, part fold, wheel links and rebuild; controlled original vectors pass without tolerance. Strict replay still stops at a later prime.updatevariables/Dummy.getInfo thread mismatch in frame31; native equality diverges at filtered616/unfiltered905. Historical 245/113 audit counts registry keys, not completed originals.",
+      "note": "All 353 originals and complete boot equality remain unaccepted. Created-envelope query routing and creation-wrapper resource binding now have 340 mutating graph cases and 24 wrapper cases. Generic post-create owner notification is removed; native part/car command/installation dispatch remains unfinished. Strict replay fails in frame31; native equality differs at filtered620/unfiltered909. Historical audit counts registry keys, not completed originals.",
       "evidence": [
         "docs/acceptance-inventory.md",
-        "re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d",
-        "re/out/checkpoints/20261021-car-update-active/workspace-tests.txt",
-        "re/out/checkpoints/20261021-car-update-active/receipt.json"
+        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f",
+        "re/out/checkpoints/20261021-instance-routing/workspace-tests.txt",
+        "re/out/checkpoints/20261021-instance-routing/receipt.json"
       ]
     },
     {
@@ -459,10 +459,10 @@
       "kind": "supporting",
       "title": "Boot milestone (P01 intermediate): completed MainMenu + >=300 idle frames, filtered native log equal to the 6,508-record endpoint",
       "status": "open",
-      "note": "The 448562 projection bailout is removed and the unchanged 600-frame menu smoke passes. Strict replay completes that update then stops later in frame31: expected prime.updatevariables, got Dummy.getInfo. Native equality still differs at filtered616/unfiltered905; S1 remains open.",
+      "note": "Unchanged 600-frame menu smoke passes. Strict replay still fails in frame31: expected Dummy.getInfo, got Part instance field initialization. Native logs first differ at filtered620/unfiltered909, expected getScriptInstance versus queueEvent from GameRef.command. Complete equality and the strict boot endpoint remain unaccepted.",
       "evidence": [
-        "re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d",
-        "re/out/checkpoints/20261021-car-update-active/workspace-tests.txt",
+        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f",
+        "re/out/checkpoints/20261021-instance-routing/workspace-tests.txt",
         "re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog"
       ]
     },
@@ -543,12 +543,12 @@
       "status": "passed",
       "evidence": [
         "docs/fidelity.md",
-        "re/out/checkpoints/20261021-car-update-active/receipt.json",
-        "re/out/checkpoints/20261021-car-update-active/test-results.json",
-        "re/out/checkpoints/20261021-car-update-active/ledger-regen.txt",
-        "re/out/checkpoints/20261021-car-update-active/source.patch"
+        "re/out/checkpoints/20261021-instance-routing/receipt.json",
+        "re/out/checkpoints/20261021-instance-routing/test-results.json",
+        "re/out/checkpoints/20261021-instance-routing/ledger-regen.txt",
+        "re/out/checkpoints/20261021-instance-routing/source.patch"
       ],
-      "note": "Fresh collection: 483/483 evidence rows; 503 annotated symbols regenerated idempotently from the current tree. Workspace tests (1,103) and Clippy pass. Controlled car-update collaborators and finite float coverage are explicitly named; other obligations remain unaccepted."
+      "note": "Fresh collection: 486/486 evidence rows; 504 annotated symbols regenerated idempotently from the current tree. Workspace tests (1,106) and Clippy pass. Controlled routing/wrapper evidence names supplied collaborators and raw callback-list/native-handler limitations; whole-game obligations remain unaccepted."
     },
     {
       "id": "S12",

@@ -9,69 +9,78 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 Last updated: 2026-10-21, branch `exact-port`.
 
-`./acceptance/run.sh` reports **54 obligations: 42 open, 11 partial, 1 passed**.
-Only **S11** moved from open to passed: the ledger now joins 503 annotated
-symbols to 483 freshly collected passing evidence rows, and regeneration is
-idempotent. No feature, complete-native, physics or strict-boot acceptance is
-claimed. Receipt: `re/out/checkpoints/20261021-car-update-active/receipt.json`.
+`./acceptance/run.sh` still exits **1**: **54 obligations: 42 open, 11 partial,
+1 passed**. No obligation moved in this checkpoint. S11's evidence is refreshed
+for the current tree; no feature, complete-native or strict-boot pass is claimed.
+Checkpoint receipts: `re/out/checkpoints/20261021-instance-routing/`.
 
-**Changed:** `native_car_update.rs` executes the active `448562..448ced`
-projection after the real synchronous `updatevariables` callback, then 4479d0.
-The complete suffix preserves the pre-fold torque-source read, clears the
-intrusive chassis reference, folds every handled 43c520 part kind, constructs
-forward/reverse torque curves (including missing/empty/reused cases), projects
-typed VM engine/gearing/drag/nitro fields, binds the three sounds, clamps the
-nitro level, and updates wheel resource links through 4707d0 slot lookup.
-The 43e320 wrapper now resolves both resource accesses with their original
-flags before calling the update. Loaded type 8 template access uses the
-original zero quality-sensitivity entry at 619dc0. No new boundary bailout or
-oracle-output runtime lookup was introduced.
+**Changed:** `native_query.rs` ports all routing branches of 426470 over live
+resource, envelope and callback collaborators. It preserves type1/type8 flags,
+null/load guards, the non-game-kind message return, and the post-access body
+reread. The 427210 query phase obtains all three answers before publishing any
+host callback registration, with fresh state between calls. Created car/part
+bodies take native dispatch; a script-only created envelope queries its own
+script. The speculative owner-script/single-query shortcut and generic
+post-construction owner/child `addpart` scan are removed. Original53a5e0 has
+no such scan: native installation/notification handlers must own those calls.
+Config/GameInit now retain their actual template references, including release
+on destruction. The original47d7b0/47d900 wrapper's returned-resource binding
+replaces the incorrect owner-container binding in `ResHost::create`.
 
-**Verified:** 48 complete active original runs match every captured memory
-word and field/sound/callback order; nine wrapper cases match guards, flags
-and callee targets. The prior four prefix and 24 suspended/absent-script cases
-still pass. VM/resource/clone/sound collaborators are declared in each probe;
-finite dyadic cases do not prove arbitrary PC-sensitive float or whole physics
-parity. `run_vectors.py gen --suite car-update-active -n 48`
-and `verify re/out/oracle/car_update_active.jsonl` reproduce all 48 rows.
-Original-derived vectors remain ignored and are never runtime inputs.
+**Verified:** 340 controlled original426470/427210 graph cases cover kind,
+body, script, secondary, binding and load guards, all eight registration masks,
+and script/access callbacks changing bodies, script slots or references.
+`run_vectors.py gen --suite instance-query` writes the complete grid;
+`verify re/out/oracle/instance_query.jsonl` reproduces all 340 byte-identically.
+The Rust router matches callback order, arguments and query results; registration
+answers match the original's actual callback lists. Raw 427210 list layout and
+all native class handlers remain outside the Vec queue projection's proof.
+24 original creation-wrapper executions verify success/failure, default owners,
+unbound/same/different resource handles and neighboring weak links. Run
+`re/oracle/game_ref_create_link_probe.py` to regenerate those ignored rows.
+These probes supply resource/script/native collaborators; they do not execute
+stock script bodies, complete loaders, original startup or physical devices.
+No float tolerance, oracle-result runtime table or new boundary bailout was added.
 
-**Integration:** the unchanged 600-frame menu smoke passes again. Full
-workspace: 1,103 tests passed; scoped and workspace Clippy with `-D warnings`
-and formatting pass. Ledger collection 483/483; regeneration 503 symbols,
-byte-identical on repetition. Complete outputs and source patch are retained
-in `re/out/checkpoints/20261021-car-update-active/`.
-The untruncated Jev gate verifies all four bounded factual claims, with zero
-contradictions/unsupported claims. Its code review remains escalated
-(`safe_to_apply=0.35`, test-gap/blast-radius uncertainty); this is retained
-as a review limitation, not complete-native acceptance. The earlier truncated
-review is retained separately and superseded for factual verification.
+**Integration:** the unchanged 600-frame menu smoke passes. Full workspace:
+1,106 tests passed, 0 failed, 0 ignored; workspace Clippy with `-D warnings`,
+formatting and diff checks pass. Ledger: 486/486 collected evidence rows and
+504 annotated symbols. The lifecycle test covers bootstrap template-link release.
+The prior chassis update implementation and its controlled vectors remain intact.
+The untruncated Jev gate verifies all four bounded factual claims with zero
+contradictions or unsupported claims. Code review remains escalated
+(`safe_to_apply=0.30`, test-gap/blast-radius uncertainty); this is preserved
+as a review limitation. The earlier truncated gate is retained and superseded
+for factual verification. See the checkpoint's `jev-gate-bounded.json`.
 
-**Strict replay remains failed:**
-`re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d` reaches beyond the former
-448562 stop, then rejects a later frame31 callback: expected
-`THRD-RUNVMI prime.updatevariables`, got `THRD-RUNVMI Dummy.getInfo`.
-Filtered native equality still fails at 616 (4,629 port / 6,508 original records);
-unfiltered at 905 (6,737/9,209). The first expected `GameRef.create` is still
-replaced by `getScriptInstance`. No clock/result normalization changed. S1,
-G3 and P01 remain unaccepted.
+**Strict replay remains failed:** latest bundle
+`re/out/boot/runs/20261022T012004.962508Z-73eab267649f`.
+Frame 31 expects `THRD-RUNVMI Dummy.getInfo`, but reaches
+`THRD-INSTVAR-INI java.game.parts.Part` instead. First native mismatch is
+filtered 620/unfiltered 909: expected `GameRef.getScriptInstance`, got
+`GameRef.queueEvent` from `GameRef.command`, line 83/node 6.
+Counts: 4,399/6,508 filtered; 6,507/9,209 unfiltered. This is failed replay
+evidence, not complete boot equality; S1/G3/P01 remain unaccepted. Earlier
+failed attempts are preserved in their own diagnostic bundles.
 
-**Next target:** close the creation/notification/query subsystem as one port:
-426470,427210,425a90,53a2a0/53a5e0 and their native vtable dispatch. Current
-`engine::register_created` still contains speculative owner-script/single-query
-routing. Replace that logic with actual created-envelope kind/body/secondary/
-script dispatch, tested across complete original controlled graphs. Do not
-change the clock matcher or infer acceptance from the non-replay smoke.
-Existing local pseudocode, instruction oracle and instance-query probes are
-available; no startup recapture is needed before code changes.
+**Next target:** complete the native command/installation/owner-notification
+subsystem as one graph: 4265c0 -> part vtable 5f0f60+38 =475ec0 and car
+vtable 5f0f18+38 =458c00, including 447b30 and their slot/attachment collaborators.
+`engine::dispatch` currently handles native player commands only; part/car
+commands still fall through to the script projection. Port the actual handler
+graph and place owner `addpart` callbacks at its native call sites. Do not restore
+the removed post-create owner scan or add an ordinal-specific callback. The
+player creation query still uses its existing host projection; native handler
+coverage, raw callback lists, creation post-finalization and unified native
+architecture remain unfinished. The historical 245/113 audit is not a count of
+completed originals.
 
 Reproduce strict integration with:
 
     python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 600 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl
 
-The historical 245/113 native audit counts 358 registry keys, not 353 completed
-originals. A fresh per-address completeness audit is still needed. Remaining
-milestones follow the whole-game contract; no absent scenario is passed.
+The whole-game contract remains unchanged. Continue the remaining 54-row
+campaign from this source state; do not promote absent end-to-end scenarios.
 
 
 ## History

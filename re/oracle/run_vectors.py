@@ -149,7 +149,18 @@ def cmd_gen(ns) -> int:
     oracle = Oracle(ns.exe, fpu_cw=ns.cw)
     date = _today()
     ucver = unicorn.__version__
-    if ns.suite == "car-update-active":
+    if ns.suite == "instance-query":
+        from instance_query_vectors import run, inputs
+        path = os.path.join(OUT_DIR, "instance_query.jsonl")
+        count = max(ns.n, len(inputs()))
+        with open(path, "w") as f:
+            for i in range(count):
+                result = run(i, exe=ns.exe, cw=ns.cw)
+                f.write(json.dumps(dict(id=i, exe_addr="0x426470/0x427210", name="instance_query",
+                    args=dict(case=i), cw=hex(ns.cw), oracle="unicorn", unicorn=ucver,
+                    date=date, result=result), sort_keys=True) + "\n")
+        print(f"wrote {count} rows -> {path}")
+    elif ns.suite == "car-update-active":
         from car_update_active_probe import run
         path = os.path.join(OUT_DIR, "car_update_active.jsonl")
         with open(path, "w") as f:
@@ -193,6 +204,11 @@ def cmd_gen(ns) -> int:
 
 def _decode_and_run(oracle: Oracle, row: dict) -> dict:
     """Re-run one vector row from its encoded inputs (no access to stored result)."""
+    if row["name"] == "instance_query":
+        from instance_query_vectors import run
+        if oracle.fpu_cw != int(row["cw"], 0):
+            raise ValueError("control word differs from recorded instance query vector")
+        return run(row["args"]["case"], exe=oracle.exe, cw=oracle.fpu_cw)
     if row["name"] == "car_update_active":
         from car_update_active_probe import run
         if oracle.fpu_cw != int(row["cw"], 0):
@@ -231,7 +247,7 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gen", help="generate + run vectors")
-    g.add_argument("--suite", required=True, choices=["leaf-float", "int-smoke", "car-update-active"])
+    g.add_argument("--suite", required=True, choices=["leaf-float", "int-smoke", "car-update-active", "instance-query"])
     g.add_argument("-n", type=int, default=64)
     g.add_argument("--cw", type=lambda s: int(s, 0), default=CW_D3D9)
     g.add_argument("--exe", default=DEFAULT_EXE)

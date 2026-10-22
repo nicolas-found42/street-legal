@@ -1510,25 +1510,15 @@ impl ResHost {
         let container = self
             .created_result
             .expect("resource-manager creation result must be supplied");
-        // 0x47d7b0 -> 0x536890(owner, ...) -> 0x536a10, whose first formal is the
-        // parent: the created node joins the OWNER's container, not the container
-        // 53a5e0 just allocated. Measured in re/oracle/boot_bridge_probe.py: over a
-        // whole 53a5e0 call there is not one write inside the created container's
-        // +0x10..+0x18, so the new container never receives the node. That is what
-        // makes getParentID report the owner container for one wrapper (-65419)
-        // and the resource that owns the next one (-65426) in the original log,
-        // while binding everything to the fresh container gives -65419 for all
-        // 116 calls and makes Part.addPart:714's `!=` false, skipping the 112
-        // setTexture applications.
-        let owner_container = self.nodes.get(&first_node).map_or(0, |n| n.container);
-        if container != 0 {
-            if owner_container != 0 && self.nodes[&node].container != owner_container {
-                self.unlink(node);
-                self.insert_head(owner_container, node);
-            }
-            self.nodes.get_mut(&node).unwrap().id = self.containers[&container].id;
-        } else {
+        //47d829..47d887 binds the receiver's weak handle to the resource
+        //returned by the constructor. The owner is only a constructor input;
+        //it does not replace the newly created resource in this handle.
+        if self.nodes[&node].container != container {
             self.unlink(node);
+            if container != 0 {
+                self.insert_head(container, node);
+                self.nodes.get_mut(&node).unwrap().id = self.containers[&container].id;
+            }
         }
         if addr == CREATE_NATIVE || container == 0 {
             return 0;

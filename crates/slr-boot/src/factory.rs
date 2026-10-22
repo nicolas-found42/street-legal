@@ -22,6 +22,7 @@ struct World {
     resources: Vec<RuntimeResource>,
     identity_history: Vec<(u32, i32, u32, u32)>,
     attached_names: HashMap<u32, String>,
+    attached_templates: HashMap<u32, u32>,
     template_names: HashMap<u32, String>,
     unload_queue: VecDeque<u32>,
     destroy_queue: VecDeque<u32>,
@@ -108,6 +109,7 @@ pub fn configure(config: Option<u32>, init: Option<u32>) {
             resources: vec![],
             identity_history: vec![],
             attached_names: HashMap::new(),
+            attached_templates: HashMap::new(),
             template_names: HashMap::new(),
             unload_queue: VecDeque::new(),
             destroy_queue: VecDeque::new(),
@@ -256,6 +258,9 @@ pub fn instance_template_container(container: u32) -> Option<u32> {
     WORLD.with(|world| {
         let world = world.borrow();
         let w = world.as_ref()?;
+        if let Some(link) = w.attached_templates.get(&container) {
+            return node::with_res(|h| h.node(*link).map(|n| n.container));
+        }
         let instance = w
             .factory
             .instances
@@ -806,6 +811,7 @@ pub fn destroy_resource(container: u32) -> Result<(), String> {
                     .filter(|entry| entry.container == container)
                     .map(|entry| entry.template_link),
             )
+            .chain(world.attached_templates.remove(&container))
             .collect::<Vec<_>>();
         for link in links {
             host.release_embedded_link(link);
@@ -905,6 +911,17 @@ pub fn attach_created(link: node::ScriptLink, template: u32) -> Result<(), Strin
         let parent = w.game.container.ok_or("game root missing")?;
         node::with_res(|h| h.append_child(parent, link.container))?;
         w.attached_names.insert(link.container, name);
+        let retained = node::with_res(|h| {
+            let container = h.container_for_id(template).unwrap_or_else(|| {
+                let container = h.add_container(Container::new(8, template));
+                h.bind_id(template, container);
+                container
+            });
+            h.add_bound_node(template, container)
+        });
+        if let Some(old) = w.attached_templates.insert(link.container, retained) {
+            node::with_res(|h| h.release_embedded_link(old));
+        }
         Ok(())
     })
 }
@@ -967,99 +984,6 @@ fn request_script(vm: &mut VmHost, name: &str) -> Result<Option<slr_vm::vmclass:
     vm.loader
         .request(name)
         .map_err(|e| format!("template script {name}: {e:?}"))
-}
-
-/// The engine's post-construction owner notification. On the scripted branch
-/// `53a5e0` runs `owner.addpart(created)` through the callback wrapper before
-/// `0x427210` registers the instance; the owner is the script executing the
-/// `GameRef.create` call, not the created instance.
-fn notify_created_owner(
-    vm: &mut VmHost,
-    created: u32,
-    owner_container: Option<(u32, u32)>,
-) -> Result<(), String> {
-    let Some((owner, _)) = owner_container else {
-        return Ok(());
-    };
-    let candidates = node::with_res(|h| {
-        let mut found = Vec::new();
-        for container in std::iter::once(owner).chain(h.child_containers(owner)) {
-            let Some(c) = h.container(container) else {
-                continue;
-            };
-            if let Some(script) = c.instance.as_ref().map(|i| i.script) {
-                if script != 0 && script != created {
-                    found.push((container, script));
-                }
-            }
-        }
-        found
-    });
-    for (container, script) in candidates {
-        let Some(class) = object_class(vm, script) else {
-            continue;
-        };
-        if !class_has_method(&vm.loader, class, "addpart") {
-            continue;
-        }
-        let name = runtime_name(container).unwrap_or_default();
-        let (arg_node, ty) = node::with_res(|h| {
-            let n = h.object_node(created);
-            let ty = h
-                .node(n)
-                .and_then(|entry| h.container(entry.container))
-                .map_or(1, |c| c.type_id);
-            (n, ty)
-        });
-        let wrapper = node::wrap_node(vm, arg_node, ty as u32);
-        crate::sched::run_callback(
-            vm,
-            &name,
-            class,
-            script,
-            "addpart",
-            &[Value::reference_named(
-                wrapper,
-                "Ljava.util.resource.GameRef;",
-            )],
-            false,
-        )
-        .map_err(|(thread, error)| {
-            crate::script_stop(vm, &thread, "create owner notification", error)
-        })?;
-        return Ok(());
-    }
-    Ok(())
-}
-
-fn class_has_method(
-    loader: &slr_vm::vmclass::Loader,
-    mut class: slr_vm::vmclass::ClassId,
-    name: &str,
-) -> bool {
-    for _ in 0..64 {
-        let Some(entry) = loader.find_by_id(class) else {
-            return false;
-        };
-        if entry.methods.iter().any(|method| method.name == name) {
-            return true;
-        }
-        let Some(base) = entry.base.as_deref() else {
-            return false;
-        };
-        let Some(next) = loader.lookup(base) else {
-            return false;
-        };
-        class = next;
-    }
-    false
-}
-
-fn object_class(vm: &VmHost, word: u32) -> Option<slr_vm::vmclass::ClassId> {
-    match vm.objects.get(word.checked_sub(0x1000)? as usize)?.class {
-        ClassRef::Loaded(id) => Some(id),
-        ClassRef::Array(_) => None,
-    }
 }
 
 fn ref_container(word: u32) -> Option<(u32, u32)> {
@@ -1136,9 +1060,8 @@ fn game_ref_create_inner(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), Str
         .map_err(|(thread, e)| {
             crate::script_stop(vm, &thread, "created instance constructor", e)
         })?;
-        notify_created_owner(vm, script, owner_container)?;
-        crate::engine::register_created(vm, created.container, script)?;
     }
+    crate::engine::register_created(vm, created.container, script)?;
     println!(
         "BOOT created instance template={template_id:#010x} id={:#010x} script={script:#x} native_only={native_only}",
         created.id
@@ -1321,6 +1244,30 @@ mod tests {
             name: "lifecycle-test",
         })
         .unwrap()
+    }
+
+    #[test]
+    fn attached_bootstrap_template_link_is_released_on_destroy() {
+        configure(None, None);
+        let template = runtime(8, None, None);
+        let instance = runtime(1, None, None);
+        let retained = node::with_res(|h| {
+            let id = h.container(template).unwrap().id;
+            h.add_bound_node(id, template)
+        });
+        WORLD.with(|w| {
+            w.borrow_mut()
+                .as_mut()
+                .unwrap()
+                .attached_templates
+                .insert(instance, retained);
+        });
+        destroy_resource(instance).unwrap();
+        node::with_res(|h| {
+            assert!(h.node(retained).is_none());
+            assert_eq!(h.container(template).unwrap().head, 0);
+        });
+        assert_eq!(instance_template_container(instance), None);
     }
 
     #[test]

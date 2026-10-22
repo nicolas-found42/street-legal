@@ -22,6 +22,7 @@ mod native_mesh_resource;
 mod native_message;
 mod native_part;
 mod native_postparse;
+mod native_query;
 mod native_render_lod;
 mod native_render_resource;
 mod native_render_type;

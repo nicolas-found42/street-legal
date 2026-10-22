@@ -398,6 +398,14 @@ impl native_resource_load::AccessHost for AccessAdapter {
             })
     }
 }
+/// Original resource virtual minimum and get-data operations, also used by
+/// message routing's explicit prepare/get-data pair.
+pub fn minimum(m: &mut Space, raw: u32) -> Result<(), String> {
+    native_resource_load::AccessHost::set_minimum(&mut AccessAdapter, m, raw, 1f32.to_bits())
+}
+pub fn data(m: &mut Space, raw: u32) -> Result<u32, String> {
+    native_resource_load::AccessHost::payload(&mut AccessAdapter, m, raw, 1f32.to_bits())
+}
 /// Real419860 access for descriptor-backed render resources. Returning zero
 /// means a queued or failed resource, never a fabricated loaded payload.
 pub fn access(m: &mut Space, raw: u32, args: native_resource_load::Access) -> Result<u32, String> {

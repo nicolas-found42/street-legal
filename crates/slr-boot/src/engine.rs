@@ -504,192 +504,70 @@ fn call_script(vm: &mut VmHost, script: u32, method: &str, args: &[Value]) -> Re
         })
 }
 
-/// Original427210 queries getInfo8,9,28 in order after script construction.
-/// A nonzero scalar registers one callback record; these are real script calls.
-pub fn register_created(vm: &mut VmHost, container: u32, script: u32) -> Result<(), String> {
-    if std::env::var_os("SLR_REG_TRACE").is_some() {
-        let receiver_class = object_class(vm, script)
-            .and_then(|class| vm.loader.class_name(class).map(str::to_owned));
-        let native = crate::factory::native_class(container);
-        let name = crate::factory::runtime_name(container);
-        let owner = with_res(|host| {
-            host.container(container).map(|c| {
-                let parent_script = host
-                    .container(c.parent)
-                    .and_then(|p| p.instance.as_ref().map(|i| i.script));
-                (c.parent, parent_script)
-            })
-        });
-        let owner_name = owner.and_then(|(parent, _)| crate::factory::runtime_name(parent));
-        eprintln!(
-            "REGCREATE container={container:#x} script={script:#x} receiver_class={receiver_class:?} native={native:?} container_name={name:?} owner={owner:?} owner_name={owner_name:?}"
-        );
-        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
-            category: "register-created".into(),
-            fields: vec![
-                ("container".into(), format!("{container:#x}")),
-                ("script".into(), format!("{script:#x}")),
-                ("receiver_class".into(), format!("{receiver_class:?}")),
-                ("native".into(), format!("{native:?}")),
-                ("container_name".into(), format!("{name:?}")),
-            ],
-        });
+/// Run the created envelope's getInfo callback, including4255e0's conversion
+/// of returned Native objects into their resource-link word.
+pub(crate) fn query_script(
+    vm: &mut VmHost,
+    container: u32,
+    script: u32,
+    message: u32,
+) -> Result<u32, String> {
+    let class = object_class(vm, script).ok_or("getInfo script has no loaded class")?;
+    let name =
+        crate::factory::runtime_name(container).ok_or("getInfo resource name unavailable")?;
+    let Some(value) = sched::run_callback(
+        vm,
+        &name,
+        class,
+        script,
+        "getInfo",
+        &[Value::int(message as i32)],
+        true,
+    )
+    .map_err(|(thread, error)| crate::script_stop(vm, &thread, "postcreate getInfo", error))?
+    else {
+        return Ok(0);
+    };
+    if value.tag.name().starts_with('L') && value.payload != 0 {
+        if let Some(mut class) = object_class(vm, value.payload) {
+            loop {
+                let entry = vm
+                    .loader
+                    .find_by_id(class)
+                    .ok_or("getInfo result class missing")?;
+                if entry.name == "java.lang.Native" {
+                    return vm
+                        .read_field(value.payload, "ptr")
+                        .map(|v| v.payload)
+                        .map_err(|e| format!("getInfo Native.ptr: {e:?}"));
+                }
+                let Some(base) = entry.base.as_deref() else {
+                    break;
+                };
+                let Some(parent) = vm.loader.lookup(base) else {
+                    break;
+                };
+                class = parent;
+            }
+        }
     }
-    if let Some(class) = crate::factory::native_class(container) {
-        if class == "player" {
-            // Nativeplayer vtable5f12f0+3c→47b220: cases8/28 branch47b325
-            // returns1; case9 branches47b401 returning0. No script is dispatched.
-            with(|state| {
-                for kind in [8, 0x1c] {
-                    state.callbacks.entry(kind).or_default().push(container);
-                }
-            });
-            return Ok(());
-        }
-        // Original426470 dispatches on the *receiver* it is handed (the
-        // GameType wrapper), not on the created container's template: a
-        // scripted receiver (class kind 8) runs its own getInfo body even when
-        // the instance it created is a native template. Only a receiver with
-        // no script identity routes to the native payload's vtable+0x3c.
-        if script != 0 {
-            // Original53a2a0 links the created instance under its owner and
-            // leaves the GameType wrapper script on that owner container
-            // (+0xc -> loaded script). 426470 queries that wrapper, so the
-            // created script's own override (Part.getInfo / Vehicle.getInfo)
-            // never runs here; observed rows are always Dummy.getInfo.
-            let owner_script = with_res(|host| {
-                host.container(container)
-                    .map(|created| created.parent)
-                    .and_then(|parent| host.container(parent))
-                    .and_then(|owner| owner.instance.as_ref())
-                    .map(|instance| instance.script)
-                    .unwrap_or(0)
-            });
-            let (query_script, query_container) = if owner_script != 0 {
-                (owner_script, {
-                    with_res(|host| host.container(container).map(|created| created.parent))
-                        .unwrap_or(0)
-                })
-            } else {
-                (script, {
-                    with_res(|host| {
-                        host.node(host.object_node(script))
-                            .map(|node| node.container)
-                    })
-                    .unwrap_or(0)
-                })
-            };
-            let receiver_class = object_class(vm, query_script)
-                .ok_or("postcreate script instance has no loaded class")?;
-            // 425a90 labels THRD-RUNVMI from the wrapper's own resource.
-            let name = crate::factory::runtime_name(query_container)
-                .ok_or("postcreate callback resource name unavailable")?;
-            // The wrapper's script answer changes the dispatch state: the
-            // oracle emits exactly one THRD-RUNVMI wrapper.getInfo per
-            // creation, then the remaining two queries take the native
-            // payload branch (no thread).
-            let mut registered = Vec::new();
-            let value = sched::run_callback(
-                vm,
-                &name,
-                receiver_class,
-                query_script,
-                "getInfo",
-                &[Value::int(8)],
-                true,
-            )
-            .map_err(|(thread, error)| {
-                crate::script_stop(vm, &thread, "postcreate getInfo", error)
-            })?
-            .ok_or("postcreate getInfo returned no scalar")?;
-            if value.tag.name() != "I" {
-                return Err(format!(
-                    "postcreate getInfo returned unexpected descriptor {}",
-                    value.tag.name()
-                ));
-            }
-            if value.payload != 0 {
-                registered.push(8);
-            }
-            let template = crate::factory::instance_template_container(container)
-                .ok_or("postcreate native template link missing")?;
-            crate::native_body::with_world_memory(|m| {
-                let payload = crate::native_body::template_payload(template).ok_or_else(|| {
-                    format!(
-                        "postcreate {class}BOUNDARY: native class template has no constructed payload; the class constructor integration is required before query routing"
-                    )
-                })?;
-                for kind in [9, 0x1c] {
-                    let value =
-                        crate::native_message::template_query(m, payload, &class, kind, 0, 0)?;
-                    if value != 0 {
-                        registered.push(kind);
-                    }
-                }
-                Ok::<(), String>(())
-            })??;
-            with(|state| {
-                for kind in registered {
-                    state.callbacks.entry(kind).or_default().push(container);
-                }
-            });
-            return Ok(());
-        }
-        let template = crate::factory::instance_template_container(container)
-            .ok_or("postcreate native template link missing")?;
-        let mut registered = Vec::new();
-        crate::native_body::with_world_memory(|m| {
-            let payload = crate::native_body::template_payload(template).ok_or_else(|| {
-                format!(
-                    "postcreate {class}BOUNDARY: native class template has no constructed payload; the class constructor integration is required before query routing"
-                )
-            })?;
-            for kind in [8, 9, 0x1c] {
-                let value = crate::native_message::template_query(m, payload, &class, kind, 0, 0)?;
-                if value != 0 {
-                    registered.push(kind);
-                }
-            }
-            Ok::<(), String>(())
-        })??;
-        //427210 saves all three query results before appending any callback record.
-        with(|state| {
-            for kind in registered {
+    Ok(value.payload)
+}
+
+/// Original427210 queries8,9,28 before appending any callback records.
+pub fn register_created(vm: &mut VmHost, container: u32, _script: u32) -> Result<(), String> {
+    // Player frame storage remains the existing host projection. Configured
+    // car/part instances and script instances use the shared envelope router.
+    let values = if crate::factory::native_class(container).as_deref() == Some("player") {
+        [1, 0, 1]
+    } else {
+        crate::native_query::created_capabilities(vm, container)?
+    };
+    with(|state| {
+        for (kind, value) in [8, 9, 0x1c].into_iter().zip(values) {
+            if value != 0 {
                 state.callbacks.entry(kind).or_default().push(container);
             }
-        });
-        return Ok(());
-    }
-    let class = object_class(vm, script).ok_or("postcreate script instance has no loaded class")?;
-    let name =
-        crate::factory::runtime_name(container).ok_or("postcreate resource name unavailable")?;
-    let mut registered = Vec::new();
-    for kind in [8, 9, 0x1c] {
-        let value = sched::run_callback(
-            vm,
-            &name,
-            class,
-            script,
-            "getInfo",
-            &[Value::int(kind as i32)],
-            true,
-        )
-        .map_err(|(thread, error)| crate::script_stop(vm, &thread, "postcreate getInfo", error))?
-        .ok_or("postcreate getInfo returned no scalar")?;
-        if value.tag.name() != "I" {
-            return Err(format!(
-                "postcreate getInfo returned unexpected descriptor {}",
-                value.tag.name()
-            ));
-        }
-        if value.payload != 0 {
-            registered.push(kind);
-        }
-    }
-    //427210 saves all three query results before appending any callback record.
-    with(|state| {
-        for kind in registered {
-            state.callbacks.entry(kind).or_default().push(container);
         }
     });
     Ok(())
