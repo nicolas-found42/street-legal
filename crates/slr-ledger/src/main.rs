@@ -80,6 +80,11 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-boot", "bin:slr-boot", vec![
+            ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
+            ("native_car_update::tests::original_active_update_matches_complete_memory_and_call_order", vec!["FUN_00448430", "FUN_0043c520", "FUN_004707d0", "FUN_004479d0"]),
+            ("native_car_update::tests::original_suspended_update_completes_with_all_memory_words_equal", vec!["FUN_00448430", "FUN_004479d0"]),
+        ]),
         ("slr-vm", "initializers", vec![("initializer_constructor_original_rows",vec!["FUN_00403e80","FUN_00407da0","FUN_00408a30","FUN_0041fbc0"])]),
         ("slr-resource", "factory", vec![
             ("template_original_rows",vec!["FUN_0053a1a0"]),
@@ -935,11 +940,22 @@ fn collect(root: &std::path::Path) {
     });
     let mut results: Vec<slr_ledger::TestResult> = Vec::new();
     for (package, target, tests) in collect_suites() {
+        let (target_flag, target_name) = target
+            .strip_prefix("bin:")
+            .map_or(("--test", target), |name| ("--bin", name));
         let output = std::process::Command::new("cargo")
             // `--nocapture`: a skipped oracle prints its note and returns, and
             // libtest hides captured output for a passing test, so without this
             // the guard below cannot see the skip.
-            .args(["test", "-p", package, "--test", target, "--", "--nocapture"])
+            .args([
+                "test",
+                "-p",
+                package,
+                target_flag,
+                target_name,
+                "--",
+                "--nocapture",
+            ])
             .env("SLR_STOCK", &stock)
             .env("SLR_REFERENCE", &reference)
             .current_dir(root)
@@ -975,7 +991,9 @@ fn collect(root: &std::path::Path) {
             });
             // Suites whose target consumes Unicorn oracle vectors (rather
             // than the stock corpus) record the `unicorn` oracle.
-            let oracle = if target == "particle_exceptions" {
+            let oracle = if target == "bin:slr-boot" {
+                "unicorn controlled collaborators; finite dyadic arithmetic"
+            } else if target == "particle_exceptions" {
                 "unicorn intentional-divergence"
             } else if matches!(
                 target,

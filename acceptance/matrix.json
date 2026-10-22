@@ -1,64 +1,568 @@
 {
   "schema": 1,
   "authority": "docs/fidelity.md#whole-game-completion-contract",
-  "statuses": ["open", "partial", "passed"],
+  "statuses": [
+    "open",
+    "partial",
+    "passed"
+  ],
   "note": "Status is only `passed` when every listed evidence path exists and the row's own oracle run is recorded. `acceptance/run.sh` exits nonzero until every row is passed; it also rejects a `passed` row with no evidence and any evidence path that does not exist. Statuses here mirror docs/acceptance-inventory.md on 2026-10-21 and are not a re-definition of completion.",
   "rows": [
-    {"id": "P01", "kind": "feature", "title": "Boot, intro (absent intro video behaves as the exe does), main menu", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P02", "kind": "feature", "title": "Options and config persistence (video, sound, controls, save/game/options)", "tiers": ["B", "D", "E"], "status": "open", "evidence": []},
-    {"id": "P03", "kind": "feature", "title": "New career / load / save career (SDAT)", "tiers": ["B", "E"], "status": "open", "evidence": []},
-    {"id": "P04", "kind": "feature", "title": "Car dealer (new cars)", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P05", "kind": "feature", "title": "Used-car lot", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P06", "kind": "feature", "title": "Garage: car view, part slot tree, install/remove parts", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P07", "kind": "feature", "title": "Part catalog and purchasing", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P08", "kind": "feature", "title": "Tuning (all stock tunable parameters)", "tiers": ["B", "C"], "status": "open", "evidence": []},
-    {"id": "P09", "kind": "feature", "title": "Painter and decals", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P10", "kind": "feature", "title": "Dyno", "tiers": ["B", "C"], "status": "open", "evidence": []},
-    {"id": "P11", "kind": "feature", "title": "Day street races in the city", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P12", "kind": "feature", "title": "Night club drags", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P13", "kind": "feature", "title": "Pink-slip races", "tiers": ["B", "C", "E"], "status": "open", "evidence": []},
-    {"id": "P14", "kind": "feature", "title": "Police (chase, fines, consequences)", "tiers": ["B", "C"], "status": "open", "evidence": []},
-    {"id": "P15", "kind": "feature", "title": "Race of Champions on ROC_track (8 stock ROC opponents)", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P16", "kind": "feature", "title": "Quick race", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P17", "kind": "feature", "title": "Free ride: city", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P18", "kind": "feature", "title": "Free ride: city2", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P19", "kind": "feature", "title": "Free ride: ROC_track", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P20", "kind": "feature", "title": "Free ride: test_track", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P21", "kind": "feature", "title": "Traffic", "tiers": ["B", "C"], "status": "open", "evidence": []},
-    {"id": "P22", "kind": "feature", "title": "Pedestrians", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P23", "kind": "feature", "title": "Day/night, sky, fog", "tiers": ["D"], "status": "open", "evidence": []},
-    {"id": "P24", "kind": "feature", "title": "Damage and wear (mechanical and visual)", "tiers": ["B", "C", "D"], "status": "open", "evidence": []},
-    {"id": "P25", "kind": "feature", "title": "All 24 racer models drivable", "tiers": ["C"], "status": "open", "evidence": []},
-    {"id": "P26", "kind": "feature", "title": "All stock parts installable with their effects", "tiers": ["B", "C"], "status": "open", "evidence": []},
-    {"id": "P27", "kind": "feature", "title": "Cameras and HUD/OSD", "tiers": ["B", "D"], "status": "open", "evidence": []},
-    {"id": "P28", "kind": "feature", "title": "Engine and world sound, music", "tiers": ["D"], "status": "open", "evidence": []},
-    {"id": "P29", "kind": "feature", "title": "Keyboard, mouse and gamepad/wheel controls (ControlSet)", "tiers": ["D"], "status": "open", "evidence": []},
-    {"id": "P30", "kind": "feature", "title": "In-game video that ships (Prime.avi)", "tiers": ["D"], "status": "open", "evidence": []},
-
-    {"id": "G1", "kind": "gate", "title": "Stock inputs and runtime", "status": "partial", "note": "stock/ is read-only with a SHA-256 manifest; slr-boot runs unchanged TUFA scripts. Windowed/fullscreen/display path unexercised; slr-core/slr-game still present.", "evidence": ["docs/acceptance-inventory.md", "stock/.slr-manifest"]},
-    {"id": "G2", "kind": "gate", "title": "Formats (A): every stock file parses with corpus counts, loaders differential-tested, writers round-trip", "status": "partial", "note": "Ledger corpus rows exist per format; no single corpus-count report over all 7,858 files; writer coverage partial.", "evidence": ["docs/acceptance-inventory.md", "docs/fidelity.md"]},
-    {"id": "G3", "kind": "gate", "title": "VM and natives (B): per-opcode/helper/native differential evidence, all 353 natives implemented and registered by original address, complete boot native-log equality", "status": "partial", "note": "245/353 real natives; boot native log diverges at filtered record 447 (non-replay) and record 620 (replay).", "evidence": ["docs/acceptance-inventory.md", "re/out/boot/runs/20261021T134118.909536Z-3dfc868b9e7d", "re/out/boot/runs/20261021T134225.455943Z-1b807ddf0283"]},
-    {"id": "G4", "kind": "gate", "title": "Physics level 1 (C): every physics native differential-tested over random and edge vectors, 0 ulp on trusted operations", "status": "partial", "note": "slr-physics cfg vectors pass; several cfg rows still ported (no test yet).", "evidence": ["docs/acceptance-inventory.md", "docs/fidelity.md"]},
-    {"id": "G5", "kind": "gate", "title": "Physics level 2 (C): deterministic drag/braking/collision per-frame vehicle state bit-exact for every stock car and part", "status": "open", "evidence": []},
-    {"id": "G6", "kind": "gate", "title": "Rendering (D): per-frame D3D9-equivalent states, stages, transforms and draw streams equal hooked logs; screenshot review", "status": "open", "evidence": []},
-    {"id": "G7", "kind": "gate", "title": "Audio (D): DirectSound-equivalent call streams equal original logs; human listening per item", "status": "open", "evidence": []},
-    {"id": "G8", "kind": "gate", "title": "Input (D): keyboard/mouse/gamepad through original ControlSet scripts with matching DirectInput call streams", "status": "partial", "note": "Controller mapping native vectors pass; Input device enumeration/mapping and the device command remain declared gaps.", "evidence": ["docs/acceptance-inventory.md"]},
-    {"id": "G9", "kind": "gate", "title": "Saves/config (E): byte-identical SDAT/config from the same scripted session, cross-loading both ways", "status": "partial", "note": "SDAT readers/writers and file natives have vectors; no end-to-end byte-identical session.", "evidence": ["docs/acceptance-inventory.md"]},
-    {"id": "G10", "kind": "gate", "title": "Exceptions and evidence hygiene: original-bug fixes confirmed in build 606 with trigger inputs, annotations and ledger agree", "status": "partial", "note": "Intentional-divergence table maintained; ledger regeneration is manual and stale vs tree.", "evidence": ["docs/fidelity.md", "docs/acceptance-inventory.md"]},
-    {"id": "G11", "kind": "gate", "title": "Float parity (ADR 0007/0008): bit-exact x87 transcendentals pinned to a documented implementation, no tolerance-based approval", "status": "partial", "note": "SoftFloat vendored; Unicorn capture regenerated after the negative-zero encoder fix; Rosetta assessment pending.", "evidence": ["docs/acceptance-inventory.md", "docs/x87.md"]},
-
-    {"id": "S1", "kind": "supporting", "title": "Boot milestone (P01 intermediate): completed MainMenu + >=300 idle frames, filtered native log equal to the 6,508-record endpoint", "status": "open", "note": "Replay path stops at frame 31 on a thread-identity mismatch (Dummy.getInfo vs Part <instance field init>). Non-replay path diverges at filtered 447 because the synthetic 0.01 ms/read clock cannot expire the 10 ms scheduler budget, so thread interleave cannot match by construction.", "evidence": ["re/out/boot/runs/20261021T134225.455943Z-1b807ddf0283", "re/out/boot/runs/20261021T134118.909536Z-3dfc868b9e7d", "re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog"]},
-    {"id": "S2", "kind": "supporting", "title": "Full 353-native registration by original address, including rows not statically referenced by stock scripts", "status": "partial", "note": "113 capture-only rows remain (resource 61, parts 44, Vehicle 3, Painter 3, Navigator 1, GameLogic 1).", "evidence": ["docs/boot-status.md"]},
-    {"id": "S3", "kind": "supporting", "title": "Production shape/file pipeline: real SCX v3/v4 decode, material/resource binding, worker pump at the original frame position", "status": "open", "evidence": []},
-    {"id": "S4", "kind": "supporting", "title": "Per-car deterministic physics scenarios (24 models) and per-part effect scenarios", "status": "open", "evidence": []},
-    {"id": "S5", "kind": "supporting", "title": "D3D9-equivalent call stream and screenshot harness against the hooked original", "status": "open", "evidence": []},
-    {"id": "S6", "kind": "supporting", "title": "DirectSound call stream and listening protocol", "status": "open", "evidence": []},
-    {"id": "S7", "kind": "supporting", "title": "DirectInput call stream and ControlSet script exercise", "status": "partial", "evidence": ["docs/acceptance-inventory.md"]},
-    {"id": "S8", "kind": "supporting", "title": "SDAT/config end-to-end byte-identity and cross-load", "status": "partial", "evidence": ["docs/acceptance-inventory.md"]},
-    {"id": "S9", "kind": "supporting", "title": "Real window/display path (windowed and fullscreen) on macOS arm64", "status": "open", "evidence": []},
-    {"id": "S10", "kind": "supporting", "title": "Remove the old approximate slice (slr-core, slr-game) after boot passes (plan M1-14)", "status": "open", "evidence": []},
-    {"id": "S11", "kind": "supporting", "title": "Ledger regeneration from the current tree and test receipts", "status": "open", "evidence": ["docs/fidelity.md"]},
-    {"id": "S12", "kind": "supporting", "title": "Human visual/listening review receipts for affected rows", "status": "open", "evidence": []},
-    {"id": "S13", "kind": "supporting", "title": "Independent frozen-revision verification of the entire contract", "status": "open", "evidence": []}
+    {
+      "id": "P01",
+      "kind": "feature",
+      "title": "Boot, intro (absent intro video behaves as the exe does), main menu",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P02",
+      "kind": "feature",
+      "title": "Options and config persistence (video, sound, controls, save/game/options)",
+      "tiers": [
+        "B",
+        "D",
+        "E"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P03",
+      "kind": "feature",
+      "title": "New career / load / save career (SDAT)",
+      "tiers": [
+        "B",
+        "E"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P04",
+      "kind": "feature",
+      "title": "Car dealer (new cars)",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P05",
+      "kind": "feature",
+      "title": "Used-car lot",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P06",
+      "kind": "feature",
+      "title": "Garage: car view, part slot tree, install/remove parts",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P07",
+      "kind": "feature",
+      "title": "Part catalog and purchasing",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P08",
+      "kind": "feature",
+      "title": "Tuning (all stock tunable parameters)",
+      "tiers": [
+        "B",
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P09",
+      "kind": "feature",
+      "title": "Painter and decals",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P10",
+      "kind": "feature",
+      "title": "Dyno",
+      "tiers": [
+        "B",
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P11",
+      "kind": "feature",
+      "title": "Day street races in the city",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P12",
+      "kind": "feature",
+      "title": "Night club drags",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P13",
+      "kind": "feature",
+      "title": "Pink-slip races",
+      "tiers": [
+        "B",
+        "C",
+        "E"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P14",
+      "kind": "feature",
+      "title": "Police (chase, fines, consequences)",
+      "tiers": [
+        "B",
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P15",
+      "kind": "feature",
+      "title": "Race of Champions on ROC_track (8 stock ROC opponents)",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P16",
+      "kind": "feature",
+      "title": "Quick race",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P17",
+      "kind": "feature",
+      "title": "Free ride: city",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P18",
+      "kind": "feature",
+      "title": "Free ride: city2",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P19",
+      "kind": "feature",
+      "title": "Free ride: ROC_track",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P20",
+      "kind": "feature",
+      "title": "Free ride: test_track",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P21",
+      "kind": "feature",
+      "title": "Traffic",
+      "tiers": [
+        "B",
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P22",
+      "kind": "feature",
+      "title": "Pedestrians",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P23",
+      "kind": "feature",
+      "title": "Day/night, sky, fog",
+      "tiers": [
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P24",
+      "kind": "feature",
+      "title": "Damage and wear (mechanical and visual)",
+      "tiers": [
+        "B",
+        "C",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P25",
+      "kind": "feature",
+      "title": "All 24 racer models drivable",
+      "tiers": [
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P26",
+      "kind": "feature",
+      "title": "All stock parts installable with their effects",
+      "tiers": [
+        "B",
+        "C"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P27",
+      "kind": "feature",
+      "title": "Cameras and HUD/OSD",
+      "tiers": [
+        "B",
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P28",
+      "kind": "feature",
+      "title": "Engine and world sound, music",
+      "tiers": [
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P29",
+      "kind": "feature",
+      "title": "Keyboard, mouse and gamepad/wheel controls (ControlSet)",
+      "tiers": [
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "P30",
+      "kind": "feature",
+      "title": "In-game video that ships (Prime.avi)",
+      "tiers": [
+        "D"
+      ],
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "G1",
+      "kind": "gate",
+      "title": "Stock inputs and runtime",
+      "status": "partial",
+      "note": "stock/ is read-only with a SHA-256 manifest; slr-boot runs unchanged TUFA scripts. Windowed/fullscreen/display path unexercised; slr-core/slr-game still present.",
+      "evidence": [
+        "docs/acceptance-inventory.md",
+        "stock/.slr-manifest"
+      ]
+    },
+    {
+      "id": "G2",
+      "kind": "gate",
+      "title": "Formats (A): every stock file parses with corpus counts, loaders differential-tested, writers round-trip",
+      "status": "partial",
+      "note": "Ledger corpus rows exist per format; no single corpus-count report over all 7,858 files; writer coverage partial.",
+      "evidence": [
+        "docs/acceptance-inventory.md",
+        "docs/fidelity.md"
+      ]
+    },
+    {
+      "id": "G3",
+      "kind": "gate",
+      "title": "VM and natives (B): per-opcode/helper/native differential evidence, all 353 natives implemented and registered by original address, complete boot native-log equality",
+      "status": "partial",
+      "note": "All 353 original natives and complete boot equality remain unaccepted. Chassis.forceUpdate now executes the complete active parameter projection, part fold, wheel links and rebuild; controlled original vectors pass without tolerance. Strict replay still stops at a later prime.updatevariables/Dummy.getInfo thread mismatch in frame31; native equality diverges at filtered616/unfiltered905. Historical 245/113 audit counts registry keys, not completed originals.",
+      "evidence": [
+        "docs/acceptance-inventory.md",
+        "re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d",
+        "re/out/checkpoints/20261021-car-update-active/workspace-tests.txt",
+        "re/out/checkpoints/20261021-car-update-active/receipt.json"
+      ]
+    },
+    {
+      "id": "G4",
+      "kind": "gate",
+      "title": "Physics level 1 (C): every physics native differential-tested over random and edge vectors, 0 ulp on trusted operations",
+      "status": "partial",
+      "note": "slr-physics cfg vectors pass; several cfg rows still ported (no test yet).",
+      "evidence": [
+        "docs/acceptance-inventory.md",
+        "docs/fidelity.md"
+      ]
+    },
+    {
+      "id": "G5",
+      "kind": "gate",
+      "title": "Physics level 2 (C): deterministic drag/braking/collision per-frame vehicle state bit-exact for every stock car and part",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "G6",
+      "kind": "gate",
+      "title": "Rendering (D): per-frame D3D9-equivalent states, stages, transforms and draw streams equal hooked logs; screenshot review",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "G7",
+      "kind": "gate",
+      "title": "Audio (D): DirectSound-equivalent call streams equal original logs; human listening per item",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "G8",
+      "kind": "gate",
+      "title": "Input (D): keyboard/mouse/gamepad through original ControlSet scripts with matching DirectInput call streams",
+      "status": "partial",
+      "note": "Controller mapping native vectors pass; Input device enumeration/mapping and the device command remain declared gaps.",
+      "evidence": [
+        "docs/acceptance-inventory.md"
+      ]
+    },
+    {
+      "id": "G9",
+      "kind": "gate",
+      "title": "Saves/config (E): byte-identical SDAT/config from the same scripted session, cross-loading both ways",
+      "status": "partial",
+      "note": "SDAT readers/writers and file natives have vectors; no end-to-end byte-identical session.",
+      "evidence": [
+        "docs/acceptance-inventory.md"
+      ]
+    },
+    {
+      "id": "G10",
+      "kind": "gate",
+      "title": "Exceptions and evidence hygiene: original-bug fixes confirmed in build 606 with trigger inputs, annotations and ledger agree",
+      "status": "partial",
+      "note": "Intentional-divergence table maintained; ledger regeneration is manual and stale vs tree.",
+      "evidence": [
+        "docs/fidelity.md",
+        "docs/acceptance-inventory.md"
+      ]
+    },
+    {
+      "id": "G11",
+      "kind": "gate",
+      "title": "Float parity (ADR 0007/0008): bit-exact x87 transcendentals pinned to a documented implementation, no tolerance-based approval",
+      "status": "partial",
+      "note": "SoftFloat vendored; Unicorn capture regenerated after the negative-zero encoder fix; Rosetta assessment pending.",
+      "evidence": [
+        "docs/acceptance-inventory.md",
+        "docs/x87.md"
+      ]
+    },
+    {
+      "id": "S1",
+      "kind": "supporting",
+      "title": "Boot milestone (P01 intermediate): completed MainMenu + >=300 idle frames, filtered native log equal to the 6,508-record endpoint",
+      "status": "open",
+      "note": "The 448562 projection bailout is removed and the unchanged 600-frame menu smoke passes. Strict replay completes that update then stops later in frame31: expected prime.updatevariables, got Dummy.getInfo. Native equality still differs at filtered616/unfiltered905; S1 remains open.",
+      "evidence": [
+        "re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d",
+        "re/out/checkpoints/20261021-car-update-active/workspace-tests.txt",
+        "re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog"
+      ]
+    },
+    {
+      "id": "S2",
+      "kind": "supporting",
+      "title": "Full 353-native registration by original address, including rows not statically referenced by stock scripts",
+      "status": "partial",
+      "note": "Complete 353-address behavior remains unaccepted. The historical pre-forceUpdate audit had 113 capture-only rows over 358 registry keys; it is not a current completed-original count. The forceUpdate wrapper and complete update control flow now have controlled original vectors, with finite float evidence only.",
+      "evidence": [
+        "docs/boot-status.md"
+      ]
+    },
+    {
+      "id": "S3",
+      "kind": "supporting",
+      "title": "Production shape/file pipeline: real SCX v3/v4 decode, material/resource binding, worker pump at the original frame position",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S4",
+      "kind": "supporting",
+      "title": "Per-car deterministic physics scenarios (24 models) and per-part effect scenarios",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S5",
+      "kind": "supporting",
+      "title": "D3D9-equivalent call stream and screenshot harness against the hooked original",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S6",
+      "kind": "supporting",
+      "title": "DirectSound call stream and listening protocol",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S7",
+      "kind": "supporting",
+      "title": "DirectInput call stream and ControlSet script exercise",
+      "status": "partial",
+      "evidence": [
+        "docs/acceptance-inventory.md"
+      ]
+    },
+    {
+      "id": "S8",
+      "kind": "supporting",
+      "title": "SDAT/config end-to-end byte-identity and cross-load",
+      "status": "partial",
+      "evidence": [
+        "docs/acceptance-inventory.md"
+      ]
+    },
+    {
+      "id": "S9",
+      "kind": "supporting",
+      "title": "Real window/display path (windowed and fullscreen) on macOS arm64",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S10",
+      "kind": "supporting",
+      "title": "Remove the old approximate slice (slr-core, slr-game) after boot passes (plan M1-14)",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S11",
+      "kind": "supporting",
+      "title": "Ledger regeneration from the current tree and test receipts",
+      "status": "passed",
+      "evidence": [
+        "docs/fidelity.md",
+        "re/out/checkpoints/20261021-car-update-active/receipt.json",
+        "re/out/checkpoints/20261021-car-update-active/test-results.json",
+        "re/out/checkpoints/20261021-car-update-active/ledger-regen.txt",
+        "re/out/checkpoints/20261021-car-update-active/source.patch"
+      ],
+      "note": "Fresh collection: 483/483 evidence rows; 503 annotated symbols regenerated idempotently from the current tree. Workspace tests (1,103) and Clippy pass. Controlled car-update collaborators and finite float coverage are explicitly named; other obligations remain unaccepted."
+    },
+    {
+      "id": "S12",
+      "kind": "supporting",
+      "title": "Human visual/listening review receipts for affected rows",
+      "status": "open",
+      "evidence": []
+    },
+    {
+      "id": "S13",
+      "kind": "supporting",
+      "title": "Independent frozen-revision verification of the entire contract",
+      "status": "open",
+      "evidence": []
+    }
   ]
 }

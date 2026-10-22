@@ -149,7 +149,17 @@ def cmd_gen(ns) -> int:
     oracle = Oracle(ns.exe, fpu_cw=ns.cw)
     date = _today()
     ucver = unicorn.__version__
-    if ns.suite == "leaf-float":
+    if ns.suite == "car-update-active":
+        from car_update_active_probe import run
+        path = os.path.join(OUT_DIR, "car_update_active.jsonl")
+        with open(path, "w") as f:
+            for i in range(ns.n):
+                result = run(i, exe=ns.exe, cw=ns.cw)
+                f.write(json.dumps(dict(id=i, exe_addr="0x448430", name="car_update_active",
+                    args=dict(case=i), cw=hex(ns.cw), oracle="unicorn", unicorn=ucver,
+                    date=date, result=result), sort_keys=True) + "\n")
+        print(f"wrote {ns.n} rows -> {path}")
+    elif ns.suite == "leaf-float":
         path = os.path.join(OUT_DIR, "dot2_f32x2.jsonl")
         rows = gen_dot2(ns.n)
         with open(path, "w") as f:
@@ -183,6 +193,11 @@ def cmd_gen(ns) -> int:
 
 def _decode_and_run(oracle: Oracle, row: dict) -> dict:
     """Re-run one vector row from its encoded inputs (no access to stored result)."""
+    if row["name"] == "car_update_active":
+        from car_update_active_probe import run
+        if oracle.fpu_cw != int(row["cw"], 0):
+            raise ValueError("control word differs from recorded car update vector")
+        return run(row["args"]["case"], exe=oracle.exe, cw=oracle.fpu_cw)
     if row["name"] == "dot2_F32x2":
         # Bit-exact re-encode: JSON doubles re-packed to f32 exactly as gen did.
         a = [struct.unpack("<f", struct.pack("<f", v))[0] for v in row["args"][0]["values"]]
@@ -216,7 +231,7 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gen", help="generate + run vectors")
-    g.add_argument("--suite", required=True, choices=["leaf-float", "int-smoke"])
+    g.add_argument("--suite", required=True, choices=["leaf-float", "int-smoke", "car-update-active"])
     g.add_argument("-n", type=int, default=64)
     g.add_argument("--cw", type=lambda s: int(s, 0), default=CW_D3D9)
     g.add_argument("--exe", default=DEFAULT_EXE)

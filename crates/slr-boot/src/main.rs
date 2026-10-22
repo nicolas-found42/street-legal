@@ -9,6 +9,7 @@ mod native_body;
 mod native_camera;
 mod native_car;
 mod native_car_command;
+mod native_car_update;
 mod native_defaults;
 mod native_definition;
 mod native_dynamics;
@@ -664,6 +665,8 @@ fn install(vm: &mut VmHost) {
         vm.native_impls.insert(address, materialise::load_like);
     }
     parts::install(vm);
+    vm.native_impls
+        .insert(0x0043_e320, native_car_update::force_update);
     wheel::install(vm);
     resource_identity::install(vm);
     slr_lang::seam::with_lang_host(|h| {

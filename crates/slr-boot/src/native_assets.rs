@@ -294,7 +294,7 @@ impl native_resource_load::AccessHost for AccessAdapter {
         match m.r32(raw + 0x4c) {
             0xe => native_resource_load::request_mesh_type(m, raw, value),
             3 => crate::native_render_resource::set_minimum(m, raw, value),
-            1 | 2 | 5 => {
+            1 | 2 | 5 | 8 => {
                 if m.r32(raw + 0x7c) < m.r32(0x6200a4)
                     || !matches!(
                         m.rf(raw + 0x6c).partial_cmp(&f32::from_bits(value)),
@@ -355,7 +355,7 @@ impl native_resource_load::AccessHost for AccessAdapter {
     }
     fn quality_sensitive(&self, kind: u32) -> Result<bool, String> {
         match kind {
-            1 | 2 | 3 | 5 | 0xe => Ok(false),
+            1 | 2 | 3 | 5 | 8 | 0xe => Ok(false),
             _ => Err(format!("NativeAssetBoundary: quality table for type{kind}")),
         }
     }

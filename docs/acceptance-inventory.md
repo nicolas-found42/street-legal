@@ -17,7 +17,7 @@ met), `passed` (gate evidence linked, frozen revision). Nothing in this file
 grants acceptance without the fidelity.md evidence requirements.
 
 Last updated: 2026-10-21, branch `exact-port`, verified baseline `6b63613` plus
-uncommitted integration.
+uncommitted integration. S11 refreshed by the 2026-10-21 car-update checkpoint; other historical counts below are superseded by `acceptance/matrix.json` and `docs/boot-status.md`.
 
 ## Cross-cutting gates
 
@@ -32,7 +32,7 @@ uncommitted integration.
 | G7 audio (D) | DirectSound-equivalent call streams equal hooked logs; human listening per item | `slr-sound` native rows replay; no call-stream comparison or listening evidence | open |
 | G8 input (D) | Keyboard/mouse/gamepad through original ControlSet scripts; deterministic DirectInput call streams match | Controller mapping native vectors pass; `Input` device enumeration/mapping and `device` command remain declared gaps | partial |
 | G9 saves/config (E) | Same scripted session produces byte-identical SDAT/config; cross-load both ways | SDAT readers/writers and file natives have vectors; no end-to-end byte-identical session against the original | partial |
-| G10 exceptions/evidence | Each original-bug fix confirmed in build 606 with trigger inputs and excluded only from those inputs; annotations and regenerated ledger agree; vectors/traces ignored; oracle tooling outside workspace | Intentional-divergence table maintained; particle raw-word exceptions enforced by schema; ledger regeneration is manual (`cargo run -p slr-ledger -- regen`) and currently stale vs tree | partial |
+| G10 exceptions/evidence | Each original-bug fix confirmed in build 606 with trigger inputs and excluded only from those inputs; annotations and regenerated ledger agree; vectors/traces ignored; oracle tooling outside workspace | Intentional-divergence table maintained; particle raw-word exceptions enforced by schema; ledger regeneration is manual (`cargo run -p slr-ledger -- regen`) and current after the S11 checkpoint; exception/whole-game evidence remains partial | partial |
 | G11 float parity (ADR0007/0008) | Bit-exact x87 transcendentals pinned to a documented implementation; SoftFloat/Unicorn/Rosetta triangulation; no tolerance-based approval | SoftFloat vendored; Unicorn capture regenerated after negative-zero encoder fix; Rosetta assessment pending (agent X87Audit) | partial |
 
 ## Supporting obligations blocking the gates
@@ -49,7 +49,7 @@ uncommitted integration.
 | S8 | SDAT/config end-to-end byte-identity and cross-load | partial |
 | S9 | Real window/display path (windowed + fullscreen) on macOS arm64 | open |
 | S10 | Remove old approximate slice (`slr-core`, `slr-game`) after boot passes (plan M1-14) | open — blocked by S1 |
-| S11 | Ledger regeneration from current tree and test receipts | open — stale |
+| S11 | Ledger regeneration from current tree and test receipts | passed — 483/483 fresh rows, 503 symbols, idempotent regeneration; `re/out/checkpoints/20261021-car-update-active/receipt.json` |
 | S12 | Human visual/listening review receipts for affected rows | open |
 | S13 | Independent frozen-revision verification of the entire contract | open |
 

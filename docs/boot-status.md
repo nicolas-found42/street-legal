@@ -9,47 +9,69 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 Last updated: 2026-10-21, branch `exact-port`.
 
-**Status is not prose any more.** `acceptance/matrix.json` is the one
-machine-readable inventory of the 54 obligations (P01–P30, G1–G11, S1–S13);
-`./acceptance/run.sh` is the gate. It exits 0 only when every row is `passed`,
-1 while any row is unmet, and 2 when the matrix makes a claim it cannot
-evidence (a `passed` row with no evidence, or a missing evidence path).
-`./acceptance/selftest.py` proves it rejects. Current reading:
+`./acceptance/run.sh` reports **54 obligations: 42 open, 11 partial, 1 passed**.
+Only **S11** moved from open to passed: the ledger now joins 503 annotated
+symbols to 483 freshly collected passing evidence rows, and regeneration is
+idempotent. No feature, complete-native, physics or strict-boot acceptance is
+claimed. Receipt: `re/out/checkpoints/20261021-car-update-active/receipt.json`.
 
-    54 obligations: 43 open, 11 partial, 0 passed
+**Changed:** `native_car_update.rs` executes the active `448562..448ced`
+projection after the real synchronous `updatevariables` callback, then 4479d0.
+The complete suffix preserves the pre-fold torque-source read, clears the
+intrusive chassis reference, folds every handled 43c520 part kind, constructs
+forward/reverse torque curves (including missing/empty/reused cases), projects
+typed VM engine/gearing/drag/nitro fields, binds the three sounds, clamps the
+nitro level, and updates wheel resource links through 4707d0 slot lookup.
+The 43e320 wrapper now resolves both resource accesses with their original
+flags before calling the update. Loaded type 8 template access uses the
+original zero quality-sensitivity entry at 619dc0. No new boundary bailout or
+oracle-output runtime lookup was introduced.
 
-**Single next blocker: S1 (boot endpoint).** The strict replay now runs the
-original owner notification after every scripted `GameRef.create`: the created
-part's script is built, `Part.addpart` runs on the owner's script through
-`run_callback`, and the replay matches all 58 `THRD-RUNVMI prime.addpart`
-entries before the frontier. It stops at request ordinal 11604, where the original runs
-`THRD-RUNVMI prime.updatevariables` (`java.game.cars.Prime_models`) but the port
-still runs `THRD-RUNVMI Dummy.getInfo`. The observed difference is the
-registration branch, not the clock: original `0x426470`/`0x427210` routes the
-post-create queries by the created instance's kind and by its `+0x50` script
-word, and only the `+0x4c == 0` / `+0x50 != 0` case reaches
-`425a90(script, "getInfo", …)`. The port's `register_created` runs the owner
-`getInfo` for every scripted create. Next: model that branch from the created
-instance's own words. `Chassis.forceUpdate` (`0x43e320` → `0x448430` →
-`425a90(script, "updatevariables", 0x4f, 0x4f)`) is capture-only
-(`missing_rows.rs`) and remains the next update-path native, but its position in
-the replay is not yet established. Do not paper over either gap in the matcher.
+**Verified:** 48 complete active original runs match every captured memory
+word and field/sound/callback order; nine wrapper cases match guards, flags
+and callee targets. The prior four prefix and 24 suspended/absent-script cases
+still pass. VM/resource/clone/sound collaborators are declared in each probe;
+finite dyadic cases do not prove arbitrary PC-sensitive float or whole physics
+parity. `run_vectors.py gen --suite car-update-active -n 48`
+and `verify re/out/oracle/car_update_active.jsonl` reproduce all 48 rows.
+Original-derived vectors remain ignored and are never runtime inputs.
 
-Latest receipt:
-`re/out/boot/runs/20261021T225949.421173Z-d8234b590c1f`.
+**Integration:** the unchanged 600-frame menu smoke passes again. Full
+workspace: 1,103 tests passed; scoped and workspace Clippy with `-D warnings`
+and formatting pass. Ledger collection 483/483; regeneration 503 symbols,
+byte-identical on repetition. Complete outputs and source patch are retained
+in `re/out/checkpoints/20261021-car-update-active/`.
+The untruncated Jev gate verifies all four bounded factual claims, with zero
+contradictions/unsupported claims. Its code review remains escalated
+(`safe_to_apply=0.35`, test-gap/blast-radius uncertainty); this is retained
+as a review limitation, not complete-native acceptance. The earlier truncated
+review is retained separately and superseded for factual verification.
 
-**Do not chase filtered record 447.** That frontier belongs to the *non-replay*
-run, whose clock advances 0.01 ms per read; the 10 ms scheduler budget therefore
-can never expire, so the thread interleave cannot match the original by
-construction. Original iteration evidence (`main_loop_calls` in the oracle
-facts) confirms the original exits the drive after two threads because real
-elapsed time crosses the deadline. `--clock-replay` is the only acceptance path;
-a non-replay 447 receipt is a smoke test, not evidence.
+**Strict replay remains failed:**
+`re/out/boot/runs/20261022T004503.208209Z-10c04a4bae4d` reaches beyond the former
+448562 stop, then rejects a later frame31 callback: expected
+`THRD-RUNVMI prime.updatevariables`, got `THRD-RUNVMI Dummy.getInfo`.
+Filtered native equality still fails at 616 (4,629 port / 6,508 original records);
+unfiltered at 905 (6,737/9,209). The first expected `GameRef.create` is still
+replaced by `getScriptInstance`. No clock/result normalization changed. S1,
+G3 and P01 remain unaccepted.
 
-Everything below this block is dated history. It is retained for the reasoning
-and the oracle addresses, but its "current frontier" claims are superseded and
-must not be cited as present state. New work updates *this* block and leaves
-the history where it is.
+**Next target:** close the creation/notification/query subsystem as one port:
+426470,427210,425a90,53a2a0/53a5e0 and their native vtable dispatch. Current
+`engine::register_created` still contains speculative owner-script/single-query
+routing. Replace that logic with actual created-envelope kind/body/secondary/
+script dispatch, tested across complete original controlled graphs. Do not
+change the clock matcher or infer acceptance from the non-replay smoke.
+Existing local pseudocode, instruction oracle and instance-query probes are
+available; no startup recapture is needed before code changes.
+
+Reproduce strict integration with:
+
+    python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 600 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl
+
+The historical 245/113 native audit counts 358 registry keys, not 353 completed
+originals. A fresh per-address completeness audit is still needed. Remaining
+milestones follow the whole-game contract; no absent scenario is passed.
 
 
 ## History
@@ -2238,3 +2260,138 @@ scripts, while retaining parent→child base destruction for an unloaded graph.
 unregistration. `Viewport.destroy` (`481600`) also queues its actual resource
 through `48a8d0`; its release now participates in cleanup. These corrections
 still require the next strict trace's later resource-recycle comparison.
+
+
+## Earlier incomplete update checkpoint (2026-10-21; superseded)
+
+### State before the active projection port
+
+Last updated: 2026-10-21, branch `exact-port`.
+
+**Status is not prose any more.** `acceptance/matrix.json` is the one
+machine-readable inventory of the 54 obligations (P01–P30, G1–G11, S1–S13);
+`./acceptance/run.sh` is the gate. It exits 0 only when every row is `passed`,
+1 while any row is unmet, and 2 when the matrix makes a claim it cannot
+evidence (a `passed` row with no evidence, or a missing evidence path).
+`./acceptance/selftest.py` proves it rejects. Current reading:
+
+    54 obligations: 43 open, 11 partial, 0 passed
+
+**Active choice (2026-10-21): S1, the car update path.** The clean-checkout
+strict replay reproduced request 11604 in
+`re/out/boot/runs/20261021T233307.346388Z-5df60c98c975`. The former theory that
+registration caused this first missing callback is disproved: passive build-606
+execution pins it to `Chassis.forceUpdate` (`43e320` calls `448430`, which calls
+`425a90(data, "updatevariables", 0x4f, 0x4f)` at `44855d`). This path precedes
+the later registration queries. Keep the existing strict clock matcher.
+
+**Implemented prefix, incomplete native.** `native_car_update.rs` now executes
+`448430..448562`: clear the dirty bit, clone shared parameters through the real
+`43e3e0` port, read the owning loaded envelope and `suspend_update`, reset live
+wheel cells and copy defaults, release native memory, then run the stock
+`updatevariables` callback through the normal scheduler. The absent-script and
+suspended branches now complete through the real `4479d0` wheel/torque rebuild;
+the active-script branch deliberately stops at unported parameter projection
+after the callback. The original
+`426470` instance/body/script branch remains a later routing issue; do not
+change it to compensate for the missing update native.
+
+Latest strict integration receipt:
+`re/out/boot/runs/20261021T235027.190285Z-3245f9bb5ed8`. Earlier prefix receipt:
+`re/out/boot/runs/20261021T234218.636316Z-ec4885b090f8`. It executes and returns
+from `THRD-RUNVMI prime.updatevariables` without a clock mismatch, then fails
+at the explicit `448562` boundary in frame31. Complete native equality still
+fails at filtered616 / unfiltered905; no log normalization was changed. The
+old non-replay 600-frame smoke test now also fails at this boundary. **Workspace
+checks are not all green; this is unfinished work, not a validated complete
+native or an accepted S1/P01 run.** Do not restore the capture-only no-op to
+make that smoke test pass.
+
+Original evidence and regeneration:
+
+- `re/headless/instance_query_probe.py`: passive unchanged startup, 1.2B
+  instruction budget, the same four profiles as the accepted menu capture.
+  `re/out/headless/instance-query-investigation/verification.json` proves all
+  7,351 captured native records equal the accepted original prefix, and pins
+  the `43e3d3` -> `448430` -> `448562` callback sequence. Its 2,540 observations
+  are untruncated. Inputs/profile identities are in `run.json` and the receipt.
+- `~/slr-oracle-venv/bin/python re/oracle/car_update_prefix_probe.py >
+  re/out/boot/car-update-prefix-original.json`: four controlled original prefix
+  runs, zero/two wheels and private/shared parameters. The clone collaborator
+  is declared; its real implementation has the existing complete clone suite.
+  `cargo test -p slr-boot original_update_prefix_matches_all_memory_words`
+  compares every captured memory word and callback/clone order. Repeat vectors
+  are byte-identical. This prefix is integer/copy evidence.
+- `~/slr-oracle-venv/bin/python re/oracle/car_update_suspended_probe.py >
+  re/out/boot/car-update-suspended-original.json`: 24 complete original runs
+  with suspended/absent scripts, private/shared parameters, zero/three wheels,
+  and negative/zero/positive torque multipliers. Every captured memory word
+  matches, without tolerance, in `original_suspended_update_completes_with_all_memory_words_equal`.
+  These finite dyadic arithmetic cases do not establish arbitrary float parity.
+  Final focused receipts are `re/out/boot/car-update-{tests,clippy,ledger,replay}.txt`.
+- `re/oracle/instance_query_probe.py` isolates original426470 over nine
+  controlled envelope cases; repeat output is byte-identical. The REA static
+  observation/snapshot is retained under `re/out/boot/instance-query-rea-*`;
+  implementation decisions use executed probes and machine instructions.
+
+Current source diagnostics: `re/out/boot/car-update-prefix-{workspace,
+workspace-rest,clippy,headless-tests,runner-tests,collect,ledger}.txt`. The full
+workspace attempt fails `stock_menu_prefix` at its unchanged runtime-success
+assertion; the remaining workspace is checked separately. No evidence row is
+promoted for the new prefix. The raw pre-change dispatch audit reproduces
+`real=245 capture_only=113 unbound=0`; this totals358 registry keys and must
+not be described as245 completed originals out of353. The new incomplete
+forceUpdate dispatch is still not evidence of a complete native.
+
+Validation: 195 headless-original tests and 41 diagnostic-runner tests pass;
+ledger collection is476/476 and regeneration499 symbols. The separate remaining
+workspace run passes969 tests; the full workspace attempt records130 passes
+and the one failing menu smoke. Final focused tests cover both update probes,
+and final scoped Clippy/format checks pass. The Jev checkpoint verifies the
+three bounded claims (none contradicted/unsupported) but escalates quality
+(safe-to-apply0.11, test-gap confidence0); receipt
+`re/out/boot/car-update-checkpoint-jev.json`. This does not certify the incomplete
+runtime or replace the failing checks. No full-native/boot acceptance is claimed.
+
+**Checkpoint commit did not succeed.** `git commit -F
+re/out/boot/car-update-commit-message.txt` was rejected by
+`.githooks/pre-commit`: it runs the unchanged full workspace suite, and
+`stock_menu_prefix` fails its runtime-success assertion at line55. The hook
+was not bypassed and no push occurred. Base revision remains `45da498`.
+Implementation, probes and evidence/status edits are staged in this checkout;
+`re/out/boot/car-update-uncommitted.patch` also preserves the complete tracked
+and staged-new source patch. Resume that work directly. All oracle inputs and
+needed tools are available locally; this is unfinished implementation, not an
+unavailable-input escalation. Complete the active projection and restore the
+unchanged smoke before the next commit attempt.
+
+**Exact next command:**
+
+    ~/slr-oracle-venv/bin/python re/oracle/oracle.py disasm 0x448562 -n 500
+
+Finish `448562..448ced` active-script parameter projection, then invoke the
+implemented `4479d0` rebuild. Require controlled original suffix vectors before
+claiming it. Supporting part fold `43c520` and its jump table at `43c7c8` are recovered
+in `re/out/boot/car-part-update.asm`; suffix instruction reads are in
+`car-update-{suffix,tail}.asm`. These are ignored oracle products, never runtime
+inputs. Preserve the original post-callback `parameters+0xc18` read before
+folding live parts, the `body+0x202c` weak-link clear, the body+0xdc part-list
+walk, and all source float operation order. `42a430` reads integer fields,
+`42a560` float fields, `42a690` typed references, `42b040` array elements;
+`6100a8` is `suspend_update`. Rerun the strict replay command from the history
+with `--frames 600`, then the unchanged smoke test and all required checks.
+The strict runner must continue failing until actual complete equality.
+
+**Do not chase filtered record 447.** That frontier belongs to the *non-replay*
+run, whose clock advances 0.01 ms per read; the 10 ms scheduler budget therefore
+can never expire, so the thread interleave cannot match the original by
+construction. Original iteration evidence (`main_loop_calls` in the oracle
+facts) confirms the original exits the drive after two threads because real
+elapsed time crosses the deadline. `--clock-replay` is the only acceptance path;
+a non-replay 447 receipt is a smoke test, not evidence.
+
+Everything below this block is dated history. It is retained for the reasoning
+and the oracle addresses, but its "current frontier" claims are superseded and
+must not be cited as present state. New work updates *this* block and leaves
+the history where it is.
+

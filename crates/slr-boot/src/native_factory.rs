@@ -8,7 +8,7 @@ use slr_resource::node;
 
 /// Original game-instance resource virtual get-data, limited to an already
 /// loaded envelope. Loading/constructing the owner is the factory's operation.
-fn loaded_game_payload(m: &Space, resource: u32) -> Result<u32, String> {
+pub(crate) fn loaded_game_payload(m: &Space, resource: u32) -> Result<u32, String> {
     if m.r32(resource + 0x4c) != 1 || m.r32(resource + 0x64) & 1 == 0 {
         return Err(
             "NativeResourceBoundary: owner get-data needs loaded original game-instance envelope"
