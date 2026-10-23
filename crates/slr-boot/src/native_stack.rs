@@ -130,6 +130,16 @@ pub fn function<R>(
     result
 }
 
+/// A cdecl function leaves its incoming argument words for its caller. The
+/// argument words still determine a direct oracle driver's entry alignment.
+pub fn function_cdecl<R>(m: &mut Space, args: &[u32], f: impl FnOnce(&mut Space) -> R) -> R {
+    let mut frame = enter(m, args, None);
+    frame.arguments = 0;
+    let result = f(m);
+    leave(m, frame);
+    result
+}
+
 /// Execute an actual CALL after the caller has formed its argument values.
 /// The source-derived return PC is the address following that instruction.
 /// Caller cleanup is reflected by restoring its pre-argument ESP after return.

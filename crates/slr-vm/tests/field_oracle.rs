@@ -55,7 +55,7 @@ fn stack(vm: &mut VmHost, thread: &Thread, word: u32) -> Vec<Json> {
         .map(|slot| match slot {
             Slot::Null => json!({"kind":"null"}),
             Slot::Value(value) => {
-                let mut v = jvalue(*value);
+                let mut v = jvalue(value.value());
                 v["kind"] = json!("value");
                 v
             }
@@ -157,11 +157,11 @@ fn field_lvalues_match_original_interpreter() {
         let mut thread = enter(&vm, body, if is_static { 0 } else { word });
         if write {
             thread
-                .push(Slot::Value(if ty == "L;" {
+                .push_new(if ty == "L;" {
                     value("L;", 0)
                 } else {
                     Value::int(2748)
-                }))
+                })
                 .unwrap();
         }
         if access == "member" {
@@ -169,18 +169,18 @@ fn field_lvalues_match_original_interpreter() {
             let slot = if input["receiver_kind"] == "var" {
                 Slot::Var(thread.new_var(receiver, 0))
             } else {
-                Slot::Value(receiver)
+                Slot::Value(thread.allocate_value(receiver))
             };
             thread.push(slot).unwrap();
         }
-        thread.live = 0;
+        thread.set_live_counter(0);
         thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
         let instance: Vec<_> = vm.objects[0].fields.iter().copied().map(jvalue).collect();
         let context = vm.class_context("Fields").unwrap();
         let statics: Vec<_> = (0..if collision { 2 } else { 1 })
             .map(|slot| jvalue(vm.read_cell(HeapSlot::Static { context, slot }).unwrap()))
             .collect();
-        let result = json!({"stack":stack(&mut vm,&thread,word),"instance":instance,"static":statics,"live":thread.live});
+        let result = json!({"stack":stack(&mut vm,&thread,word),"instance":instance,"static":statics,"live":thread.live()});
         assert_eq!(result, row["result"], "field row {}", row["id"]);
     }
 }
@@ -218,18 +218,18 @@ fn array_lvalues_match_original_interpreter() {
         let mut thread = enter(&vm, body, 0);
         if write {
             thread
-                .push(Slot::Value(if ty == "L;" {
+                .push_new(if ty == "L;" {
                     value("L;", 0)
                 } else {
                     Value::int(2748)
-                }))
+                })
                 .unwrap();
         }
         thread
-            .push(Slot::Value(value(
+            .push_new(value(
                 input["index_type"].as_str().unwrap(),
                 input["index"].as_i64().unwrap() as u32,
-            )))
+            ))
             .unwrap();
         let receiver = value(
             input["tag"].as_str().unwrap(),
@@ -242,10 +242,10 @@ fn array_lvalues_match_original_interpreter() {
         let slot = if input["receiver_kind"] == "var" {
             Slot::Var(thread.new_var(receiver, 0))
         } else {
-            Slot::Value(receiver)
+            Slot::Value(thread.allocate_value(receiver))
         };
         thread.push(slot).unwrap();
-        thread.live = 0;
+        thread.set_live_counter(0);
         let outcome = match thread.run(&mut vm, 0., &mut || X87::from_f64(0.)) {
             Ok(_) => "ok",
             Err(VmError::ArrayAccess(error)) => match error {
@@ -259,7 +259,7 @@ fn array_lvalues_match_original_interpreter() {
         let elements: Vec<_> = (0..3)
             .map(|index| jvalue(vm.read_cell(HeapSlot::Array { word, index }).unwrap()))
             .collect();
-        let result = json!({"outcome":outcome,"stack":stack(&mut vm,&thread,word),"elements":elements,"live":thread.live});
+        let result = json!({"outcome":outcome,"stack":stack(&mut vm,&thread,word),"elements":elements,"live":thread.live()});
         assert_eq!(result, row["result"], "array row {}", row["id"]);
     }
 }
@@ -313,9 +313,9 @@ fn reference_field_stores_match_original_conversion_and_assignment() {
         let pc = Some(Pc { body, idx: 0 });
         thread.frames.push(Frame::new(pc, holder));
         thread.pc = pc;
-        thread.push(Slot::Value(value(&source, payload))).unwrap();
+        thread.push_new(value(&source, payload)).unwrap();
         thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
-        let Slot::Value(source_after) = thread.frames[0].stack[0] else {
+        let Slot::Value(source_after) = &thread.frames[0].stack[0] else {
             panic!("assignment must return its source value")
         };
         let stored = vm.objects[(holder - 0x1000) as usize].fields[0];
@@ -420,7 +420,7 @@ fn typed_declarations_match_original_interpreter() {
         thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
         let id = thread.frames[0].locals[0];
         let local = thread.vars.get(id);
-        let actual = json!({"local":jvalue(local.value),"name":vm.variable_name(local.name),"stack_is_local":thread.frames[0].stack==if push{vec![Slot::Var(id)]}else{vec![]},"live":thread.live});
+        let actual = json!({"local":jvalue(local.value),"name":vm.variable_name(local.name),"stack_is_local":thread.frames[0].stack==if push{vec![Slot::Var(id)]}else{vec![]},"live":thread.live()});
         assert_eq!(actual, row["result"], "row {}", row["id"]);
     }
 }
@@ -474,6 +474,6 @@ fn inherited_instance_storage_matches_original_constructor_layout() {
         );
         // Original global object-allocation counter is retained in the receipt;
         // Thread.live counts interpreter temporaries, not the host's heap owner.
-        assert_eq!(thread.live, 0);
+        assert_eq!(thread.live(), 0);
     }
 }

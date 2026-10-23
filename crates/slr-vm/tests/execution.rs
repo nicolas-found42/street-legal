@@ -82,7 +82,9 @@ fn non_member_resource_literal_returns_integer_zero_like_original() {
             })
             .collect();
         assert_eq!(actual, row["result"]["stack"].as_array().unwrap().to_vec());
-        assert_eq!(thread.frames[0].stack, vec![Slot::Value(Value::int(0))]);
+        assert!(
+            matches!(&thread.frames[0].stack[..], [Slot::Value(cell)] if cell.value() == Value::int(0))
+        );
     }
 }
 
@@ -238,7 +240,8 @@ fn script_frames_preserve_defining_owner_runtime_receiver_and_reverse_arguments_
             row["result"]["after_run"]
         );
         assert_eq!(
-            thread.live, 1,
+            thread.live(),
+            1,
             "callee parameters must be released on return"
         );
     }
@@ -369,7 +372,7 @@ fn inline_method_references_execute_inherited_script_bodies_like_original() {
             json!({"back_to_caller":thread.frames.len()==1,"stack":stack}),
             row["result"]
         );
-        assert_eq!(thread.live, 1);
+        assert_eq!(thread.live(), 1);
     }
 }
 
@@ -467,7 +470,7 @@ fn native_method_calls_preserve_defining_receiver_argument_order_and_return_cell
             })
             .collect::<Vec<_>>();
         assert_eq!(json!(stack), row["result"]["after_stack"]);
-        assert_eq!(thread.live, if ret.is_empty() { 0 } else { 1 });
+        assert_eq!(thread.live(), if ret.is_empty() { 0 } else { 1 });
     }
 }
 
@@ -1082,11 +1085,11 @@ fn new_arrays_create_typed_persistent_element_cells_like_original() {
             frame.class_ctx = vm.class_context("Code").unwrap();
             reader.frames.push(frame);
             reader.push_new(Value::int(index as i32)).unwrap();
-            reader.push_new(array).unwrap();
+            reader.push_new(array.value()).unwrap();
             reader.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
-            let slot = *reader.frames[0].stack.last().unwrap();
+            let slot = reader.frames[0].stack.last().unwrap();
             let (kind, value) = if let Slot::Heap(cell) = slot {
-                ("variable", vm.read_cell(cell).unwrap())
+                ("variable", vm.read_cell(*cell).unwrap())
             } else {
                 panic!("array item must remain an lvalue")
             };
@@ -1210,7 +1213,8 @@ fn casts_and_instanceof_match_original_runtime_types_nulls_and_string_bytes() {
             );
         }
         assert_eq!(
-            thread.live, 1,
+            thread.live(),
+            1,
             "case{} duplicated a value temporary",
             row["id"]
         );
@@ -1258,17 +1262,19 @@ fn argument_arrays_preserve_target_lvalues_item_order_and_typed_copies_like_orig
                 frame.locals.push(id);
                 Slot::Var(id)
             } else {
-                Slot::Value(value)
+                Slot::Value(thread.allocate_value(value))
             };
             target_slot = Some(slot);
         }
         thread.frames.push(frame);
+        let slot_identity = |slot: &Slot| match slot {
+            Slot::Value(cell) => format!("value:{:?}", cell.id()),
+            Slot::Var(id) => format!("variable:{id:?}"),
+            _ => panic!("unexpected target kind"),
+        };
+        let target_identity = target_slot.as_ref().map(slot_identity);
         if let Some(slot) = target_slot {
-            if let Slot::Value(value) = slot {
-                thread.push_new(value).unwrap();
-            } else {
-                thread.push(slot).unwrap();
-            }
+            thread.push(slot).unwrap();
         }
         let mut source_variables = vec![];
         for (index, item) in items.iter().enumerate() {
@@ -1298,7 +1304,8 @@ fn argument_arrays_preserve_target_lvalues_item_order_and_typed_copies_like_orig
             row["id"]
         );
         assert_eq!(
-            target_slot.is_some() && thread.frames[0].stack.first() == target_slot.as_ref(),
+            target_identity.is_some()
+                && thread.frames[0].stack.first().map(slot_identity) == target_identity,
             expected["target_preserved"].as_bool().unwrap()
         );
         if expected["outcome"] == "fatal" {
@@ -1307,7 +1314,7 @@ fn argument_arrays_preserve_target_lvalues_item_order_and_typed_copies_like_orig
             continue;
         }
         outcome.unwrap();
-        let Slot::Value(value) = *thread.frames[0].stack.last().unwrap() else {
+        let Slot::Value(value) = thread.frames[0].stack.last().unwrap() else {
             panic!("array result must be a value")
         };
         assert_eq!(value.tag.name(), expected["type"]);

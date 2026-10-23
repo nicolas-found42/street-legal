@@ -76,7 +76,7 @@ fn stack_values(th: &Thread) -> Vec<Value> {
         .stack
         .iter()
         .map(|s| match s {
-            Slot::Value(v) => *v,
+            Slot::Value(v) => v.value(),
             other => panic!("expected a value, found {other:?}"),
         })
         .collect()
@@ -95,7 +95,7 @@ fn integer_expression_evaluates_left_to_right() {
     let (th, r) = run_one(p, &[]);
     r.unwrap();
     assert_eq!(stack_values(&th), vec![Value::int(8)]);
-    assert_eq!(th.live, 1, "only the result cell is alive");
+    assert_eq!(th.live(), 1, "only the result cell is alive");
     assert_eq!(th.flags, 0x40, "stopped, no longer running");
 }
 
@@ -333,10 +333,10 @@ fn script_method_call_builds_this_and_pops_arguments_last_first() {
     let mut th = Thread::new();
     let mut caller = Frame::new(entry(0, 0), 0);
     caller.stack = vec![
-        Slot::Value(Value::int(10)),    // argument 0 (int)
-        Slot::Value(Value::float(2.5)), // argument 1 (float)
+        Slot::Value(th.allocate_value(Value::int(10))), // argument 0 (int)
+        Slot::Value(th.allocate_value(Value::float(2.5))), // argument 1 (float)
     ];
-    th.live = 2;
+    th.set_live_counter(2);
     th.frames.push(caller);
     th.pc = entry(0, 4);
     let m = ScriptMethod {
@@ -367,14 +367,14 @@ fn script_method_call_builds_this_and_pops_arguments_last_first() {
         vec![Value::reference(0x77), Value::float(2.5), Value::int(10)]
     );
     // two argument cells released, three variable slots created
-    assert_eq!(th.live, 3);
+    assert_eq!(th.live(), 3);
 }
 
 #[test]
 fn call_converts_arguments_to_the_declared_parameter_type() {
     let mut th = Thread::new();
     let mut caller = Frame::new(entry(0, 0), 0);
-    caller.stack = vec![Slot::Value(Value::int(3))];
+    caller.stack = vec![Slot::Value(th.allocate_value(Value::int(3)))];
     th.frames.push(caller);
     th.pc = entry(0, 0);
     let m = ScriptMethod {
@@ -407,8 +407,11 @@ fn variable_slot_arena_stays_bounded_over_a_call_loop() {
         params: vec![TypeTag::Int, TypeTag::Float],
     };
     for i in 0..2000 {
-        th.frames[0].stack = vec![Slot::Value(Value::int(i)), Slot::Value(Value::float(1.5))];
-        th.live += 2;
+        th.frames[0].stack = vec![
+            Slot::Value(th.allocate_value(Value::int(i))),
+            Slot::Value(th.allocate_value(Value::float(1.5))),
+        ];
+
         th.pc = entry(0, 0);
         th.call_script_method(&m, 0x77).unwrap();
         th.pop_frame().unwrap();
@@ -419,7 +422,7 @@ fn variable_slot_arena_stays_bounded_over_a_call_loop() {
         "arena grew to {} slots",
         th.vars.slot_count()
     );
-    assert_eq!(th.live, 0, "every cell released again");
+    assert_eq!(th.live(), 0, "every cell released again");
 }
 
 #[test]
@@ -441,7 +444,7 @@ fn instance_method_without_receiver_is_a_fatal_script_error() {
     // FUN_0041fbc0 checks this before touching any state.
     let mut th = Thread::new();
     let mut caller = Frame::new(entry(0, 0), 0);
-    caller.stack = vec![Slot::Value(Value::int(1))];
+    caller.stack = vec![Slot::Value(th.allocate_value(Value::int(1)))];
     th.frames.push(caller);
     th.pc = entry(0, 3);
     let m = ScriptMethod {

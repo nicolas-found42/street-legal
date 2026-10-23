@@ -11,6 +11,7 @@ use std::{cell::RefCell, path::Path};
 
 #[derive(Default)]
 struct State {
+    config: Option<u32>,
     roots: Option<[u32; 2]>,
     events: Vec<serde_json::Value>,
 }
@@ -18,7 +19,25 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 /// Script object held by original native Config anchor63643c.
 pub fn config_script() -> Option<u32> {
-    STATE.with(|state| state.borrow().roots.map(|roots| roots[0]))
+    STATE.with(|state| state.borrow().config)
+}
+
+///63643c is bound before GameInit's constructor. Native setting reads during
+/// that constructor already observe Config, while complete collector startup
+/// still requires GameInit's separate root. Starting a new boot clears roots
+/// and receipts retained by the previous VM on this thread.
+pub fn configure_config(config: u32) -> Result<(), String> {
+    if config == 0 {
+        return Err("GcNativeRootBoundary: Config script anchor must be bound".into());
+    }
+    STATE.with(|state| {
+        *state.borrow_mut() = State {
+            config: Some(config),
+            roots: None,
+            events: vec![],
+        }
+    });
+    Ok(())
 }
 
 /// Configure the script words retained through Config (63643c) and GameInit
@@ -38,6 +57,7 @@ pub fn configure_roots(
     }
     STATE.with(|state| {
         *state.borrow_mut() = State {
+            config: Some(config),
             roots: Some([config, game_init]),
             events: vec![],
         }
@@ -141,6 +161,31 @@ mod tests {
     use std::cell::RefCell;
 
     thread_local! { static CALLS: RefCell<Vec<(String,i32,u32)>> = const { RefCell::new(vec![]) }; }
+
+    #[test]
+    fn config_anchor_is_available_before_init_and_new_boot_clears_old_roots() {
+        configure_roots(0x1001, 0x1002, None).unwrap();
+        STATE.with(|state| {
+            state
+                .borrow_mut()
+                .events
+                .push(serde_json::json!({"previous":true}))
+        });
+        configure_config(0x2001).unwrap();
+        assert_eq!(config_script(), Some(0x2001));
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.roots, None);
+            assert!(state.events.is_empty());
+        });
+        assert!(configure_config(0).is_err());
+        assert_eq!(config_script(), Some(0x2001));
+        configure_roots(0x2001, 0x2002, None).unwrap();
+        STATE.with(|state| assert_eq!(state.borrow().roots, Some([0x2001, 0x2002])));
+        assert_eq!(config_script(), Some(0x2001));
+        STATE.with(|state| *state.borrow_mut() = State::default());
+        assert_eq!(config_script(), None);
+    }
 
     fn stock_file() -> (VmHost, u32) {
         let mut vm = VmHost::new();

@@ -90,7 +90,7 @@ fn build(row: &serde_json::Value) -> (Thread, Bodies) {
         }
         for c in f["stack"].as_array().unwrap() {
             frame.stack.push(match c["k"].as_str().unwrap() {
-                "v" => Slot::Value(value_of(c)),
+                "v" => Slot::Value(th.allocate_value(value_of(c))),
                 "lv" => Slot::Var(frame.locals[c["i"].as_u64().unwrap() as usize]),
                 "null" => Slot::Null,
                 k => panic!("stack cell kind {k}"),
@@ -98,6 +98,8 @@ fn build(row: &serde_json::Value) -> (Thread, Bodies) {
         }
         th.frames.push(frame);
     }
+    // Original supplied fixture cells were initialized with counter zero.
+    th.set_live_counter(0);
     // run() refuses an empty thread and reloads pc from the frame.
     th.pc = Some(Pc {
         body: BodyId(0),
@@ -234,8 +236,8 @@ fn state_diffs(th: &Thread, want: &serde_json::Value, stopped: bool) -> Vec<Stri
     if pc_json(th.pc) != want["pc"] {
         d.push(format!("pc {:?} vs {}", pc_json(th.pc), want["pc"]));
     }
-    if i64::from(th.live) != want["live"].as_i64().unwrap() {
-        d.push(format!("live {} vs {}", th.live, want["live"]));
+    if i64::from(th.live()) != want["live"].as_i64().unwrap() {
+        d.push(format!("live {} vs {}", th.live(), want["live"]));
     }
     let want_frames = want["frames"].as_array().unwrap();
     if th.frames.len() != want_frames.len() {

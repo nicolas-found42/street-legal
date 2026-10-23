@@ -1,12 +1,12 @@
 {
-  "schema": 1,
+  "schema": 2,
   "authority": "docs/fidelity.md#whole-game-completion-contract",
   "statuses": [
     "open",
     "partial",
     "passed"
   ],
-  "note": "Status is only `passed` when every listed evidence path exists and the row's own oracle run is recorded. `acceptance/run.sh` exits nonzero until every row is passed; it also rejects a `passed` row with no evidence and any evidence path that does not exist. Statuses here mirror docs/acceptance-inventory.md on 2026-10-21 and are not a re-definition of completion.",
+  "note": "Progress statuses and linked paths are supporting context only. acceptance/run.sh computes separate executable results for exactly P01\u2013P30, G1\u2013G11 and S1\u2013S13. Implemented live validators cover S1 boot replay, S11 ledger collection/regeneration and the stock-checksum component of G1; all other unsupported scenarios remain explicit. Complete passing results require live execution with candidate, stock/exe, oracle, replay, policy and applicable human review provenance. Historical checkpoint counts cannot assert acceptance.",
   "rows": [
     {
       "id": "P01",
@@ -372,12 +372,14 @@
       "kind": "gate",
       "title": "VM and natives (B): per-opcode/helper/native differential evidence, all 353 natives implemented and registered by original address, complete boot native-log equality",
       "status": "partial",
-      "note": "All 353 originals and complete boot equality remain unaccepted. Created-envelope query routing and creation-wrapper resource binding now have 340 mutating graph cases and 24 wrapper cases. Generic post-create owner notification is removed; native part/car command/installation dispatch remains unfinished. Strict replay fails in frame31; native equality differs at filtered620/unfiltered909. Historical audit counts registry keys, not completed originals.",
+      "note": "Fresh mandate source replay reaches frame31, 619 filtered/908 unfiltered matching records, then explicit nested VM-native ABI boundary in stock Part.addpart before GameRef.getScriptInstance. The 6508/9209 endpoint is not reached; no complete boot or feature pass. Earlier receipts remain historical.",
       "evidence": [
         "docs/acceptance-inventory.md",
-        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f",
+        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f/manifest.json",
         "re/out/checkpoints/20261021-instance-routing/workspace-tests.txt",
-        "re/out/checkpoints/20261021-instance-routing/receipt.json"
+        "re/out/checkpoints/20261021-instance-routing/receipt.json",
+        "re/out/boot/runs/20261022T032015.415079Z-61591a6515d2/report.json",
+        "re/out/boot/runs/20261022T075801.098749Z-a0b09acb3e17/report.json"
       ]
     },
     {
@@ -459,11 +461,13 @@
       "kind": "supporting",
       "title": "Boot milestone (P01 intermediate): completed MainMenu + >=300 idle frames, filtered native log equal to the 6,508-record endpoint",
       "status": "open",
-      "note": "Unchanged 600-frame menu smoke passes. Strict replay still fails in frame31: expected Dummy.getInfo, got Part instance field initialization. Native logs first differ at filtered620/unfiltered909, expected getScriptInstance versus queueEvent from GameRef.command. Complete equality and the strict boot endpoint remain unaccepted.",
+      "note": "Fresh mandate source replay reaches frame31, 619 filtered/908 unfiltered matching records, then explicit nested VM-native ABI boundary in stock Part.addpart before GameRef.getScriptInstance. The 6508/9209 endpoint is not reached; no complete boot or feature pass. Earlier receipts remain historical.",
       "evidence": [
-        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f",
+        "re/out/boot/runs/20261022T012004.962508Z-73eab267649f/manifest.json",
         "re/out/checkpoints/20261021-instance-routing/workspace-tests.txt",
-        "re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog"
+        "re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog",
+        "re/out/boot/runs/20261022T032015.415079Z-61591a6515d2/report.json",
+        "re/out/boot/runs/20261022T075801.098749Z-a0b09acb3e17/report.json"
       ]
     },
     {
@@ -540,7 +544,7 @@
       "id": "S11",
       "kind": "supporting",
       "title": "Ledger regeneration from the current tree and test receipts",
-      "status": "passed",
+      "status": "partial",
       "evidence": [
         "docs/fidelity.md",
         "re/out/checkpoints/20261021-instance-routing/receipt.json",
@@ -548,7 +552,7 @@
         "re/out/checkpoints/20261021-instance-routing/ledger-regen.txt",
         "re/out/checkpoints/20261021-instance-routing/source.patch"
       ],
-      "note": "Fresh collection: 486/486 evidence rows; 504 annotated symbols regenerated idempotently from the current tree. Workspace tests (1,106) and Clippy pass. Controlled routing/wrapper evidence names supplied collaborators and raw callback-list/native-handler limitations; whole-game obligations remain unaccepted."
+      "note": "Executable isolated ledger collection/regeneration validator exists. Current-source bin suite passes193 tests after genuine original snapshot refresh; fresh coherent S11 freeze/collection is still required. Historical receipts cannot pass a changing candidate."
     },
     {
       "id": "S12",

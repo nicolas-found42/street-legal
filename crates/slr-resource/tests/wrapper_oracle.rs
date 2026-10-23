@@ -650,5 +650,5 @@ fn stock_interpreter_ptr_write_is_observed_by_installed_resource_natives() {
         collect_args_with(&mut thread, "(I)V", &mut vm).unwrap(),
         vec![VmValue::int(native as i32), VmValue::reference(object)]
     );
-    assert_eq!(thread.live, 0);
+    assert_eq!(thread.live(), 0);
 }

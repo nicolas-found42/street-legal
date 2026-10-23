@@ -48,6 +48,12 @@ from its index: query these directly, e.g.
 Keep exe annotations; map names by address. See `docs/re-progress.md` for
 measured results and limitations.
 
+For the 2026-10-21 campaign, the historical `re/out/kuna` full-export cache is
+absent locally. Do not credit its documented emission totals as current recovery.
+`re/coverage/README.md` regenerates executable-bound discovery and the address
+inventory without repeating a mass C export. Existing focused Kuna exports in
+`re/out/boot` remain inspection material with explicit unbound provenance.
+
 ## Thread dispatch option check (2026-10-19)
 
 A bounded follow-up for #106 compared six profiles on `FUN_00420ff0`: the

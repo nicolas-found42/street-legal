@@ -1,10 +1,78 @@
 # Reverse-engineering progress (stock build 606)
 
-Assessment: **incomplete**. Snapshot: 2026-10-19, integration branch
-`exact-port`. The old approximate `slr-core`/`slr-game` slice remains until
+Assessment: **incomplete**. Current campaign inventory: 2026-10-21, integration
+branch `exact-port`; the older measurements below retain their historical date.
+The old approximate `slr-core`/`slr-game` slice remains until
 headless boot passes (M1-14). No stock feature has passed end-to-end parity.
 
-## Measured progress
+## Reproduced address inventory (2026-10-21)
+
+`re/coverage/inventory.py` joins original addresses across the executable,
+Ghidra exports, fresh Kuna entry discovery, focused cached Kuna exports, native
+registrations, Rust annotations and legacy differential claims. The machine
+report and reproducible discovery manifest are under ignored
+`re/out/checkpoints/20261021-campaign/re-inventory/`. Regeneration instructions
+and the inventory's limits are in `re/coverage/README.md`.
+
+| Observation | Reproduced result |
+|---|---:|
+| Ghidra function entries / C bodies emitted | 4,356 / 4,356 |
+| Ghidra bodies carrying actual decompiler diagnostics | 766 |
+| Fresh Kuna default entries / shared with Ghidra | 2,076 / 1,568 |
+| Ghidra-only / unclassified Kuna-only entries | 2,788 / 508 |
+| Addresses with preserved focused Kuna emission observations | 27 |
+| Original-address records, including relocation candidates | 8,496 |
+| Addresses with Rust `exe:` annotations | 512 |
+| Addresses named by legacy passing differential claims | 385 |
+| Differential claims imported as candidate-validated evidence | 0 |
+| Native table registrations / addresses without a Rust annotation | 353 / 142 |
+| Candidate entries scanned / direct instruction edges | 4,813 / 19,983 |
+| Indirect transfer candidate sites / unresolved sites | 6,532 / 5,956 |
+| Relocation targets into executable sections / outside declared entries | 4,876 / 3,490 |
+
+These are inventory observations, not recovery or acceptance percentages. The
+supported reachable-address denominator remains unresolved. Missing annotations
+do not prove missing behavior, and present annotations do not prove a complete
+implementation. The instruction walk does not guess contiguous bodies from
+Ghidra address counts; it stops at unresolved indirect jumps. Candidate discovery
+can decode data as instructions. Zero decode gaps in its admitted paths is not
+complete control-flow recovery.
+
+The report independently exposes `Thread::run` indirect jump sites at
+`0x4210e5`, `0x4218b9`, `0x422e91` and `0x4232b4`, preserving unresolved dispatch
+rather than accepting emitted C as control-flow recovery. All source-emission
+observations retain unverified semantics. Legacy test-result rows lack the
+candidate/executable/stock/oracle/comparison identity needed to validate current
+parity, so they remain raw claims rather than evidence imported by this tool.
+The zero imported count does not assert that every historical test is invalid.
+
+The historical full Kuna export described later is absent in this checkout and
+the other registered worktrees. The recovery snapshot's matching directory is
+only a dangling symlink back to that missing cache. Existing focused exports are
+preserved by address and hash. Fresh CLI `kuna 1.906` discovery reproduces the
+historical overlap; no mass C export was run. REA's Kuna adapter still rejects
+PE targets, reproduced in this campaign; the CLI handles this executable.
+
+Executable identities are pinned in the report. The reverse-engineering oracle
+is SHA-256 `7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde`;
+the stock installed exe is
+`16b25cace5313208e5b6f8e149edea5261634f20dc7e45157f8dac0199bfcf24`.
+A fresh comparison finds exactly two changed bytes, at original addresses
+`0x40150a` and `0x40150b`, inside the CD-check function. The existing ADR 0009
+replacement is retained; platform replacements still require Tier D evidence.
+The source compiler's candidate `0x4165a0` also checks TUFA headers, so its whole
+function is not automatically excluded by the compiler exclusion. The old-format
+Dialog exclusion removes no executable address from the inventory.
+
+Nine data-free integrity controls pass, including wrong-binary and changed-cache
+rejection, duplicate/missing discovery rejection, indirect dispatch remaining
+unresolved, branch paths beyond an early return, and emission never certifying
+semantics. The report hashes tracked and untracked nonignored candidate files,
+rejects source changes during generation, and preserves previous output on
+failure. It remains an investigation aid; executable acceptance validation is
+owned by the whole-game acceptance runner.
+
+## Historical annotation counts (2026-10-19)
 
 Reproduce from local artifacts:
 
@@ -14,7 +82,7 @@ cargo run -q -p slr-ledger
 python3 re/progress.py
 ```
 
-| Measure | Handoff baseline (`7caab32`) | Current integration |
+| Measure | Handoff baseline (`7caab32`) | 2026-10-19 integration |
 |---|---:|---:|
 | Generated ledger symbol rows | 430 | 488 |
 | Rows with passing evidence | 321 | 371 |

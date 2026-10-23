@@ -31,25 +31,41 @@ fn mark_loaded(m: &mut Space, raw: u32) -> Result<(), String> {
     })
 }
 
-pub struct RuntimeHost {
+pub struct RuntimeHost<'a> {
+    vm: Option<&'a mut slr_vm::host::VmHost>,
     pub config: native_body::ConfigHost,
     settings: std::collections::HashMap<&'static str, u32>,
 }
-impl RuntimeHost {
+impl RuntimeHost<'_> {
     /// Resource-only collaborators do not read camera settings or invoke cfg handlers.
     pub fn for_resources(template_id: u32) -> Self {
         Self {
+            vm: None,
             config: native_body::ConfigHost::new(template_id),
             settings: Default::default(),
         }
     }
 }
-impl Host for RuntimeHost {
+impl Host for RuntimeHost<'_> {
     fn call(&mut self, m: &mut Space, call: &ExtCall) -> u32 {
         self.config.call(m, call)
     }
 }
-impl native_part::PhysicalHost for RuntimeHost {
+impl native_part::PhysicalHost for RuntimeHost<'_> {
+    fn reference_query(
+        &mut self,
+        m: &mut Space,
+        reference: u32,
+        message: u32,
+        argument: u32,
+    ) -> Result<u32, String> {
+        let vm = self
+            .vm
+            .as_deref_mut()
+            .ok_or("NativeVmBoundary: constructor resource query requires live VM")?;
+        crate::native_install_runtime::query_reference(m, vm, reference, message, argument)
+    }
+
     fn command(
         &mut self,
         m: &mut Space,
@@ -118,17 +134,27 @@ impl native_part::PhysicalHost for RuntimeHost {
         native_world::sleep(m, entity)
     }
     fn or_flags(&mut self, m: &mut Space, object: u32, flags: u32) -> Result<(), String> {
-        m.w32(object + 0x70, m.r32(object + 0x70) | flags);
+        // 48d3d0 receives the body's embedded Ref, then calls the resource's
+        // get-data virtual and changes the envelope's event subscription.
+        // body+70 is separate native part state.
+        let raw = m.r32(object + 0xc);
+        if raw != 0 {
+            let payload = loaded_game_payload(m, raw)?;
+            m.w32(payload + 0x70, m.r32(payload + 0x70) | flags);
+        }
         Ok(())
     }
-    fn parent_payload(&mut self, m: &mut Space, reference: u32) -> Result<Option<u32>, String> {
-        // 48aaf0: a reference with a bound resource yields that resource's
-        // +0x14 payload word; a zero-bound reference yields nothing.
-        let resource = m.r32(reference + 12);
-        if resource == 0 {
-            return Ok(None);
-        }
-        Ok(Some(m.r32(resource + 0x14)))
+    fn game_payload(&mut self, m: &mut Space, resource: u32) -> Result<u32, String> {
+        crate::native_assets::access(
+            m,
+            resource,
+            crate::native_resource_load::Access {
+                flags: 0xa0000000,
+                quality: 0,
+                priority: 0,
+                time: 0,
+            },
+        )
     }
     fn or_resource_flags(&mut self, m: &mut Space, object: u32, flags: u32) -> Result<(), String> {
         let raw = m.r32(object + 0xc);
@@ -147,7 +173,7 @@ impl native_part::PhysicalHost for RuntimeHost {
         Ok(())
     }
 }
-impl native_car::CarHost for RuntimeHost {
+impl native_car::CarHost for RuntimeHost<'_> {
     fn physics_entity(&mut self, m: &mut Space, resource: u32) -> Result<u32, String> {
         if m.r32(resource + 0x4c) != 2 || m.r32(resource + 0x64) & 1 == 0 {
             return Err(
@@ -221,7 +247,7 @@ impl native_car::CarHost for RuntimeHost {
         Ok(())
     }
 }
-impl crate::native_shape::Host for RuntimeHost {
+impl crate::native_shape::Host for RuntimeHost<'_> {
     fn request_file(
         &mut self,
         m: &mut Space,
@@ -232,7 +258,7 @@ impl crate::native_shape::Host for RuntimeHost {
         crate::native_file::request_shape(m, path, callback, shape)
     }
 }
-impl crate::native_mesh_resource::Host for RuntimeHost {
+impl crate::native_mesh_resource::Host for RuntimeHost<'_> {
     fn create_shape(
         &mut self,
         m: &mut Space,
@@ -251,7 +277,7 @@ impl crate::native_mesh_resource::Host for RuntimeHost {
         crate::native_shape::request_async(m, kind, source, skinned, resource_id, slot, self)
     }
 }
-impl native_camera::Host for RuntimeHost {
+impl native_camera::Host for RuntimeHost<'_> {
     fn setting(&mut self, name: &str) -> Result<u32, String> {
         self.settings
             .get(name)
@@ -314,7 +340,7 @@ impl native_camera::Host for RuntimeHost {
     }
 }
 
-impl crate::native_render_resource::Host for RuntimeHost {
+impl crate::native_render_resource::Host for RuntimeHost<'_> {
     fn mark_loaded(&mut self, m: &mut Space, resource: u32) -> Result<(), String> {
         mark_loaded(m, resource)
     }
@@ -338,7 +364,7 @@ impl crate::native_render_resource::Host for RuntimeHost {
     }
 }
 
-impl crate::native_render_lod::Host for RuntimeHost {
+impl crate::native_render_lod::Host for RuntimeHost<'_> {
     fn interaction_state(
         &mut self,
         m: &mut Space,
@@ -476,6 +502,7 @@ pub fn begin_car(
         }
     }
     let mut host = RuntimeHost {
+        vm: Some(vm),
         config: native_body::ConfigHost::new(state.memory.r32(state.template + 0xc)),
         settings,
     };
@@ -537,23 +564,13 @@ pub fn begin_part(
     let template_resource = state.memory.r32(state.template + 0x10);
     native_part::bind_reference(&mut state.memory, raw + 0x110, template_resource);
     mark_loaded(&mut state.memory, raw)?;
-    // The owning instance is the container's factory parent. `53a2a0` passed
-    // the caller's parent reference straight through, and for a part created
-    // by `Part.addPart` that parent is the car instance's raw resource.
-    let owner = node::with_res(|host| {
-        host.container(container)
-            .and_then(|resource| (resource.parent != 0).then_some(resource.parent))
-    })
-    .unwrap_or(0);
-    let parent = if owner != 0 {
-        native_body::raw_resource(&mut state.memory, owner)?
-    } else {
-        raw
-    };
+    // 53a2a0 binds its local constructor Ref to the newly created instance.
+    // The owning car is reached separately through that resource's parent.
     let reference = state.memory.alloc(16);
-    native_part::bind_reference(&mut state.memory, reference, parent);
+    native_part::bind_reference(&mut state.memory, reference, raw);
     state.body = state.memory.alloc(0x11c);
     let mut host = RuntimeHost::for_resources(state.memory.r32(state.template + 0xc));
+    host.vm = Some(vm);
     let entity = crate::native_part::construct(
         &mut state.memory,
         state.template,
@@ -573,7 +590,6 @@ pub fn begin_part(
     })
     .ok_or("NativeResourceBoundary: constructed part has no script envelope")?;
     state.memory.w32(raw + 0x128, script);
-    let _ = vm;
     native_part::bind_reference(&mut state.memory, reference, 0);
     native_body::insert(state);
     Ok(())
@@ -619,5 +635,78 @@ mod release_tests {
             let alias = host.node(alias).unwrap();
             assert_eq!((alias.id, alias.container), (0, 0));
         });
+    }
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+    use crate::native_part::PhysicalHost;
+    use sha2::{Digest, Sha256};
+
+    /// The production collaborator must address the part's own resource
+    /// envelope; its owning car and native body contain separate state.
+    /// exe: FUN_0048d3d0
+    /// exe: FUN_0053efa0
+    #[test]
+    fn original_subscription_flags_update_own_resource_and_preserve_body_and_car() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join("re/out/boot/native-resource-flags-original.json");
+        let Ok(bytes) = std::fs::read(path) else {
+            assert!(
+                std::env::var_os("SLR_REQUIRE_ORACLE").is_none(),
+                "required vectors missing: run re/oracle/native_resource_flags_probe.py"
+            );
+            eprintln!("SLR_ORACLE_SKIPPED: run re/oracle/native_resource_flags_probe.py");
+            return;
+        };
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(data["addresses"], serde_json::json!([0x48d3d0, 0x53efa0]));
+        assert_eq!(
+            data["exe_sha256"],
+            "7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde"
+        );
+        let digest = |path: &str| {
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(root.join(path)).unwrap())
+            )
+        };
+        assert_eq!(
+            data["producer_sha256"],
+            digest("re/oracle/native_resource_flags_probe.py")
+        );
+        assert_eq!(
+            data["exe_sha256"],
+            digest("reference/raw/StreetLegal_Redline.bak.exe")
+        );
+        let word = |v: &serde_json::Value| v.as_u64().unwrap() as u32;
+        let rows = data["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 24);
+        for (index, row) in rows.iter().enumerate() {
+            let mut m = Space::new();
+            for (i, v) in row["before"].as_array().unwrap().iter().enumerate() {
+                m.w32(slr_physics::space::HEAP_BASE + i as u32 * 4, word(v));
+            }
+            let own = word(&row["own"]);
+            let car = word(&row["car"]);
+            let body = word(&row["body"]);
+            RuntimeHost::for_resources(0)
+                .or_flags(&mut m, body, word(&row["flags"]))
+                .unwrap();
+            for (i, expected) in row["after"].as_array().unwrap().iter().enumerate() {
+                let address = slr_physics::space::HEAP_BASE + i as u32 * 4;
+                assert_eq!(m.r32(address), word(expected), "row {index} {address:#x}");
+            }
+            assert_eq!(m.r32(body + 0x70), 0x66778899);
+            assert_eq!(m.r32(car + 0xd8 + 0x70), 0x55aa55aa);
+            let expected = if row["bound"].as_bool().unwrap() {
+                word(&row["initial"]) | word(&row["flags"])
+            } else {
+                word(&row["initial"])
+            };
+            assert_eq!(m.r32(own + 0xd8 + 0x70), expected);
+        }
     }
 }

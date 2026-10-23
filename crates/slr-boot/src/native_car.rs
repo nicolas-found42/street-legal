@@ -1511,7 +1511,7 @@ pub fn finish_physics(
                     return Err("NativeCarBoundary: relative entity has no parent".into());
                 }
             }
-            host.wake(m, entity)?;
+            crate::native_stack::call(m, 0x44b476, &[], Some(entity), |m| host.wake(m, entity))?;
         }
     }
     Ok(())
