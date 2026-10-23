@@ -1,4 +1,44 @@
-# Headless stock bootstrap frontier
+# Stock bootstrap and visible main-menu preview
+
+From the repository root on macOS:
+
+```sh
+cargo run -p slr-boot -- stock --window
+```
+
+This opens an 800×600 window through winit/wgpu (Metal). The unchanged stock
+scripts build MainMenu; the presentation adapter reads their live rectangle,
+text, camera and group state and renders the stock textures and font meshes.
+The menu appears after bootstrap, then stays visible when the default
+600-frame diagnostic run finishes. Close the window using its close button.
+This is a **display-only menu preview**: mouse/keyboard menu actions, the
+animated 3D background, audio and the full D3D9 state emulator are unfinished.
+It does not establish screenshot parity or make the exact port playable.
+
+Capture the same rendering path without opening a window:
+
+```sh
+cargo run -p slr-boot -- stock --menu-frame re/out/menu.png
+```
+
+`--menu-frame PATH` also works with `--window`. The PNG is 800×600; the run's
+`presentation.json` lists the script labels, their bounds and source textures.
+Both presentation options default the Config/Init instance IDs to the same
+controlled `0xffff0080`/`0xffff007f` profile as the existing menu regression.
+Explicit instance-ID arguments override those defaults. These remain controlled
+inputs, not recovered original startup allocation history. Without either
+presentation option the headless defaults and logging behavior are unchanged.
+
+`cargo test -p slr-boot --test stock_menu_presentation` checks the real stock
+menu image, title/column bounds and hidden-panel exclusion, and compares every
+byte of the native-call log between presented and headless executions. It
+requires the local verified stock install and a Metal device. Generated captures
+and stock assets remain under ignored paths.
+
+## Headless bootstrap history
+
+The following describes the earlier bootstrap frontier; current integration
+status is maintained in `docs/boot-status.md`.
 
 Run from the repository root:
 
