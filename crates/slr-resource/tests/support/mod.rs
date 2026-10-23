@@ -39,7 +39,7 @@ pub fn invoke(host: &mut n::ResHost, binding: &n::ResBinding, words: &[u32]) -> 
         if let Some(word) = got.filter(|w| *w != 0) {
             let object = &vm.objects[(word - 0x1000) as usize];
             assert_eq!(
-                object.class_name(&vm.loader),
+                object.class,
                 if binding.impl_addr == n::GET_ORI {
                     "java.lang.Ypr"
                 } else {
@@ -60,13 +60,12 @@ pub fn invoke(host: &mut n::ResHost, binding: &n::ResBinding, words: &[u32]) -> 
     ) {
         if let Some(word) = got.filter(|word| *word != 0) {
             let object = &vm.objects[(word - 0x1000) as usize];
-            let class_id = match &object.class {
-                slr_vm::vmclass::ClassRef::Loaded(id) => *id,
-                slr_vm::vmclass::ClassRef::Array(_) => panic!("resource object is not an array"),
-            };
-            let slot = vm.instance_field_slot_id(class_id, "ptr").unwrap();
+            let slot = vm.instance_field_slot(&object.class, "ptr").unwrap();
             assert_eq!(object.fields[slot].payload, host.object_node(word));
-            assert!(vm.loader.resolve_method_id(class_id, "id", "()I").is_some());
+            assert!(vm
+                .loader
+                .resolve_method(&object.class, "id", "()I")
+                .is_some());
         }
     }
     got

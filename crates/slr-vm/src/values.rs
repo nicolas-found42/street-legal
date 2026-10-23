@@ -552,37 +552,22 @@ pub fn assign_convert(value: &mut Value, target: TypeTag) -> Result<(), ConvertE
 /// What the class-loader half of `FUN_00417da0` needs: load the target
 /// class, test assignability, and format/lookup strings. The interpreter's
 /// [`crate::interp::Host`] provides it; tests use a fake.
-///
-/// Identity model (#110 steps 1-5): the interface carries
-/// [`crate::vmclass::ClassRef`] instead of bare names where the record
-/// identity matters. `load_class` resolves the descriptor once at the
-/// boundary and the returned reference is retained by the caller;
-/// `reference_class` returns the object's authoritative runtime reference
-/// (loaded record or array spelling). Descriptor text stays an argument
-/// for the canonical-cell checks and logging, never a re-resolution key.
-/// Production duplicate-name registration stays rejected, so the selected
-/// record and its diagnostic name still agree one-to-one.
 pub trait LoaderConvert {
     /// Load-or-get the class named by a bare (`java.lang.String`) or
     /// descriptor (`Ljava.lang.String;`) spelling (`FUN_00410890`).
-    /// Returns the opaque class reference for assignability checks.
-    /// Arrays keep their explicit spelling and own no record.
-    fn load_class(&mut self, descriptor: &str) -> Option<crate::vmclass::ClassRef>;
-    /// Assignability of a loaded reference into the target (`FUN_00405400`).
-    /// Array references never convert; loaded records use the ID-carrying
-    /// cost against the target's selected record.
-    fn is_assignable(&mut self, from: &crate::vmclass::ClassRef, to: &str) -> bool;
+    /// Returns the canonical class name for assignability checks.
+    fn load_class(&mut self, descriptor: &str) -> Option<String>;
+    /// Assignability of a loaded class into the target (`FUN_00405400`).
+    fn is_assignable(&mut self, from_class: &str, to: &str) -> bool;
     /// Numeric conversion uses Class::isInheritedFrom with target -> String,
     /// independently of405400's reference-conversion predicate.
-    fn string_target(
-        &mut self,
-        target: &crate::vmclass::ClassRef,
-        string: &crate::vmclass::ClassRef,
-    ) -> bool;
+    fn string_target(&mut self, target_class: &str, string_class: &str) -> bool {
+        self.is_assignable(target_class, string_class)
+    }
     /// Runtime class of a non-null reference's payload (`instance+0xc`),
     /// which can differ from the cell's declared descriptor. Standalone
     /// loader backends may use the descriptor when they have no object heap.
-    fn reference_class(&mut self, value: Value) -> Option<crate::vmclass::ClassRef> {
+    fn reference_class(&mut self, value: Value) -> Option<String> {
         self.load_class(value.tag.name())
     }
     /// Format an `I`/`F` payload the way the exe's `sprintf` does
@@ -617,18 +602,6 @@ pub fn loader_convert(
     value: &mut Value,
     target: &str,
 ) -> Result<(), ConvertError> {
-    loader_convert_ref(loader, value, target)
-}
-
-/// ID-carrying conversion entry: same semantics as [`loader_convert`]; the
-/// `Ref` suffix names the [`crate::vmclass::ClassRef`] identity the
-/// [`LoaderConvert`] boundary now carries (loaded record vs array spelling).
-/// exe: FUN_00417da0
-pub fn loader_convert_ref(
-    loader: &mut dyn LoaderConvert,
-    value: &mut Value,
-    target: &str,
-) -> Result<(), ConvertError> {
     let err = || ConvertError {
         from: value.tag.byte(),
         to: target.as_bytes()[0],
@@ -642,9 +615,9 @@ pub fn loader_convert_ref(
     }
     match value.tag {
         TypeTag::Int | TypeTag::Float => {
-            let target_ref = loader.load_class(target).ok_or_else(err)?;
-            let string_ref = loader.load_class("java.lang.String").ok_or_else(err)?;
-            if !loader.string_target(&target_ref, &string_ref) {
+            let target_class = loader.load_class(target).ok_or_else(err)?;
+            let string_class = loader.load_class("java.lang.String").ok_or_else(err)?;
+            if !loader.string_target(&target_class, &string_class) {
                 // The target must inherit String; the original permits a
                 // subclass tag even though4174a0 allocates an actual String.
                 return Err(err());
@@ -851,43 +824,16 @@ mod tests {
     }
 
     impl LoaderConvert for FakeLoader {
-        fn load_class(&mut self, descriptor: &str) -> Option<crate::vmclass::ClassRef> {
-            use crate::vmclass::{ArrayDescriptor, ClassId, ClassRef};
-            if let Some(array) = ArrayDescriptor::new(descriptor) {
-                return Some(ClassRef::Array(array));
-            }
+        fn load_class(&mut self, descriptor: &str) -> Option<String> {
             let bare = descriptor
                 .strip_prefix('L')
                 .and_then(|s| s.strip_suffix(';'))
                 .unwrap_or(descriptor);
-            self.classes
-                .iter()
-                .position(|c| c.as_str() == bare)
-                .map(|index| ClassRef::Loaded(ClassId::from_raw(index as u32 + 1).unwrap()))
+            self.classes.iter().find(|c| c.as_str() == bare).cloned()
         }
 
-        fn is_assignable(&mut self, from: &crate::vmclass::ClassRef, to: &str) -> bool {
-            use crate::vmclass::ClassRef;
-            let bare = to
-                .strip_prefix('L')
-                .and_then(|s| s.strip_suffix(';'))
-                .unwrap_or(to);
-            match from {
-                ClassRef::Loaded(id) => {
-                    let index = id.get() as usize - 1;
-                    self.classes.get(index).is_some_and(|name| name == bare)
-                }
-                ClassRef::Array(_) => false,
-            }
-        }
-
-        fn string_target(
-            &mut self,
-            target: &crate::vmclass::ClassRef,
-            _string: &crate::vmclass::ClassRef,
-        ) -> bool {
-            use crate::vmclass::ClassRef;
-            matches!(target, ClassRef::Loaded(id) if self.classes.get(id.get() as usize - 1).is_some_and(|name| name == "java.lang.String"))
+        fn is_assignable(&mut self, from: &str, to: &str) -> bool {
+            from == to || (from == "java.lang.String" && to == "Ljava.lang.String;")
         }
 
         fn make_string(&mut self, value: Value) -> u32 {

@@ -379,7 +379,7 @@ fn object_index(word: u32) -> Option<usize> {
 /// descriptor's name cstring (`FUN_00404ea0`).
 pub fn class_name(vm: &VmHost, word: u32) -> Option<&str> {
     let index = object_index(word)?;
-    vm.objects.get(index).map(|o| o.class_name(&vm.loader))
+    vm.objects.get(index).map(|o| o.class.as_str())
 }
 
 /// The `toString` text: `sprintf(buf, "%s<%0x>", name, obj)`.
@@ -412,10 +412,7 @@ pub fn to_string(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     // The exe reads `[[obj+0xc]+8]` directly off the receiver; an unknown
     // word dereferences unmapped memory. The port returns the null String
     // instead of inventing a class name.
-    let name = vm
-        .objects
-        .get(object_index(word)?)
-        .map(|o| o.class_name(&vm.loader).to_owned());
+    let name = vm.objects.get(object_index(word)?).map(|o| o.class.clone());
     let Some(name) = name else {
         return Some(0);
     };
@@ -484,21 +481,9 @@ mod tests {
     /// A host with one object of `class` in its heap; returns the object word.
     fn host_with_object(class: &str) -> (VmHost, u32) {
         let mut vm = crate::test_strings::vm();
-        if vm.loader.lookup(class).is_none() {
-            vm.loader.insert_test_class(slr_vm::vmclass::Class {
-                kind: 0,
-                name: class.into(),
-                base: None,
-                interfaces: vec![],
-                methods: vec![],
-                fields: vec![],
-                bodies: vec![],
-            });
-        }
-        let id = vm.loader.lookup(class).unwrap();
         let word = 0x1000 + vm.objects.len() as u32;
         vm.objects.push(Object {
-            class: slr_vm::vmclass::ClassRef::Loaded(id),
+            class: class.to_owned(),
             fields: Vec::new(),
         });
         (vm, word)
@@ -539,7 +524,7 @@ mod tests {
             Some(format!("java.game.Car<{word:x}>").into_bytes())
         );
         let index = (ret - 0x1000) as usize;
-        assert_eq!(vm.objects[index].class_name(&vm.loader), "java.lang.String");
+        assert_eq!(vm.objects[index].class, "java.lang.String");
         assert_eq!(
             vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
             19,
@@ -631,7 +616,7 @@ mod tests {
         let (mut vm, o1) = host_with_object("java.game.Car");
         let o2 = 0x1000 + vm.objects.len() as u32;
         vm.objects.push(Object {
-            class: slr_vm::vmclass::ClassRef::Loaded(vm.loader.lookup("java.game.Car").unwrap()),
+            class: "java.game.Car".to_owned(),
             fields: Vec::new(),
         });
         let call = |vm: &mut VmHost, f: fn(&mut VmHost, &CallInfo<'_>) -> Option<u32>, w: u32| {
@@ -763,20 +748,9 @@ mod tests {
         reset();
         seam::reset();
         let mut vm = crate::test_strings::vm();
-        let car_id = vm.loader.lookup("java.game.Car").unwrap_or_else(|| {
-            vm.loader.insert_test_class(slr_vm::vmclass::Class {
-                kind: 0,
-                name: "java.game.Car".into(),
-                base: None,
-                interfaces: vec![],
-                methods: vec![],
-                fields: vec![],
-                bodies: vec![],
-            })
-        });
         let word = 0x1000 + vm.objects.len() as u32;
         vm.objects.push(Object {
-            class: slr_vm::vmclass::ClassRef::Loaded(car_id),
+            class: "java.game.Car".to_owned(),
             fields: Vec::new(),
         });
         let mut table = NativeTable::new();

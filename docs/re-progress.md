@@ -54,18 +54,6 @@ implementation.
 
 ## Current frontier
 
-- **Request-driven loader:** the recovered original-executable selection oracle
-  now replays all 13 path/directory/direct-file rows (5/6/2) against unchanged
-  stock class bytes. Lazy requests compare compile/read event order, diagnostics,
-  registration counts and selected record identities. Package nodes and basenames
-  match exact case; the first matching directory wins, a stale first entry never
-  falls back, and cache hits cause no read, registration, event or diagnostic.
-  Direct-file rows deliberately bypass the request cache and register all 12
-  records across the two Dialog file orders. Stock directory enumeration and
-  successful compiler checks remain explicit seams, matching the controlled
-  original oracle's boundary; this is not original filesystem, compiler,
-  complete boot or MainMenu evidence. Fixtures remain ignored in `re/out/`.
-
 - **#35 / M1-08:** all 40 Object/System/GameType registrations are bound. Fresh executable vectors cover language wrappers, array payload/type behavior and Thread init/start/stop queue state. Compiler, package manager, timers and callback engines are explicit required collaborators; their implementation remains subsystem work. Class has no registered native. Independent review caught and corrected zero-length arraycopy handling with negative indices and strengthened ordinary timer-delay inputs.
   The final per-file Jev gate verified all five scoped claims but escalated
   (composite 0.6832; safe-to-apply 0.33), chiefly on review confidence.
@@ -103,11 +91,9 @@ implementation.
   normalization remain boot/replay work. Parent manual review found no further
   concrete defects after the Jev gate requested stronger review.
 - **#12 / M0-11:** whole-game Wine oracle. Static fixes are integrated, but
-  boot-to-main-menu replay acceptance has not run. Wine launches stay forbidden
-  without explicit per-invocation authorization (user directive; the
-  `re/hook/run.sh` gate enforces it). The cited note
-  `../slr-notes/decision-m0-11-static-only.md` no longer exists on disk; the
-  gate it recorded is preserved here and in the hook script. #13 / M0-12 is the
+  boot-to-main-menu replay acceptance has not run. The prior explicit user
+  restriction in `../slr-notes/decision-m0-11-static-only.md` still forbids Wine
+  launches without authorization. Preserve its gate. #13 / M0-12 is the
   documented Unicorn fallback.
 - **#13 / M0-12:** strict startup infrastructure remains an incomplete oracle
   prefix. The default C-only scenario reaches real WinMain and requests the
@@ -245,18 +231,6 @@ implementation.
   qualifier now distinguishes the optional continuation from the earlier stop.
   No automatic approval, completed window, physical notification sequence,
   device/caps model or MainMenu acceptance is claimed.
-  The recovered unpublished window-transcript slice (declared finite
-  WM_SHOWWINDOW/notification transcript plus a one-shot owned CreateWindowExA
-  return) was rebuilt from the frozen recovery archive and integrated at merge
-  `1497cac` after a fresh native-prefix replay: 109 tests with no skips, all 13
-  prior matching-input prefixes byte-identical, and all 5 new CLI outputs equal
-  to native outputs. Seven files match the frozen manifest hashes; the merged
-  diff equals the frozen 52,537-byte patch. The integration gate verified all
-  three claims (none contradicted) but escalated on review confidence
-  (composite 0.75475; safe-to-apply 0.30); parent hash/byte checks provide
-  manual disposition. Inputs remain declared hypothetical platform data, every
-  trace stays incomplete with MainMenu false, and the read-only next frontier
-  is ShowWindow/SW_HIDE before its API result.
 
 - **#109:** typed persistent field and array lvalues now share authoritative VM
   host storage with vector and resource natives. The loader retains class pools,

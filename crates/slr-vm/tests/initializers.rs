@@ -198,11 +198,7 @@ fn instance_initializers_observe_only_the_installed_field_prefix() {
         }
         assert_eq!(vm.objects.len(), 1);
         let object = &vm.objects[0];
-        let object_class = match &object.class {
-            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
-            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
-        };
-        assert_eq!(object_class, "ReadClass");
+        assert_eq!(object.class, "ReadClass");
         let actual=object.fields.iter().enumerate().map(|(index,value)|json!({"name":(["a","b","c"][index]),"type":value.tag.name(),"value":value.payload})).collect::<Vec<_>>();
         assert_eq!(json!(actual), row["result"]["instance"], "case{read}");
     }
@@ -771,11 +767,10 @@ fn new_initializers_allocate_real_target_objects_in_both_drivers() {
         // Original supplies allocation at404e20; compare its requested runtime
         // class, not that seam's arbitrary pointer, against the real Rust heap.
         let expected_class = row["result"]["calls"][1]["new"].as_str().unwrap();
-        let actual_class = match &vm.objects[(values[0].payload - 0x1000) as usize].class {
-            slr_vm::vmclass::ClassRef::Loaded(id) => vm.loader.class_name(*id).unwrap().to_owned(),
-            slr_vm::vmclass::ClassRef::Array(array) => array.descriptor().to_owned(),
-        };
-        assert_eq!(actual_class, expected_class);
+        assert_eq!(
+            vm.objects[(values[0].payload - 0x1000) as usize].class,
+            expected_class
+        );
         assert_eq!(
             values[1].payload,
             expected[1]["value"].as_u64().unwrap() as u32
@@ -1546,158 +1541,4 @@ fn fatal_initializer_retains_prior_cell_writes_like_original() {
         });
         assert_eq!(vm.objects.len(), usize::from(!static_fields));
     }
-}
-
-/// Plan step B binding-time policy (403e80/4117a0): dependencies resolve
-/// through the CURRENT cache selection until the owner's own owner
-/// installs, then the owner retains its resolved IDs on reentry. Replays
-/// the four accepted binding rows (uninitialized / initialized /
-/// failed-dependency / failed-field) at the public seam.
-///
-/// `wz` shares bucket 227 with `Base`, so registering it first as an
-/// unrelated collision head makes later `Base` duplicates flip live name
-/// lookup (first/second/third) instead of keeping the first definition.
-fn binding_world() -> (VmHost, slr_vm::vmclass::ClassId) {
-    let mut vm = VmHost::new();
-    vm.loader
-        .load_file(&order_module("wz", None, &[], 1, &[], &[]))
-        .unwrap();
-    vm.loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap();
-    vm.loader
-        .load_file(&order_module("InterfaceOne", None, &[], 1, &[], &[]))
-        .unwrap();
-    let leaf_old = vm
-        .loader
-        .load_file(&order_module(
-            "Leaf",
-            Some("Base"),
-            &["InterfaceOne"],
-            0,
-            &[],
-            &[],
-        ))
-        .unwrap()[0]
-        .0;
-    // Duplicate Base + InterfaceOne: the collision head makes name lookup
-    // flip to the new records.
-    let base_new = vm
-        .loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap()[0]
-        .0;
-    vm.loader
-        .load_file(&order_module("InterfaceOne", None, &[], 1, &[], &[]))
-        .unwrap();
-    assert_eq!(vm.loader.lookup("Base"), Some(base_new));
-    (vm, leaf_old)
-}
-
-#[test]
-fn uninitialized_leaf_binds_new_dependencies_at_install() {
-    let (mut vm, leaf_old) = binding_world();
-    assert!(vm.initialized_dependencies(leaf_old).is_none());
-    let word = vm.alloc_object_id(leaf_old).unwrap();
-    assert_ne!(word, 0);
-    let (base, ifaces) = vm.initialized_dependencies(leaf_old).unwrap();
-    // Install resolved the CURRENT winners (the new duplicates).
-    assert_eq!(base, vm.loader.lookup("Base"));
-    assert_eq!(ifaces, vec![vm.loader.lookup("InterfaceOne").unwrap()]);
-}
-
-#[test]
-fn initialized_leaf_retains_old_dependencies_on_reentry() {
-    // Pin the OLD dependencies first: initialize before any duplicate flips
-    // selection (head topology: `wz` collides with `Base` in bucket 227).
-    let mut vm = VmHost::new();
-    vm.loader
-        .load_file(&order_module("wz", None, &[], 1, &[], &[]))
-        .unwrap();
-    let base_old = vm
-        .loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap()[0]
-        .0;
-    vm.loader
-        .load_file(&order_module("InterfaceOne", None, &[], 1, &[], &[]))
-        .unwrap();
-    let leaf = vm
-        .loader
-        .load_file(&order_module(
-            "Leaf",
-            Some("Base"),
-            &["InterfaceOne"],
-            0,
-            &[],
-            &[],
-        ))
-        .unwrap()[0]
-        .0;
-    assert_eq!(vm.loader.lookup("Base"), Some(base_old));
-    vm.alloc_object_id(leaf).unwrap();
-    let (stored_base, stored_ifaces) = vm.initialized_dependencies(leaf).unwrap();
-    assert_eq!(stored_base, Some(base_old));
-    // Register Base/InterfaceOne duplicates: selection flips, but reentry
-    // retains the OLD ids while direct resolution returns the new records.
-    let base_new = vm
-        .loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap()[0]
-        .0;
-    vm.loader
-        .load_file(&order_module("InterfaceOne", None, &[], 1, &[], &[]))
-        .unwrap();
-    assert_eq!(vm.loader.lookup("Base"), Some(base_new));
-    assert_ne!(base_new, base_old);
-    vm.alloc_object_id(leaf).unwrap();
-    let (kept_base, kept_ifaces) = vm.initialized_dependencies(leaf).unwrap();
-    // InterfaceOne's bucket has no collision head, so its duplicate keeps
-    // selecting the first definition — which is also the stored one.
-    assert_eq!((kept_base, kept_ifaces), (stored_base, stored_ifaces));
-}
-
-#[test]
-fn failed_dependency_retry_selects_new_records() {
-    // Leaf with a missing interface fails before owner install; after
-    // supplying the interface plus a duplicate Base, retry binds new.
-    // The collision head `wz` registers BEFORE `Base` so the later
-    // duplicate flips selection (insert-after-head past a foreign head).
-    let mut vm = VmHost::new();
-    vm.loader
-        .load_file(&order_module("wz", None, &[], 1, &[], &[]))
-        .unwrap();
-    vm.loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap();
-    let leaf = vm
-        .loader
-        .load_file(&order_module(
-            "Leaf",
-            Some("Base"),
-            &["InterfaceOne"],
-            0,
-            &[],
-            &[],
-        ))
-        .unwrap()[0]
-        .0;
-    assert!(vm.alloc_object_id(leaf).is_err());
-    assert!(vm.initialized_dependencies(leaf).is_none());
-    // Supply the missing interface and a NEW Base duplicate; the retry
-    // resolves through the CURRENT selection (the new records), since no
-    // owner installed before the failure.
-    vm.loader
-        .load_file(&order_module("InterfaceOne", None, &[], 1, &[], &[]))
-        .unwrap();
-    let base_new = vm
-        .loader
-        .load_file(&order_module("Base", None, &[], 1, &[], &[]))
-        .unwrap()[0]
-        .0;
-    assert_eq!(vm.loader.lookup("Base"), Some(base_new));
-    vm.alloc_object_id(leaf).unwrap();
-    let (stored_base, ifaces) = vm.initialized_dependencies(leaf).unwrap();
-    assert_eq!(stored_base, Some(base_new));
-    assert_eq!(ifaces, vec![vm.loader.lookup("InterfaceOne").unwrap()]);
 }

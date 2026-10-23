@@ -243,9 +243,7 @@ fn array_row(r: &serde_json::Value) {
     let mut vm = VmHost::new();
     for (field, types) in [("src", "src_types"), ("dst", "dst_types")] {
         vm.objects.push(slr_vm::host::Object {
-            class: slr_vm::vmclass::ClassRef::Array(
-                slr_vm::vmclass::ArrayDescriptor::new("[I").unwrap(),
-            ),
+            class: "[I".into(),
             fields: r[field]
                 .as_array()
                 .unwrap()

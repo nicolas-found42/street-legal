@@ -34,13 +34,8 @@ fn state(ty: i32) -> n::ResHost {
     host.bind_object(7, node);
     host
 }
-fn ptr_slot(vm: &VmHost, class: &slr_vm::vmclass::ClassRef) -> usize {
-    use slr_vm::vmclass::ClassRef;
-    let id = match class {
-        ClassRef::Loaded(id) => *id,
-        ClassRef::Array(_) => panic!("resource object is not an array"),
-    };
-    vm.instance_field_slot_id(id, "ptr").unwrap()
+fn ptr_slot(vm: &VmHost, class: &str) -> usize {
+    vm.instance_field_slot(class, "ptr").unwrap()
 }
 
 #[test]
@@ -89,18 +84,10 @@ fn resource_wrappers_are_real_typed_vm_objects() {
                 .objects
                 .get(word.checked_sub(0x1000).expect("private wrapper handle") as usize)
                 .expect("wrapper not in VM heap");
-            assert_eq!(
-                object.class_name(&vm.loader),
-                expected_class,
-                "{name} row {}",
-                row["id"]
-            );
+            assert_eq!(object.class, expected_class, "{name} row {}", row["id"]);
             assert_eq!(
                 row["result"]["events"],
-                serde_json::json!([
-                    ["load", object.class_name(&vm.loader)],
-                    ["construct", 0x7001, 0]
-                ])
+                serde_json::json!([["load", object.class], ["construct", 0x7001, 0]])
             );
             let node = object.fields[ptr_slot(&vm, &object.class)].payload;
             assert_ne!(node, 0);
@@ -111,9 +98,8 @@ fn resource_wrappers_are_real_typed_vm_objects() {
             });
             let (method, owner) = vm
                 .loader
-                .resolve_method(object.class_name(&vm.loader), "id", "()I")
+                .resolve_method(&object.class, "id", "()I")
                 .expect("inherited native method is resolvable");
-            let owner = owner.to_owned();
             assert!(method.is_native);
             assert_eq!(
                 call(&mut vm, &owner, "id", "()I", word),
@@ -242,7 +228,7 @@ fn wrappers_use_the_stock_inherited_native_ptr() {
         )
         .unwrap();
         let object = &vm.objects[(word - 0x1000) as usize];
-        assert_eq!(object.class_name(&vm.loader), expected);
+        assert_eq!(object.class, expected);
         let slot = ptr_slot(&vm, &object.class);
         let node = object.fields[slot].payload;
         assert_ne!(node, 0);
@@ -284,7 +270,7 @@ fn wrappers_use_the_stock_inherited_native_ptr() {
         )
         .unwrap();
         assert_eq!(
-            vm.objects[(ancestor - 0x1000) as usize].class_name(&vm.loader),
+            vm.objects[(ancestor - 0x1000) as usize].class,
             "java.util.resource.RenderRef"
         );
         assert_eq!(
@@ -359,7 +345,7 @@ fn fresh_stock_resources_initialize_inherited_ptr_on_new_native() {
         }
         let (_, owner) = vm.loader.resolve_method(class, "newNative", "()V").unwrap();
         assert_eq!(call(&mut vm, &owner, "newNative", "()V", word), None);
-        let slot = ptr_slot(&vm, &vm.loader.resolve_descriptor(class).unwrap());
+        let slot = ptr_slot(&vm, class);
         let node = vm.objects[(word - 0x1000) as usize].fields[slot].payload;
         assert_ne!(node, 0);
         n::with_res(|h| {
@@ -414,7 +400,7 @@ fn stock_resource_arguments_read_native_ptr_without_private_bindings() {
         ] {
             let word = vm.alloc_object(class).unwrap();
             call(&mut vm, n::RESOURCE_REF_CLASS, "newNative", "()V", word);
-            let slot = ptr_slot(&vm, &vm.loader.resolve_descriptor(class).unwrap());
+            let slot = ptr_slot(&vm, class);
             nodes.push(vm.objects[(word - 0x1000) as usize].fields[slot].payload);
             objects.push(word);
         }
@@ -569,11 +555,7 @@ fn stock_interpreter_ptr_write_is_observed_by_installed_resource_natives() {
     );
     assert_eq!(heap.fields[2].tag, TypeTag::Ref("Ljava.lang.Thread;"));
     assert_eq!(heap.fields[3].tag, TypeTag::Ref("Ljava.util.MessagePort;"));
-    let heap_id = match &heap.class {
-        slr_vm::vmclass::ClassRef::Loaded(id) => *id,
-        slr_vm::vmclass::ClassRef::Array(_) => panic!("heap object is not an array"),
-    };
-    assert_eq!(vm.instance_field_slot_id(heap_id, "ptr").unwrap(), 0);
+    assert_eq!(vm.instance_field_slot(&heap.class, "ptr").unwrap(), 0);
     n::reset_res();
     let native = n::with_res(|host| {
         let container = host.add_container(n::Container::new(1, 0x55));

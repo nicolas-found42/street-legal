@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(word, 0x1000, "actual VM object word");
         assert_eq!(vm.strings.lookup(b"42").expect("interned").bytes, b"42");
         assert_eq!(vm.objects.len(), 1);
-        assert_eq!(vm.objects[0].class_name(&vm.loader), "java.lang.String");
+        assert_eq!(vm.objects[0].class, "java.lang.String");
         assert_eq!(vm.string_bytes(word), Some(&b"42"[..]));
         with_lang_host(|h| assert_eq!(h.last_error, None));
         reset();

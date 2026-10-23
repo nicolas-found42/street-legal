@@ -40,9 +40,8 @@ fn implicit_named_field_is_a_persistent_typed_lvalue() {
         None,
         &[("first", "I", false), ("second", "F", false)],
     ));
-    let fields_id = vm.loader.lookup("Fields").unwrap();
     vm.objects.push(Object {
-        class: slr_vm::vmclass::ClassRef::Loaded(fields_id),
+        class: "Fields".into(),
         fields: vec![Value::int(0x111), Value::float(0.0)],
     });
     // Original420ff0/001d returns the requested variable and pops no receiver.
@@ -566,25 +565,20 @@ fn runtime_reference_class_uses_the_authoritative_object_in_both_word_namespaces
     let mut vm = VmHost::new();
     vm.loader.insert_test_class(class("Child", None, &[]));
     let object = vm.alloc_object("Child").unwrap();
-    let child_id = vm.loader.lookup("Child").unwrap();
     assert_eq!(
         vm.reference_class(Value::reference_named(object, "LBase;")),
-        Some(slr_vm::vmclass::ClassRef::Loaded(child_id))
+        Some("Child".into())
     );
     // Existing String native allocation has a separate word base into the same
     // objects vector. Identity lookup does not certify its #110 allocation path.
     let string = 0x2000_0000 + vm.objects.len() as u32;
-    let string_id = vm.loader.lookup("java.lang.String").unwrap_or_else(|| {
-        vm.loader
-            .insert_test_class(class("java.lang.String", None, &[]))
-    });
     vm.objects.push(Object {
-        class: slr_vm::vmclass::ClassRef::Loaded(string_id),
+        class: "java.lang.String".into(),
         fields: vec![],
     });
     assert_eq!(
         vm.reference_class(Value::reference_named(string, "Ljava.lang.Object;")),
-        Some(slr_vm::vmclass::ClassRef::Loaded(string_id))
+        Some("java.lang.String".into())
     );
     assert_eq!(vm.reference_class(Value::reference(0x5555_5555)), None);
 }
@@ -649,296 +643,18 @@ fn embedding_bodies_preserve_their_class_pool_and_reject_conflicts_atomically() 
 }
 
 #[test]
-fn issued_body_ids_survive_identical_class_installation_and_track_duplicates() {
+fn issued_body_ids_survive_identical_class_installation_and_reject_replacement() {
     let mut vm = VmHost::new();
     let mut original = class("C", None, &[]);
     original.bodies = vec![vec![node(0x1027, 11)]];
-    let first = vm.loader.insert_test_class(original.clone());
-    let body = vm.loader.body_id_of(first, 0).unwrap();
-    assert_eq!(vm.loader.body_id("C", 0), Some(body));
-    // Identical synthetic installation is idempotent, like a cache hit.
-    let again = vm.loader.insert_test_class(original.clone());
-    assert_eq!(again, first);
-    assert_eq!(vm.loader.len(), 1);
-    // A distinct same-name record registers as a duplicate: the old body
-    // keeps its bytes while the new record carries the new body, and the
-    // cache still selects the first definition in an empty bucket.
+    vm.loader.insert_test_class(original.clone());
+    let body = vm.loader.body_id("C", 0).unwrap();
+    vm.loader.insert_test_class(original.clone());
     let mut replacement = original;
     replacement.bodies[0][0].imm = 99;
-    let dup = vm.loader.insert_test_class(replacement);
-    assert_ne!(dup, first);
-    assert_eq!(vm.loader.len(), 2);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm
+        .loader
+        .insert_test_class(replacement)))
+    .is_err());
     assert_eq!(vm.loader.body(body).unwrap()[0].imm, 11);
-    assert_eq!(vm.loader.lookup("C"), Some(first));
-    assert_eq!(
-        vm.loader
-            .body(vm.loader.body_id_of(dup, 0).unwrap())
-            .unwrap()[0]
-            .imm,
-        99
-    );
-}
-
-/// Plan step C retention: three same-name synthetic modules plus the
-/// unrelated exact-bucket collision head. The collision head forces the
-/// lookup flip ([first,first,first] without it vs [first,second,third] with
-/// it); retention assertions below use the flipped topology so the current
-/// name lookup actually changes while old IDs stay pinned.
-fn retention_world() -> (VmHost, slr_vm::vmclass::ClassId, slr_vm::vmclass::ClassId) {
-    // The proven stock collision topology: `unrelated.Cz...` shares bucket
-    // 180 with `java.render.osd.dialog.YesNoDialog`, so the duplicate
-    // registrations below flip live name lookup while old IDs stay pinned.
-    const NAME: &str = "java.render.osd.dialog.YesNoDialog";
-    fn record(kind: u32, fields: &[(&str, &str, bool)]) -> Class {
-        Class {
-            kind,
-            name: NAME.into(),
-            base: None,
-            interfaces: vec![],
-            methods: vec![],
-            bodies: vec![],
-            fields: fields
-                .iter()
-                .map(|(field, ty, is_static)| Field {
-                    class: NAME.into(),
-                    name: (*field).into(),
-                    ty: (*ty).into(),
-                    is_static: *is_static,
-                })
-                .collect(),
-        }
-    }
-    let mut vm = VmHost::new();
-    // Unrelated collision head in the SAME bucket: `unrelated.Cz...` shares
-    // bucket 180 with the stock YesNoDialog shape, and here the collision
-    // head forces the lookup flip (first/second/third) instead of the
-    // first-wins topology of an initially empty bucket.
-    vm.loader.insert_test_class(Class {
-        kind: 100,
-        name: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
-        base: None,
-        interfaces: vec![],
-        methods: vec![],
-        bodies: vec![],
-        fields: vec![Field {
-            class: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
-            name: "head_marker".into(),
-            ty: "I".into(),
-            is_static: false,
-        }],
-    });
-    let old = vm
-        .loader
-        .insert_test_class(record(0, &[("value", "I", false), ("shared", "I", true)]));
-    let new = vm
-        .loader
-        .insert_test_class(record(1, &[("amount", "F", false), ("ratio", "F", true)]));
-    assert_ne!(old, new);
-    // Collision-head topology: lookups track first/second/third while an
-    // initially empty bucket would keep selecting the first definition.
-    assert_eq!(
-        vm.loader.lookup("java.render.osd.dialog.YesNoDialog"),
-        Some(new)
-    );
-    (vm, old, new)
-}
-
-#[test]
-fn duplicate_registration_flips_selection_only_with_collision_head() {
-    fn record(kind: u32) -> Class {
-        Class {
-            kind,
-            name: "FlipTarget".into(),
-            base: None,
-            interfaces: vec![],
-            methods: vec![],
-            bodies: vec![],
-            fields: vec![],
-        }
-    }
-    // No collision head: every lookup selects the first definition.
-    let mut plain = VmHost::new();
-    let first = plain.loader.insert_test_class(record(0));
-    let second = plain.loader.insert_test_class(record(1));
-    let third = plain.loader.insert_test_class(record(2));
-    assert_ne!(first, second);
-    assert_ne!(second, third);
-    for _ in 0..3 {
-        assert_eq!(plain.loader.lookup("FlipTarget"), Some(first));
-    }
-    // Collision head first: lookups return first/second/third.
-    let mut collided = VmHost::new();
-    collided.loader.insert_test_class(Class {
-        kind: 99,
-        name: "unrelated.Czbaaaaaaaaaaaaaaaaaaa".into(),
-        base: None,
-        interfaces: vec![],
-        methods: vec![],
-        bodies: vec![],
-        fields: vec![],
-    });
-    let _ = (first, second, third);
-}
-
-#[test]
-fn old_object_keeps_old_layout_after_duplicate_registration() {
-    let (mut vm, old, new) = retention_world();
-    let word = vm.alloc_object_id(old).unwrap();
-    assert_eq!(vm.read_field(word, "value").unwrap(), Value::int(0));
-    vm.write_field(word, "value", Value::int(99)).unwrap();
-    assert_eq!(vm.read_field(word, "value").unwrap(), Value::int(99));
-    // Old object keeps the old integer layout; the new record carries the
-    // contrasting float layout.
-    assert_eq!(vm.instance_field_slot_id(old, "value").unwrap(), 0);
-    assert_eq!(vm.instance_field_slot_id(new, "amount").unwrap(), 0);
-    let fresh = vm.alloc_object_id(new).unwrap();
-    assert_eq!(vm.read_field(fresh, "amount").unwrap(), Value::float(0.0));
-    assert!(vm.read_field(word, "amount").is_err());
-    assert!(vm.read_field(fresh, "value").is_err());
-}
-
-#[test]
-fn old_statics_stay_with_old_owner_after_duplicate_registration() {
-    let (mut vm, old, new) = retention_world();
-    let old_word = vm.alloc_object_id(old).unwrap();
-    let new_word = vm.alloc_object_id(new).unwrap();
-    // Touch both owners so both static containers install.
-    vm.write_field(old_word, "shared", Value::int(21)).unwrap();
-    assert_eq!(vm.read_field(old_word, "shared").unwrap(), Value::int(21));
-    // The new owner holds only `ratio`; the old static cell is untouched.
-    assert!(vm.read_field(old_word, "ratio").is_err());
-    assert!(vm.read_field(new_word, "shared").is_err());
-    assert_eq!(vm.read_field(new_word, "ratio").unwrap(), Value::float(0.0));
-    assert_eq!(vm.read_field(old_word, "shared").unwrap(), Value::int(21));
-}
-
-#[test]
-fn old_body_pool_and_frame_stay_pinned_after_duplicate_registration() {
-    let (mut vm, old, new) = retention_world();
-    let old_body = vm
-        .loader
-        .add_body_to(old, vec![node(0x1027, 11), node(0x0010, 0)], vec![])
-        .unwrap();
-    let new_body = vm
-        .loader
-        .add_body_to(new, vec![node(0x1027, 22), node(0x0010, 0)], vec![])
-        .unwrap();
-    assert_ne!(old_body, new_body);
-    // Old and new pools/bodies stay per-record with distinct owners.
-    assert_eq!(vm.loader.body_owner(old_body), Some(old));
-    assert_eq!(vm.loader.body_owner(new_body), Some(new));
-    assert_eq!(vm.loader.body(old_body).unwrap()[0].imm, 11);
-    assert_eq!(vm.loader.body(new_body).unwrap()[0].imm, 22);
-    // Name allocation lands on the NEW record while the old frame context
-    // still decodes to the old record.
-    let old_ctx = old.get();
-    let new_ctx = vm
-        .class_context("java.render.osd.dialog.YesNoDialog")
-        .unwrap();
-    assert_eq!(new_ctx, new.get());
-    assert_eq!(vm.loader.context_id(old_ctx), Some(old));
-    assert_eq!(vm.loader.context_id(new_ctx), Some(new));
-    let mut thread = Thread::new();
-    let pc = Some(Pc {
-        body: old_body,
-        idx: 0,
-    });
-    let mut frame = Frame::new(pc, 0);
-    frame.class_ctx = old_ctx;
-    thread.frames.push(frame);
-    thread.pc = pc;
-    thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
-    assert_eq!(thread.frames.len(), 1, "old body returns to its caller");
-}
-
-#[test]
-fn new_name_allocation_lands_on_new_record_after_duplicate_registration() {
-    let (mut vm, old, new) = retention_world();
-    // Name allocation selects the NEW record; old objects keep the old ID.
-    let name_word = vm
-        .alloc_object("java.render.osd.dialog.YesNoDialog")
-        .unwrap();
-    assert_eq!(
-        vm.objects[(name_word - 0x1000) as usize].class,
-        slr_vm::vmclass::ClassRef::Loaded(new)
-    );
-    let old_word = vm.alloc_object_id(old).unwrap();
-    assert_eq!(
-        vm.objects[(old_word - 0x1000) as usize].class,
-        slr_vm::vmclass::ClassRef::Loaded(old)
-    );
-    assert_ne!(name_word, old_word);
-}
-
-/// Plan step D: real stock nested Dialog (11 modules) + standalone YesNo
-/// (1 module) in both orders. Replays the file-order regen rows: 12 issued
-/// identities, distinct duplicate records, cache-selected registration,
-/// retained old pool/body bytes, first-file-class return, module order.
-#[test]
-fn stock_dialog_and_standalone_yesno_registers_twelve_distinct_records() {
-    use std::path::Path;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
-    let dialog = std::fs::read(root.join("system/Scripts/render/osd/dialog/Dialog.class"));
-    let yesno = std::fs::read(root.join("system/Scripts/render/osd/dialog/YesNoDialog.class"));
-    let (Ok(dialog), Ok(yesno)) = (dialog, yesno) else {
-        eprintln!("SLR_ORACLE_SKIPPED: stock_dialog_and_standalone_yesno_registers_twelve_distinct_records");
-        return;
-    };
-    for (first, second, yesno_first) in [(&dialog, &yesno, false), (&yesno, &dialog, true)] {
-        let mut loader = slr_vm::vmclass::Loader::new();
-        let first_ids = loader.load_file(first).unwrap();
-        let second_ids = loader.load_file(second).unwrap();
-        // 11 nested + 1 standalone = 12 issued identities, all distinct.
-        assert_eq!(first_ids.len() + second_ids.len(), 12);
-        let mut seen = std::collections::HashSet::new();
-        for (id, _) in first_ids.iter().chain(second_ids.iter()) {
-            assert!(seen.insert(id.get()), "every issued identity is distinct");
-        }
-        assert_eq!(loader.len(), 12);
-        // Name lookup selects the first-loaded YesNo definition while the
-        // duplicate record stays distinct (both file orders exercise the
-        // first-wins bucket topology per the file-order regen rows).
-        let selected = loader.lookup("java.render.osd.dialog.YesNoDialog").unwrap();
-        let first_yesno = first_ids
-            .iter()
-            .find(|(_, name)| name == "java.render.osd.dialog.YesNoDialog")
-            .map(|(id, _)| *id);
-        assert_eq!(Some(selected), first_yesno);
-        let _ = yesno_first;
-        // The new duplicate parses as its own record with its own pool/body:
-        // both YesNo records resolve, with distinct backing bytes.
-        let all_yesno: Vec<_> = first_ids
-            .iter()
-            .chain(second_ids.iter())
-            .filter(|(_, name)| name == "java.render.osd.dialog.YesNoDialog")
-            .map(|(id, _)| *id)
-            .collect();
-        assert_eq!(all_yesno.len(), 2);
-        assert_ne!(all_yesno[0], all_yesno[1]);
-        let pool0 = loader.pool_of(all_yesno[0]).unwrap().len();
-        let pool1 = loader.pool_of(all_yesno[1]).unwrap().len();
-        assert!(pool0 > 0 && pool1 > 0, "both records keep their own pools");
-        // Each file's returned class is ITS OWN first class (the caller's
-        // modules[0] selection), not the cache winner: Dialog for the
-        // nested bundle first, YesNo for the standalone first.
-        let (dialog_head, yesno_head) = if yesno_first {
-            (&second_ids[0].1, &first_ids[0].1)
-        } else {
-            (&first_ids[0].1, &second_ids[0].1)
-        };
-        assert_eq!(dialog_head, "java.render.osd.dialog.Dialog");
-        assert_eq!(yesno_head, "java.render.osd.dialog.YesNoDialog");
-        // Module order is preserved in registration order.
-        let names = loader.record_names();
-        if yesno_first {
-            assert_eq!(names[0], "java.render.osd.dialog.YesNoDialog");
-            assert_eq!(names[1], "java.render.osd.dialog.Dialog");
-        } else {
-            assert_eq!(names[0], "java.render.osd.dialog.Dialog");
-            assert_eq!(names[11], "java.render.osd.dialog.YesNoDialog");
-        }
-        // 11 distinct names across 12 records: the YesNo duplicate shares
-        // its name while keeping its own record.
-        assert_eq!(loader.unique_name_count(), 11);
-    }
 }

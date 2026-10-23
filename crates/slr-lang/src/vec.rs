@@ -2170,20 +2170,9 @@ mod tests {
     fn vec3_object(vm: &mut VmHost, values: &[f32]) -> u32 {
         let Some(metadata) = vm.loader.find(VECTOR3).map(|class| class.fields.clone()) else {
             // Explicit malformed-metadata fixture for native miss cases.
-            // Carry the unknown name as a fresh no-field record so reads
-            // still miss while the object keeps a retained identity.
-            let id = vm.loader.insert_test_class(Class {
-                kind: 0,
-                name: VECTOR3.to_owned(),
-                base: None,
-                interfaces: Vec::new(),
-                methods: Vec::new(),
-                fields: Vec::new(),
-                bodies: Vec::new(),
-            });
             let word = 0x1000 + vm.objects.len() as u32;
             vm.objects.push(Object {
-                class: slr_vm::vmclass::ClassRef::Loaded(id),
+                class: VECTOR3.to_owned(),
                 fields: values.iter().copied().map(Value::float).collect(),
             });
             return word;
@@ -2269,20 +2258,9 @@ mod tests {
     fn ypr_object(vm: &mut VmHost, values: &[f32]) -> u32 {
         let Some(metadata) = vm.loader.find(YPR).map(|class| class.fields.clone()) else {
             // Explicit malformed-metadata fixture for native miss cases.
-            // Carry the unknown name as a fresh no-field record so reads
-            // still miss while the object keeps a retained identity.
-            let id = vm.loader.insert_test_class(Class {
-                kind: 0,
-                name: YPR.to_owned(),
-                base: None,
-                interfaces: Vec::new(),
-                methods: Vec::new(),
-                fields: Vec::new(),
-                bodies: Vec::new(),
-            });
             let word = 0x1000 + vm.objects.len() as u32;
             vm.objects.push(Object {
-                class: slr_vm::vmclass::ClassRef::Loaded(id),
+                class: YPR.to_owned(),
                 fields: values.iter().copied().map(Value::float).collect(),
             });
             return word;
@@ -2431,18 +2409,7 @@ mod tests {
 
         // The class name is unknown to the loader: every read misses.
         let (mut vm, word) = vec3_host(&[(X, "F", false)], &[3.0]);
-        let unknown = vm.loader.lookup(YPR).unwrap_or_else(|| {
-            vm.loader.insert_test_class(Class {
-                kind: 0,
-                name: YPR.to_owned(),
-                base: None,
-                interfaces: Vec::new(),
-                methods: Vec::new(),
-                fields: Vec::new(),
-                bodies: Vec::new(),
-            })
-        });
-        vm.objects[0].class = slr_vm::vmclass::ClassRef::Loaded(unknown);
+        vm.objects[0].class = YPR.to_owned();
         let args = [Value::reference(word)];
         assert_eq!(length(&mut vm, &length_info(&args)), Some(0.0f32.to_bits()));
 
@@ -2689,19 +2656,8 @@ mod tests {
         // distance between two non-zero objects collapses to zero.
         let (mut vm, receiver) = vec3_host(&[(X, "F", false)], &[3.0]);
         let arg = vec3_object(&mut vm, &[4.0]);
-        let unknown = vm.loader.lookup(YPR).unwrap_or_else(|| {
-            vm.loader.insert_test_class(Class {
-                kind: 0,
-                name: YPR.to_owned(),
-                base: None,
-                interfaces: Vec::new(),
-                methods: Vec::new(),
-                fields: Vec::new(),
-                bodies: Vec::new(),
-            })
-        });
-        vm.objects[0].class = slr_vm::vmclass::ClassRef::Loaded(unknown);
-        vm.objects[1].class = slr_vm::vmclass::ClassRef::Loaded(vm.loader.lookup(YPR).unwrap());
+        vm.objects[0].class = YPR.to_owned();
+        vm.objects[1].class = YPR.to_owned();
         let args = [Value::reference(arg), Value::reference(receiver)];
         assert_eq!(
             distance(&mut vm, &distance_info(&args)),
@@ -2824,18 +2780,7 @@ mod tests {
         assert_eq!(slots, [0x3f19_999a, 0x3f4c_cccd]);
 
         let (mut vm, word) = vec3_host(&[(X, "F", false)], &[3.0]);
-        let unknown = vm.loader.lookup(YPR).unwrap_or_else(|| {
-            vm.loader.insert_test_class(Class {
-                kind: 0,
-                name: YPR.to_owned(),
-                base: None,
-                interfaces: Vec::new(),
-                methods: Vec::new(),
-                fields: Vec::new(),
-                bodies: Vec::new(),
-            })
-        });
-        vm.objects[0].class = slr_vm::vmclass::ClassRef::Loaded(unknown);
+        vm.objects[0].class = YPR.to_owned();
         let args = [Value::reference(word)];
         normalize(&mut vm, &normalize_info(&args));
         assert_eq!(vm.objects[0].fields[0].as_f32().to_bits(), 3.0f32.to_bits());

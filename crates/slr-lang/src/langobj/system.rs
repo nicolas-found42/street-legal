@@ -2110,11 +2110,7 @@ mod tests {
             let args = info_args(id);
             let ret = info(&mut vm, &info_info(&args)).expect("the row returns a String");
             let index = (ret - 0x1000) as usize;
-            assert_eq!(
-                vm.objects[index].class_name(&vm.loader),
-                "java.lang.String",
-                "id {id}"
-            );
+            assert_eq!(vm.objects[index].class, "java.lang.String", "id {id}");
             assert_eq!(
                 vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
                 text.len() as i32,
@@ -2243,11 +2239,7 @@ mod tests {
             let args = info_args(id);
             let ret = info(&mut vm, &info_info(&args)).expect("the row returns a String");
             let index = (ret - 0x1000) as usize;
-            assert_eq!(
-                vm.objects[index].class_name(&vm.loader),
-                "java.lang.String",
-                "id {id:#x}"
-            );
+            assert_eq!(vm.objects[index].class, "java.lang.String", "id {id:#x}");
             assert_eq!(
                 vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
                 0,
@@ -2310,7 +2302,7 @@ mod tests {
         let none: [Value; 0] = [];
         let ret = info(&mut vm, &info_info(&none)).expect("String");
         let index = (ret - 0x1000) as usize;
-        assert_eq!(vm.objects[index].class_name(&vm.loader), "java.lang.String");
+        assert_eq!(vm.objects[index].class, "java.lang.String");
         assert_eq!(
             vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
             1,
@@ -2448,7 +2440,7 @@ mod tests {
         let info_words = info_args(4);
         let ret = bridge(&mut vm, &info_info(&info_words)).expect("a String return");
         let index = (ret - 0x1000) as usize;
-        assert_eq!(vm.objects[index].class_name(&vm.loader), "java.lang.String");
+        assert_eq!(vm.objects[index].class, "java.lang.String");
         assert_eq!(
             vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
             2,

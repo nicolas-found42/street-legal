@@ -55,7 +55,7 @@ fn loaded_stock_string_identity_matches_real_intern_lookup_and_ptr_storage() {
         assert_eq!(json!(vm.objects.len()), row["allocated_objects"]);
         if word != 0 {
             assert_eq!(
-                vm.objects[(word - 0x1000) as usize].class_name(&vm.loader),
+                vm.objects[(word - 0x1000) as usize].class,
                 "java.lang.String"
             );
             let bytes = string_bytes(&vm, word).unwrap();
@@ -158,8 +158,7 @@ fn inherited_string_ptr_script_store_is_observed_by_the_installed_stock_native()
     }
     let first = intern_string(&mut vm, b"alpha");
     let second = intern_string(&mut vm, b"12345678");
-    let string_id = vm.loader.lookup("java.lang.String").unwrap();
-    let ptr = vm.instance_field_slot_id(string_id, "ptr").unwrap();
+    let ptr = vm.instance_field_slot("java.lang.String", "ptr").unwrap();
     assert_eq!(
         vm.objects[(first - 0x1000) as usize].fields[ptr].tag,
         TypeTag::Int
@@ -289,8 +288,7 @@ fn inherited_string_native_reads_a_loaded_subclass_ptr_cell() {
     });
     let original = intern_string(&mut vm, b"subclass chars");
     let subclass = vm.alloc_object("StringSubclass").unwrap();
-    let string_id = vm.loader.lookup("java.lang.String").unwrap();
-    let index = vm.instance_field_slot_id(string_id, "ptr").unwrap();
+    let index = vm.instance_field_slot("java.lang.String", "ptr").unwrap();
     let ptr = vm
         .read_cell(HeapSlot::Object {
             word: original,

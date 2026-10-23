@@ -95,20 +95,9 @@ fn object_info<'a>(args: &'a [Value], sig: &'a str, name: &'a str) -> CallInfo<'
 /// A host whose object heap holds one `class` object; returns its word.
 fn host_with(class: &str) -> (VmHost, u32) {
     let mut vm = string_vm::vm();
-    let id = vm.loader.lookup(class).unwrap_or_else(|| {
-        vm.loader.insert_test_class(slr_vm::vmclass::Class {
-            kind: 0,
-            name: class.into(),
-            base: None,
-            interfaces: vec![],
-            methods: vec![],
-            fields: vec![],
-            bodies: vec![],
-        })
-    });
     let word = 0x1000 + vm.objects.len() as u32;
     vm.objects.push(Object {
-        class: slr_vm::vmclass::ClassRef::Loaded(id),
+        class: class.to_owned(),
         fields: Vec::new(),
     });
     (vm, word)
@@ -248,7 +237,7 @@ fn object_natives_match_oracle_vectors() {
                     row["id"]
                 );
                 let index = (ret - 0x1000) as usize;
-                assert_eq!(vm.objects[index].class_name(&vm.loader), "java.lang.String");
+                assert_eq!(vm.objects[index].class, "java.lang.String");
                 stringed += 1;
             }
             "gc" => {
@@ -425,12 +414,7 @@ fn object_natives_match_oracle_vectors() {
                 );
                 let ret = info(&mut vm, &call).expect("the row returns a String");
                 let index = (ret - 0x1000) as usize;
-                assert_eq!(
-                    vm.objects[index].class_name(&vm.loader),
-                    "java.lang.String",
-                    "{}",
-                    row["id"]
-                );
+                assert_eq!(vm.objects[index].class, "java.lang.String", "{}", row["id"]);
                 // The exe's own text for the formatted ids (the `%d` rule,
                 // `INT_MIN` quirk included); the id>5 path's exe text is
                 // frame residue, which the port replaces with its empty
@@ -514,12 +498,7 @@ fn object_natives_match_oracle_vectors() {
                     };
                     let ret = info(vm, &call).expect("the row returns a String");
                     let index = (ret - 0x1000) as usize;
-                    assert_eq!(
-                        vm.objects[index].class_name(&vm.loader),
-                        "java.lang.String",
-                        "{}",
-                        row["id"]
-                    );
+                    assert_eq!(vm.objects[index].class, "java.lang.String", "{}", row["id"]);
                     assert_eq!(
                         vm.string_bytes(ret).expect("actual String.ptr").len() as i32,
                         text.len() as i32,
@@ -991,9 +970,8 @@ fn gc_fixture_step(row: &serde_json::Value) {
         with_gc_lists(|l| *l = GcLists::new());
         let (mut vm, o1) = host_with("java.game.Car");
         let o2 = 0x1000 + vm.objects.len() as u32;
-        let car_id = vm.loader.lookup("java.game.Car").unwrap();
         vm.objects.push(Object {
-            class: slr_vm::vmclass::ClassRef::Loaded(car_id),
+            class: "java.game.Car".to_owned(),
             fields: Vec::new(),
         });
         Fixture {

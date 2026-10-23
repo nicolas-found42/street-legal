@@ -102,11 +102,6 @@ class DesktopProfile:
         }
         if self.creation is not None:
             result["creation"] = self.creation.metadata
-            if self.creation.wm_showwindow is not None:
-                result.update(
-                    windows_notification_sequence_established=False,
-                    unlisted_notifications_modeled=False,
-                )
         return result
 
 

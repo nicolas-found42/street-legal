@@ -22,7 +22,6 @@ from desktop import Desktop, DesktopProfile, WindowCallback
 from graphics import Direct3D9, GraphicsProfile
 from media import MciDevice, MediaProfile
 from window_messages import CREATION_MESSAGE_NAMES
-from window_transcript import DeclaredWindowReturn
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "oracle"))
 from oracle import TEB_BASE, UC_PROT_ALL, Oracle, OracleError
@@ -265,12 +264,6 @@ class Startup(Oracle):
                 "address": request.args[3],
                 "words": self.read_u32s(request.args[3], 4),
             }
-        elif request.args[1] in (0x46, 0x47):
-            self.events[-1]["structure"] = {
-                "type": "WINDOWPOS",
-                "address": request.args[3],
-                "words": self.read_u32s(request.args[3], 7),
-            }
         self.set_reg("esp", stack)
         self.set_reg("eip", request.target)
 
@@ -304,9 +297,6 @@ class Startup(Oracle):
         )
         try:
             next_request = self.desktop.finish_callback(request, result)
-            if isinstance(next_request, DeclaredWindowReturn):
-                self.return_declared_window(next_request)
-                return
             if not isinstance(next_request, WindowCallback):
                 raise Boundary("unsupported_window_callback_action")
             self.begin_window_callback(next_request)
@@ -316,20 +306,6 @@ class Startup(Oracle):
         except (OracleError, ValueError) as error:
             self._err = Boundary("window_callback_error", message=str(error))
             uc.emu_stop()
-
-    def return_declared_window(self, action):
-        continuation = self.desktop.messages.records[action.hwnd]["transcript"]
-        address = continuation.consume_return()
-        previous = self.hooks.get(address)
-        try:
-            self.hooks[address] = (lambda oracle, args: action.hwnd, "stdcall", 12)
-            self._run_hook(address)
-        finally:
-            if previous is None:
-                self.hooks.pop(address, None)
-            else:
-                self.hooks[address] = previous
-        continuation.record_return()
 
     def direct3d_create(self, args):
         if self.graphics is None:
@@ -1477,17 +1453,6 @@ class Startup(Oracle):
             result["profile"] = "nt51-hypothetical-window-prefix-v1"
             result["desktop_scenario"] = self.desktop_profile.metadata
             result["pending_window_callbacks"] = len(self.pending_window_callbacks)
-            if (
-                self.desktop.messages is not None
-                and self.desktop_profile.creation.wm_showwindow is not None
-            ):
-                result["declared_window_api_results"] = [
-                    {
-                        "hwnd": handle,
-                        "api_return_supplied": record["transcript"].supplied,
-                    }
-                    for handle, record in self.desktop.messages.records.items()
-                ]
         if (
             self.media_profile is not None
             or self.desktop_profile is not None

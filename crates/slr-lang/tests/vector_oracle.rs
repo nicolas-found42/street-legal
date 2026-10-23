@@ -114,9 +114,8 @@ fn host(spec: &[(&str, [f32; 3])]) -> (VmHost, Vec<u32>) {
         .iter()
         .map(|(cls, vals)| {
             let word = 0x1000 + vm.objects.len() as u32;
-            let id = vm.loader.lookup(cls).unwrap();
             vm.objects.push(Object {
-                class: slr_vm::vmclass::ClassRef::Loaded(id),
+                class: (*cls).to_owned(),
                 fields: vals.iter().copied().map(Value::float).collect(),
             });
             word
@@ -127,11 +126,7 @@ fn host(spec: &[(&str, [f32; 3])]) -> (VmHost, Vec<u32>) {
 
 fn field_bits(vm: &VmHost, word: u32, name: &str) -> u32 {
     let object = &vm.objects[(word - 0x1000) as usize];
-    let class_id = match &object.class {
-        slr_vm::vmclass::ClassRef::Loaded(id) => *id,
-        slr_vm::vmclass::ClassRef::Array(_) => panic!("vector object is not an array"),
-    };
-    let class = vm.loader.find_by_id(class_id).expect("class");
+    let class = vm.loader.find(&object.class).expect("class");
     let slot = class
         .fields
         .iter()
