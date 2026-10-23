@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod format;
 pub mod gc;
 pub mod host;
+pub mod machine;
 pub mod interp;
 pub mod monitor;
 pub mod natives;

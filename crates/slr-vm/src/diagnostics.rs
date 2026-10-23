@@ -283,7 +283,7 @@ pub fn snapshot(host: &crate::host::VmHost) -> Vec<ObjectSnapshot> {
 pub fn failure_snapshot<H: Host>(host: &H, thread: &Thread) -> FailureSnapshot {
     let cell = |slot: &Slot| {
         let value = match slot {
-            Slot::Value(v) => Some(*v),
+            Slot::Value(v) => Some(v.value()),
             Slot::Var(id) => thread.vars.try_get(*id).map(|v| v.value),
             Slot::Heap(slot) => host.diagnostic_cell(*slot),
             _ => None,
@@ -296,7 +296,7 @@ pub fn failure_snapshot<H: Host>(host: &H, thread: &Thread) -> FailureSnapshot {
     FailureSnapshot {
         thread: thread.clock_identity,
         flags: thread.flags,
-        live: thread.live,
+        live: thread.live(),
         body: thread.pc.map(|pc| pc.body.0),
         node: thread.pc.map(|pc| pc.idx),
         frames_total: thread.frames.len(),
@@ -445,10 +445,10 @@ mod tests {
             idx: 0,
         });
         let mut frame = Frame::new(pc, 77);
-        frame.stack.push(Slot::Value(Value {
+        frame.stack.push(Slot::Value(thread.allocate_value(Value {
             tag: crate::values::TypeTag::Float,
             payload: 0xffc01234,
-        }));
+        })));
         thread.frames.push(frame);
         thread.pc = pc;
         let mut reads = 0;

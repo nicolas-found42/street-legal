@@ -1870,6 +1870,12 @@ impl Loader {
         None
     }
 
+    /// Preserve the selected declaration before cloning a Method. Equal
+    /// names/signatures do not establish record identity.
+    pub fn retained_method_index(&self, owner: ClassId, method: &Method) -> Option<usize> {
+        self.records.get(owner.index())?.class.methods.iter().position(|entry| std::ptr::eq(entry, method))
+    }
+
     /// Assignability: can a value of `from` be stored into `to`
     /// (`FUN_00405400` nonnegative compatibility cost)? The recovered
     /// interface cases include original non-Java compatibility quirks; this

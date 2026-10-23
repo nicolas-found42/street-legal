@@ -35,6 +35,8 @@
 //! see `vendor/softfloat3e/ATTRIBUTION.md` and the preserved `COPYING.txt`.
 
 mod ffi;
+#[cfg(feature = "experimental-intel-trig")]
+pub mod intel_trig;
 pub mod trans;
 
 #[cfg(test)]

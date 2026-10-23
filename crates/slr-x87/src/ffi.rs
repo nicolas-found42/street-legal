@@ -74,6 +74,14 @@ impl SfFlags {
 }
 
 unsafe extern "C" {
+    #[cfg(feature = "experimental-intel-trig")]
+    pub(crate) fn extF80_to_f128(a: ExtF80) -> Quad;
+    #[cfg(feature = "experimental-intel-trig")]
+    pub(crate) fn f128_to_extF80(a: Quad) -> ExtF80;
+    #[cfg(feature = "experimental-intel-trig")]
+    pub(crate) fn f128_add(a: Quad, b: Quad) -> Quad;
+    #[cfg(feature = "experimental-intel-trig")]
+    pub(crate) fn f128_mul(a: Quad, b: Quad) -> Quad;
     fn slr_sf_set_rounding(mode: u8);
     fn slr_sf_set_precision(prec: u8);
     fn slr_sf_set_tininess(t: u8);
@@ -100,6 +108,15 @@ unsafe extern "C" {
     fn extF80_lt(a: ExtF80, b: ExtF80) -> bool;
     fn extF80_lt_quiet(a: ExtF80, b: ExtF80) -> bool;
     fn slr_extF80_fprem_trunc(a: ExtF80, b: ExtF80, c2: *mut bool) -> ExtF80;
+}
+
+/// SoftFloat's little-endian binary128 carrier. Operations require SF_LOCK.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "experimental-intel-trig")]
+pub(crate) struct Quad {
+    pub lo: u64,
+    pub hi: u64,
 }
 
 /// Program the SoftFloat rounding mode (call with the crate lock held).

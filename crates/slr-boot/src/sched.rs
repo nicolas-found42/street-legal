@@ -451,7 +451,7 @@ pub fn thread_start(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         ));
         return None;
     };
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     let name = with_threads(|h| h.queues().get(id).name.clone());
     assign_clock_metadata(&mut thread, id, &name);
@@ -485,7 +485,7 @@ pub fn run_created(
     args: &[Value],
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|h| h.queues_mut().spawn(10, 0, name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, name);
     let flow = match vm.enter_method(&mut thread, class, receiver, method, args) {
@@ -537,7 +537,7 @@ pub fn run_callback(
     name.truncate(end);
     let flags = u32::from(request_return);
     let id = with_threads(|host| host.queues_mut().spawn(10, flags, &name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     thread.flags = flags;
     assign_clock_metadata(&mut thread, id, &name);
@@ -551,34 +551,48 @@ pub fn run_callback(
             thread.run(vm, 0.0, &mut clock_ms)?;
         }
         if request_return || flow == Flow::Advance {
-            let value = thread.pop_deref_with(vm)?;
-            thread.release();
+            let cell = thread.pop_deref_with(vm)?;
+            let value = cell.value();
+            thread.release(cell);
             Ok(Some(value))
         } else {
             Ok(None)
         }
     })();
-    let retained = result.is_ok() && !request_return && dispatched == Some(Flow::Stay);
-    if retained {
-        with_threads(|host| {
-            host.queues_mut().get_mut(id).flags = thread.flags;
-            host.set_current(outer);
-        });
-        if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
-            cache_clock_thread(vm, id, &thread);
-            INTERP.with(|threads| {
-                threads.borrow_mut().insert(id, thread.clone());
-            });
-        }
-    } else {
-        with_threads(|host| {
-            host.dispose_scoped(id);
-            host.set_current(outer);
-        });
-        retire_clock_thread(id);
-    }
     CURRENT.with(|current| current.set(outer));
-    result.map_err(|error| (thread, error))
+    match result {
+        Ok(value) => {
+            if !request_return && dispatched == Some(Flow::Stay) {
+                with_threads(|host| {
+                    host.queues_mut().get_mut(id).flags = thread.flags;
+                    host.set_current(outer);
+                });
+                if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD)
+                    == 0
+                {
+                    cache_clock_thread(vm, id, &thread);
+                    INTERP.with(|threads| {
+                        threads.borrow_mut().insert(id, thread);
+                    });
+                }
+            } else {
+                with_threads(|host| {
+                    host.dispose_scoped(id);
+                    host.set_current(outer);
+                });
+                retire_clock_thread(id);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            with_threads(|host| {
+                host.dispose_scoped(id);
+                host.set_current(outer);
+            });
+            retire_clock_thread(id);
+            Err((thread, error))
+        }
+    }
 }
 
 /// Original408560's scoped priority10,flags1 THRD-FIN. Its immediate
@@ -589,7 +603,7 @@ pub fn run_finalizer(
     receiver: u32,
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|host| host.queues_mut().spawn(10, 1, "THRD-FIN"));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, "THRD-FIN");
     thread.flags = 1;

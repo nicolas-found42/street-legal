@@ -245,43 +245,59 @@ pub fn construct<H: PhysicalHost + crate::native_render_lod::Host>(
     let mode = if m.r32(reference + 8) == 0 {
         0
     } else {
-        host.interaction_state(m, k, reference, true).unwrap_or(0) as u32
+        host.reference_query(m, reference, 7, 0)?
     };
     m.w32(object + 0x5c, if mode == 0xb { 2 } else { 3 });
-    // 46ea10..46ea8d: with K+0xfac entries, walk the 0xfb0 threshold table
-    // against the parent payload's +0x70 value; the first entry above it wins,
-    // else the count itself. A live parent's payload then takes the previous
-    // threshold (or the default 0x5e73cc) at +0x74 and the selected one at +0x78.
-    let count = m.r32(k + 0xfac);
-    let mut index = 0u32;
-    if (count as i32) > 0 {
-        let local = if parent == 0 {
-            0f32
-        } else {
-            m.rf(parent + 0x70)
-        };
-        index = count;
-        for i in 0..count {
-            if local < m.rf(k + 0xfb0 + i * 4) {
-                index = i;
-                break;
-            }
-        }
-        let upper = m.r32(k + 0xfb0 + index * 4);
-        let lower = if index > 0 {
-            m.r32(k + 0xfac + index * 4)
-        } else {
-            m.r32(0x5e73cc)
-        };
-        if let Some(payload) = host.parent_payload(m, reference)? {
-            if payload != 0 {
-                m.wf(payload + 0x74, f32::from_bits(lower));
-                m.w32(payload + 0x78, upper);
-            }
-        }
-    }
+    let index = select_render_lod(m, k, object, host)?;
     crate::native_render_lod::part(m, k, object, index, host)?;
     Ok(entity)
+}
+
+/// Original46ea10..46ea90. Resource distance is read from body.Ref.resource,
+/// and the returned payload of that same resource receives the chosen range.
+/// FCOMP's C0 branch also selects the first threshold on unordered input.
+pub fn select_render_lod(
+    m: &mut Space,
+    k: u32,
+    object: u32,
+    host: &mut (impl PhysicalHost + ?Sized),
+) -> Result<u32, String> {
+    let count = m.r32(k + 0xfac) as i32;
+    if count <= 0 {
+        return Ok(0);
+    }
+    let resource = m.r32(object + 12);
+    let distance = if resource == 0 {
+        0.
+    } else {
+        m.rf(resource + 0x70)
+    };
+    let mut index = count as u32;
+    for i in 0..count as u32 {
+        let (status, _) = X87::from_f32(distance).fcom(X87::from_f32(m.rf(k + 0xfb0 + i * 4)));
+        if status.c0 {
+            index = i;
+            break;
+        }
+    }
+    if resource != 0 {
+        let payload = host.game_payload(m, resource)?;
+        if payload != 0 {
+            let lower = if index == 0 {
+                m.r32(0x5e73cc)
+            } else {
+                m.r32(k + 0xfac + index * 4)
+            };
+            m.w32(
+                payload + 0x74,
+                X87::from_f32(f32::from_bits(lower))
+                    .to_f32(Precision::F32, Rounding::NearestEven)
+                    .to_bits(),
+            );
+            m.w32(payload + 0x78, m.r32(k + 0xfb0 + index * 4));
+        }
+    }
+    Ok(index)
 }
 
 #[cfg(test)]
@@ -347,11 +363,20 @@ pub trait PhysicalHost {
     fn wake(&mut self, m: &mut Space, entity: u32) -> Result<(), String>;
     fn or_flags(&mut self, m: &mut Space, object: u32, flags: u32) -> Result<(), String>;
     fn or_resource_flags(&mut self, m: &mut Space, object: u32, flags: u32) -> Result<(), String>;
-    /// `48aaf0`: the payload word (`raw+0x14`) of the live resource bound to the
-    /// reference at `+0xc`, or the reference's own id when it has no resource.
-    /// `None` leaves the reference untouched.
-    fn parent_payload(&mut self, _m: &mut Space, _reference: u32) -> Result<Option<u32>, String> {
-        Ok(None)
+    /// Original426470 on an actual weak resource reference, including script
+    /// getInfo. Distinct from a template's direct native vtable query.
+    fn reference_query(
+        &mut self,
+        _m: &mut Space,
+        _reference: u32,
+        _message: u32,
+        _argument: u32,
+    ) -> Result<u32, String> {
+        Err("NativePartBoundary: original426470 reference query unavailable".into())
+    }
+    /// Original419860(0xa0000000,0,0,0) on the body's own resource.
+    fn game_payload(&mut self, _m: &mut Space, _resource: u32) -> Result<u32, String> {
+        Err("NativePartBoundary: original419860 game payload access unavailable".into())
     }
     fn query(
         &mut self,
@@ -679,7 +704,13 @@ fn initialize_phys_inner(
             )?;
             bind_reference(m, object + 0x2c, m.r32(object + 0x28));
             bind_reference(m, object + 0x3c, m.r32(object + 0x38));
-            host.wake(m, entity)?;
+            if m.r32(entity + 0x58) & 0x80 == 0 {
+                let mut root = entity;
+                while m.r32(root + 0x58) & 4 != 0 {
+                    root = m.r32(root + 0x20);
+                }
+                stack::call(m, 0x46f271, &[], Some(root), |m| host.wake(m, root))?;
+            }
             Some(entity)
         }
     } else {
@@ -701,7 +732,13 @@ fn initialize_phys_inner(
             0x46ecaf,
             host,
         )?;
-        host.wake(m, entity)?;
+        if m.r32(entity + 0x58) & 0x80 == 0 {
+            let mut root = entity;
+            while m.r32(root + 0x58) & 4 != 0 {
+                root = m.r32(root + 0x20);
+            }
+            stack::call(m, 0x46ece3, &[], Some(root), |m| host.wake(m, root))?;
+        }
         m.w32(entity + 0x58, m.r32(entity + 0x58) | 8);
         for index in 0..count {
             let record = k + 0x128 + index * 0x74;
@@ -1025,6 +1062,105 @@ mod slot_tests {
             };
             dispatch_slots(&mut m, k, object, &mut host).unwrap();
             assert_eq!(serde_json::json!(host.events), row["events"]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lod_selection_tests {
+    use super::*;
+    use serde_json::{json, Value};
+    struct ResourceAccess {
+        loaded: bool,
+        payload: u32,
+        calls: Vec<Value>,
+    }
+    impl PhysicalHost for ResourceAccess {
+        fn create_physics(
+            &mut self,
+            _: &mut Space,
+            _: u32,
+            _: u32,
+            _: &str,
+        ) -> Result<u32, String> {
+            unreachable!()
+        }
+        fn wake(&mut self, _: &mut Space, _: u32) -> Result<(), String> {
+            unreachable!()
+        }
+        fn or_flags(&mut self, _: &mut Space, _: u32, _: u32) -> Result<(), String> {
+            unreachable!()
+        }
+        fn or_resource_flags(&mut self, _: &mut Space, _: u32, _: u32) -> Result<(), String> {
+            unreachable!()
+        }
+        fn game_payload(&mut self, _: &mut Space, resource: u32) -> Result<u32, String> {
+            self.calls
+                .push(json!({"resource":resource,"args":[0xa0000000u32,0,0,0]}));
+            Ok(if self.loaded { self.payload } else { 0 })
+        }
+    }
+    #[test]
+    fn original_part_lod_reads_own_resource_and_updates_its_payload() {
+        use sha2::{Digest, Sha256};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join("re/out/boot/native-part-lod-original.json");
+        let Ok(bytes) = std::fs::read(path) else {
+            assert!(
+                std::env::var_os("SLR_REQUIRE_ORACLE").is_none(),
+                "missing original part LOD vectors"
+            );
+            eprintln!("SLR_ORACLE_SKIPPED: run re/oracle/native_part_lod_probe.py");
+            return;
+        };
+        let data: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["schema"], 1);
+        assert_eq!(data["fpu_cw"], 0x7f);
+        assert_eq!(
+            data["exe_sha256"],
+            "7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde"
+        );
+        assert_eq!(
+            data["producer_sha256"],
+            format!(
+                "{:x}",
+                Sha256::digest(
+                    std::fs::read(root.join("re/oracle/native_part_lod_probe.py")).unwrap()
+                )
+            )
+        );
+        let rows = data["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 128);
+        for (index, row) in rows.iter().enumerate() {
+            let mut memory = Space::new();
+            for (i, v) in row["before"].as_array().unwrap().iter().enumerate() {
+                memory.w32(0x20000000 + i as u32 * 4, v.as_u64().unwrap() as u32);
+            }
+            let mut host = ResourceAccess {
+                loaded: row["loaded"].as_bool().unwrap(),
+                payload: row["payload"].as_u64().unwrap() as u32,
+                calls: vec![],
+            };
+            let result = select_render_lod(
+                &mut memory,
+                row["template"].as_u64().unwrap() as u32,
+                row["body"].as_u64().unwrap() as u32,
+                &mut host,
+            )
+            .unwrap();
+            assert_eq!(
+                result as u64,
+                row["result"].as_u64().unwrap(),
+                "row{index} LOD"
+            );
+            assert_eq!(json!(host.calls), row["events"], "row{index} access order");
+            for (i, v) in row["after"].as_array().unwrap().iter().enumerate() {
+                assert_eq!(
+                    memory.r32(0x20000000 + i as u32 * 4) as u64,
+                    v.as_u64().unwrap(),
+                    "row{index} word{i}"
+                );
+            }
         }
     }
 }

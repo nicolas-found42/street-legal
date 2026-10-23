@@ -59,8 +59,8 @@ fn empty_dispatch_original_rows() {
         let mut actual = vec![];
         while !thread.frames[0].stack.is_empty() {
             let value = thread.pop_deref().unwrap();
-            thread.release();
             actual.push(serde_json::json!({"payload": value.payload, "type": value.tag.name()}));
+            thread.release(value);
         }
         actual.reverse();
         assert_eq!(actual, row["stack"].as_array().unwrap().to_owned());

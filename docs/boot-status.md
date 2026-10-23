@@ -7,6 +7,387 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
+Active delivery campaign, 2026-10-22, checkpoint branch
+`codex/native-runtime-campaign-20261022`. The current exact-port completion mandate authorizes bounded delegation; the lead owns integration and a separate non-implementing verifier is reserved for final S13 execution.
+The earlier workers were interrupted; their unfinished source and investigation
+packages remain in the shared tree. The first isolated run computed **1/54 passed (S11 only), accepted=false**
+for its archived source. Its499-row collector and two idempotent regenerations
+passed. The S1 failure-reporting path exposed a status-name collision; that
+validator error is now fixed with a red/green regression (34 selftests). Fresh
+results must bind the updated source; see
+`re/out/checkpoints/20261021-campaign/acceptance-solo-frozen-results-2.json`
+and its linked source archive. Historical receipts cannot pass a new candidate. No complete game, strict boot, native display/audio or
+human review pass is claimed. See `docs/plan.md` for dependencies.
+
+**Checkpoint Git state:** branch `codex/native-runtime-campaign-20261022`
+remains at7e2d2cb with the preserved campaign changes staged. The repository
+`.githooks/pre-commit` requires the entire workspace suite and rejected the
+commit at the known failing stock-menu integration test. No commit/push was
+made and no hook or comparison was bypassed. The candidate is identified by
+HEAD plus its complete source diff/inventory in `acceptance-solo-frozen/`.
+
+**Recovery:** checkout `exact-port` started at `7e2d2cb` with substantial dirty
+runtime/oracle work. Binary patch, untracked source and all five worktree states
+are retained under
+`re/out/checkpoints/20261021-campaign/starting-state-20261022T032015Z/`.
+The four secondary worktrees were clean ancestors without unique commits and
+were preserved. Stock/reference inputs have not been edited.
+
+**Mandate continuation, 2026-10-22:** starting source/index/worktree bytes and
+1,135-file inventory are preserved in
+`re/out/checkpoints/mandate-resume-20261022T184604Z/`. Private-build replay
+`20261022T184610.214339Z-420003389da7` freshly reproduced the Controller
+constructor failure at154 filtered/196 unfiltered records. The source-derived
+53a2a0 caller now owns the actual stack temporary Ref and constructor CALL;
+74 original controlled/composed player/cursor cases compare complete caller
+heaps, retained stack and GPR snapshots, with byte-identical original recapture.
+This exposed and repaired missing scanner, formatter and native constructor
+stores previously invisible to isolated constructor tests. Upper481a70/VM
+caller history and the complete manager remain outside this bounded adapter.
+
+The subsequent private-build replay
+`20261022T185929.015004Z-ad28eb5f47c5` passed Controller construction, then
+stopped at MouseCursor GameRef creation (163 filtered records). Its earliest
+unfiltered difference is205: Controller.user_Add returned0 instead of1. The
+production owner eligibility test incorrectly required load_state==1;
+original load/list membership retains other bits. A regression first failed
+at0x21, then passed loaded1/0x21/0x61 and unloaded0/0x20 after checking bit0.
+Fresh integrated execution of that repair is pending.
+
+The actual53a5e0 new-instance caller is now distinct from53a2a0:70 original
+native-only cases, including composed player/cursor constructors, compare full
+caller heap/stack/GPR snapshots and recapture byte-identically. GameRef uses
+this caller for native-only cursor/player creation and registers once at its
+source phase. Nonzero script-class metadata remains an explicit boundary;
+semantic class IDs cannot substitute for original class/object pointers.
+The426470/427210 source caller kernels pass680 original controlled cases,
+all340 input-grid rows with two scratch seeds, exact per-state memory lengths
+and native target identity checks. Controlled resource/VM bodies remain outside
+these kernel comparisons; composed real registration is under independent
+review. No full boot/feature/device acceptance follows.
+
+Raw VM pool allocation/release and operand growth now have complete original
+memory/store evidence, and32 Thread/frame constructor cases compare complete
+caller memory and retained stack. They remain unwired until actual loader
+metadata, object addresses, allocation chronology and opcode scratch can feed
+them. The nested VM-native guard remains. The S10 retirement validator now has
+live execution with fresh S1, replacement-host replay and repository checks;
+41 acceptance selftests pass, and the current approximation still fails S10.
+All report G001–G028/C1–C9 mappings were rechecked; applicable stock questions
+remain open. No P01–P30, native display/audio/input, human review or S13 pass is
+claimed. The next private-source boot must determine the integrated frontier.
+
+**Current execution, 2026-10-22:** starting bytes, index/worktree patches and
+file hashes are retained in
+`re/out/checkpoints/mandate-current-20261022T142713Z/starting-source.tar.gz`.
+Private-target replay `20261022T142714.268402Z-4c4aee4567a8` reproduced the
+inherited boundary below. The later production callback-resource eligibility
+repair also reproduced it in `20261022T143552.183910Z-e4eb60c99b37`.
+The later integrated player/frame candidate reproduced an earlier failure in
+`20261022T151240.637371Z-438e743c3cc3`:154 filtered /196 unfiltered records,
+during Controller construction. Independent execution confirmed that the
+adapter's direct constructor entry overwrites its own temporary weak Ref.
+That adapter is not accepted. Source53a2a0 caller work and composed original
+constructor comparisons are in progress; no candidate may bypass this with a
+stack reset or substitute heap Ref. New work after a source-bound run is not a
+new boot pass.
+
+Original4255e0 resource eligibility now gates ordinary installation script
+callbacks as well as getInfo.48 controlled original cases compare complete
+heaps, ordered access calls and the live script target; a script cleared during
+load is distinct from the initial absent-script fast return. Independent
+recapture reproduced all48; its contradictory-endpoint finding is fixed with
+a red/green regression and strict32-bit word validation.
+
+The original first addpart callback now executes through its actual return
+under the permitted snapshot oracle:396,329 instructions,57 complete changed
+pages, repeated byte-identically. A new source-derived420025 native-entry
+kernel matches16 varied original cases and the genuine nested stock entry,
+including stack bytes, registers and ordered stores. It remains unwired:
+the typed interpreter now retains explicit value/variable owners and shared
+pool identities.13 fresh original identity/lifetime cases pass, including
+equal-valued distinct cells, cross-thread reuse and original fatal-path leaks.
+Raw pool materialization and chronological stack stores still need integration
+to supply the native-entry kernel's real caller context. Original
+observations and recovery instructions are in
+`re/out/checkpoints/mandate-20261022T072322Z/native-vm-abi-current/README.md`.
+Neither a wrapper allowlist nor a captured stack template was introduced.
+
+Control426c90 and animation426fd0 kernels compare432 original controlled cases,
+including complete heaps and callback ABI/register state. Whole-list production
+integration now calls the native kernels, but still requires a correct original
+constructor caller and VM bridge. The inherited
+control traversal's erroneous type1 filter is corrected; animation retains
+its original filter. Cursor viewport/camera picking now uses the recovered
+48d450 traversal in production, retaining explicit missing-renderer/world-ray
+boundaries. Its stale producer-bound fixture was preserved and genuinely
+recaptured:48 unprojection and34 picking cases pass. No no-hit or device
+observation was fabricated. Player477bc0/4797d0 component comparisons pass32
+lifecycle,256 empty-frame and2,400 bounded-query cases;47a920 passes200 bounded
+command cases. These ran in an explicitly isolated whole-VM baseline, not the
+latest integrated candidate. Active player frames, camera/target commands,
+device mapping, caller integration and destruction remain open.
+
+All report G001–G028 and C1–C9 mappings were independently checked in the
+existing critique appendix. The checksum validator freshly verified all7,858
+stock files and the original executable; G1 remains partial. Fresh local
+Bochs/Rosetta/original observations also reproduced G11's raw-target ambiguity.
+The user requested a plain-language explanation; no target change is authorized.
+No feature, complete boot, physical display/audio/input, human review or S13
+pass is claimed. Checkpoint component checks do not close the contract.
+
+**Reproduced starting failure (superseded by current adapter failure above):**
+`re/out/boot/runs/20261022T142714.268402Z-4c4aee4567a8/` reaches frame31
+and the stock Prime's ordinary addStockParts/addpart workflow. It matches
+**619 filtered /908 unfiltered** native records, against required6,508/9,209,
+then stops before the nested GameRef.getScriptInstance call in Part.addpart.
+The explicit missing dependency is the original callback/interpreter/native-
+wrapper ABI context; the new guard preserves parent scratch instead of allowing
+an unsupported nested entry to panic or overwrite it. Recover that context;
+do not reset the native stack or allowlist unknown nested call shapes.
+
+The cursor constructor now passes the earlier Config-anchor and system-cursor
+mode boundaries. Original system-cursor wrappers compare72 cases over13 globals,
+complete caller heaps and ordered API requests; the production headless backend
+records those requests with physical_device_observed=false. This is no actual
+macOS cursor/window/device acceptance. Prior integrated failures at173/293
+(`20261022T075144.481531Z-23b194f94850`) and163/281
+(`20261022T074722.773871Z-efe1c5c1f019`) remain preserved.
+
+The mandate starting replay `20261022T072324.196474Z-71ca9b6f5862` reached
+frame31 and matched600/889, then stopped at54ecd0 input0x40491687. A new bounded
+memory-only Euler path compares1,483 complete original caller heaps;32 retained
+cases remain unsupported. It takes an interval hull of a rationally bounded
+pinned standalone model and the exact declared Unicorn-host provider point,
+accepting only unique m32 stores.8,898 admitted raw observations and1,025
+independent Rosetta complete consumers are checked. This does not certify raw
+scalar hardware identity/status or close G11. The new integrated run now gets through that Euler input to the nested ABI
+frontier; scalar G11 remains open.
+
+Original426e10 resource-drive dispatch is now in the production world step;
+72 original controlled-collaborator cases compare complete heaps and callback
+states, including a live body replacement during template access. Independent
+review found a nested VM-native ABI gap and a truncated-fixture false pass.
+The fixture shape/control-word/ABI checks and negative regressions are fixed.
+Nested VM-native entry currently returns a named NativeAbiBoundary preserving
+parent scratch rather than panicking or resetting it. Actual original callback/
+interpreter/wrapper frames remain under recovery; native drive bodies remain
+separate explicit gaps. None of these component results closes S1 or P01.
+
+The complete starting tracked/untracked source bytes, index/worktree diffs and
+file hashes are preserved in
+`re/out/checkpoints/mandate-20261022T072322Z/starting-source.tar.gz` and sibling
+receipts. The original baseline bin suite ran182 tests:180 passed and two stale
+tiny-only Euler expectations failed. Those expectations now require complete
+original-buffer equality for newly supported cases and retain unsupported rows.
+A later192-test bin run passed170 and rejected22 stale snapshot profiles after
+the acceptance fixture-selection producer changed. A genuine original recapture
+from PE startup (instruction394,469,566/native908) and2,235-checkpoint replay
+refreshed those profiles.22/22 snapshot checks and a fresh193-test full bin run
+now pass. Prior inputs/run artifacts are preserved under the mandate checkpoint
+`snapshot-refresh/prior/`; no old profile was relabelled.
+
+**Historical later failure:** run041215, using the inherited approximate Euler
+path, reached4,892/7,001 and then omitted the original cursor-generated
+Group.handleEvent before Osd.animate, after13,071 clock requests in frame32.
+The constructor-order Dummy.getInfo failure was corrected with live426470
+query routing and native-before-script construction. The cursor failure has
+not been closed. It is not the current strict frontier while Euler is bounded.
+
+**Production work preserved:** car/part commands run through original
+426800/4265c0 ->475ec0/458c00 with live VM callbacks and nested native memory
+ownership. Verified executable data sections seed native static storage. The
+part constructor uses the new instance's Ref; event masks update the resource
+envelope; topology and flags are published across callbacks. Resource
+materialization is transactional, destruction unlinks retained raw axes and
+unsupported payload/template destructors fail before IDs are recycled.
+Car attachment/dynamic-record commands, original bounds dispatch and named
+render-bone placement have bounded differential evidence. Remaining native
+frame/drive/picking branches are explicit boundaries, including registered
+native drive callbacks previously omitted by the host.
+
+**Event conversion:**425c60's exact full-mask object branch and kind0x80
+integer branch now determine callback arity/overload. Native text conversion
+precedes GameRef construction. Null and unsupported native-address conversions
+are explicit. Five focused engine checks pass, including112 controlled original
+cases, callback ordering and rejection before allocation. The original probe
+was rerun byte-identically. This closes the represented argument-conversion
+errors, not native object identity or structured physics arguments.
+
+**Callback lifecycle integrated:**427370/4274e0 now use original intrusive
+nodes with embedded weak references. Unregister retires the first matching
+record; traversal later destroys it and decrements the count. Control and
+animation now read the live list per node, preserving append/removal behavior
+and resource destruction across VM callbacks. Drive traverses/collects stale
+records and keeps every active per-resource drive callback explicit until426e10
+is ported. There is no whole-list resource-ID clone. Original comparisons cover
+36 registration/removal sequences and eight mutations during two real426f60
+passes, including duplicates, self/next retirement and appending from an earlier
+versus final node. Every caller-heap word, callback reference and deferred free
+matches. A production lifecycle regression also proves that a recycled resource
+ID cannot revive its destroyed callback. Per-resource control/animate access
+and native-class dispatch remain separate incomplete dependencies.
+
+**Float investigation:** a Rust adaptation of Bochs' September2026 standalone
+FSIN/FCOS model matches9,815 finite inputs from independently compiled pinned
+upstream code. It remains outside production. Original Unicorn and Rosetta
+observations disagree with it; no tolerance or raw-value exclusions were added.
+The optional full-consumer diagnostic is explicitly failing:20 unsupported
+cases,12 differing heaps at large/range-boundary angles and360 raw differences.
+The original executable's Euler math really uses standalone FSIN/FCOS. Primary
+source research, exact limitations and regeneration commands are in
+`docs/research/native-runtime-gaps.md`; receipts are under
+`re/out/checkpoints/20261021-campaign/x87-research/`.
+
+**Bounded subsystem verification:** environment576 native rows +64 water
+helpers,67 world graph cases,24 resource masks,171 complete-buffer bounds
+cases and108 render-bone cases pass. The snapshot harness now validates
+executable/stock/producer/profile/FPU/checkpoint identity with no retained-word
+mask. Fresh original captures exposed and corrected bounds scratch stores and
+installation caller-stack state;22 installation snapshot tests pass against
+2,235 original checkpoints. These are component observations, not feature
+acceptance. Packages remain in the campaign's environment, entity-snapshot,
+car-command and acceptance-audit directories.
+
+**Check status:** the latest full bin run before the solo event update passed
+177 tests (zero ignored). The event update adds one passing focused test.
+The rest-of-workspace run passed. The complete workspace is **not green**:
+its stock-menu-prefix test reproduces the explicit Euler boundary. All-feature strict Clippy and formatting checks pass. The rest of the
+workspace passes. The isolated ledger acceptance execution must use the frozen candidate;
+its full source/fixture archive and command results are retained in
+`acceptance-solo-frozen/`. Check the computed result there before treating S11
+as passed; this file is not a manually editable substitute for the validator. Acceptance selftests pass34 checks, but a fresh isolated S11
+execution against the eventual frozen source is still required. A collector run passed499/499 evidence rows, including three callback
+addresses. Updating the acceptance fixture inventory correctly invalidated the
+old snapshot producer identity. The genuine original was recaptured after
+394,469,566 instructions at native call908, and its installation graph was
+rerun for2,235 checkpoints/323,206 instructions. Prior captures are preserved
+under `snapshot-refresh-20261022/prior/`; final logs and fresh ledger collection
+are in that campaign directory. No stale receipt was relabelled. These
+component counts are not whole-game progress. The strict stock-menu-prefix
+integration test still fails, and the optional trig diagnostic is also red.
+
+**Evidence inventory:** acceptance computes results over all54 required IDs;
+editable status/path presence cannot pass. Source emission is separately
+tracked from recovered behavior, Rust implementation and verified parity.
+The full historical Kuna cache is absent; the current graph includes5,956
+unresolved indirect sites. See `docs/acceptance-inventory.md` and
+`re/coverage/README.md`. Human display/listening packages are not ready because
+actual native scenarios do not yet exist; no approval is fabricated.
+
+Strict reproduction (rebuilds with a private Cargo target):
+
+    python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 600 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl --isolated-build
+
+Next dependencies: resolve Euler value/float trust and full consumer equality;
+complete original cursor picking/interaction and native frame dispatch; rerun
+strict integration with unchanged clocks/comparisons; then freeze and run all
+required executable validators. A separate verifier remains a final acceptance
+requirement. The completion mandate permits bounded implementation workers; a verifier that did not implement the final candidate must freshly execute S13.
+
+## History
+
+### Superseded campaign checkpoint before the exact Euler boundary
+
+## Current state (authoritative; supersedes every section below)
+
+Active delivery campaign, 2026-10-21. Lead owns the integrated runtime; workers
+own acceptance validation, car-command semantics, and strict snapshot evidence.
+See the dependency campaign in `docs/plan.md`. All 54 obligations remain
+unaccepted by current executable validation. No complete game or strict-boot
+pass is claimed. The old approximate host remains pending accepted M1-13.
+
+**Recovery baseline:** checkout `exact-port` began at `7e2d2cb` with substantial
+uncommitted runtime/oracle work. The binary patch, all untracked source bytes,
+worktree status and commits are saved in
+`re/out/checkpoints/20261021-campaign/starting-state-20261022T032015Z/`.
+All four secondary worktrees were clean and had no unique unmerged commits;
+none was reset or removed. Rebuilt strict baseline:
+`re/out/boot/runs/20261022T032015.415079Z-61591a6515d2/` reproduced mismatch
+620/909 and the Dummy.getInfo/Part initializer thread mismatch.
+
+**Production changes in progress:** native426800/4265c0 now routes car/part
+commands through the recovered475ec0/458c00 installation graph. VM callbacks
+share live native memory through ownership transfer, so nested natives can
+construct, mutate and destroy resources. Original data sections are read from
+the verified stock executable before native static constructors (no x86 code
+execution); original static manager storage is constructed rather than inferred
+initialized from a nonzero image pointer. The part constructor's Ref now names
+the newly created instance, as53a2a0 actually passes, and48d3d0 updates its
+resource envelope's event mask rather than native body+70. Parent changes in
+the raw resource tree are published to typed host links before callbacks;
+primitive parent IDs are still compared. Original native sleep calls retain
+their source return PCs. Car attachment, dynamic-record and bone lifecycles
+are being completed and differential-tested, with remaining paths explicit.
+
+**Reproduced integrated capability:** stock installation callbacks, part
+texture/slot operations, car attachment/dynamics and linked render-bone placement
+now run through the production native graph. The latest complete strict replay is
+`re/out/boot/runs/20261022T040507.746449Z-2d09e5d46fa2/`.
+Its native logs match through **4,874 filtered / 6,921 unfiltered** records;
+original endpoint counts remain6,508/9,209. This is an incomplete native-log
+prefix, not a clock-context or boot pass. The first clock mismatch actually
+occurs earlier (after7,375 consumed requests): original expects
+`THRD-RUNVMI Dummy.getInfo`, while the port starts a Part instance initializer.
+Clock replay latches this error; a later currentTime emitsNaN and produces the
+first native-log mismatch. Missing/reordered original script execution remains
+under investigation; do not alter replay contexts to hide it.
+
+Earlier retained runs document compound-kind and bone-placement boundaries;
+171 full-buffer bounds cases now cover original498f50 dispatch, and108 named
+render-bone/owner cases cover48bc40/48c0f0 with callback-visible state/order and
+no retained heap masks. The prototype-only paths elsewhere remain explicit.
+Fresh snapshot evidence exposed previously masked retained-word differences;
+the full installation graph is **not** currently certified by those component
+observations. Failed runs and unfinished source are retained separately.
+
+Independent lifecycle review reproduced and fixed stale raw-tree discovery,
+failed materialization becoming cached success, forced script unload bypassing
+native-payload guards, and host/native flag publication across leases. Eight
+isolated review regressions passed. Missing native payload/template destructors
+still produce explicit errors before resource IDs/references are invalidated.
+
+**Independent subsystem results:** expanded original vectors found and fixed
+GroundRef signaling-NaN conversion, detach/attach native frame context and
+oriented compound bounds/center-of-mass ordering. Environment576 native rows,
+64 water helpers,67 direct world graph cases and24 production resource-mask
+cases pass without skipped fixtures; these are bounded component observations.
+Receipts and regeneration are in
+`re/out/checkpoints/20261021-campaign/environment/README.md`.
+Fog rendering, water interactions, force callbacks and full world destruction
+remain unaccepted. The snapshot harness's inherited retained-stack-word
+exclusions are under independent repair; do not promote its older green tests
+as complete graph parity.
+
+**Evidence audit:** acceptance matrix entries are now definitions/progress;
+passing results require executable obligation validators. All54 required IDs
+and P01–P30 tier mappings are enforced. Live source/stock/exe/oracle/policy
+checks, isolated rebuilds, skipped-fixture detection and ledger regeneration
+are being integrated. See `docs/acceptance-inventory.md` and `acceptance/`.
+RE coverage now separates source emission, unresolved dispatch, Rust locations
+and legacy claims. The historical complete Kuna cache is absent locally;
+4,356 emitted Ghidra bodies include766 diagnostic bodies. The candidate
+address graph has5,956 unresolved indirect sites; neither emission nor
+annotations establishes recovered semantics or parity. Regenerate with
+`re/coverage/README.md`; inventory outputs are ignored under the campaign.
+
+Strict integration command (must rebuild, and use private build for acceptance):
+
+    python3 re/boot-diagnose.py re/out/headless/menu-continuation/menu-final/accepted/script-natives.slrlog --frames 600 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl --isolated-build
+
+Next integration checkpoint: finish original installation collaborators,
+regenerate strict original graph fixtures with full provenance, pass focused
+checks and the complete workspace, freeze a revision, then have the independent
+verifier rebuild/replay it. Human display/listening review packages follow
+only when actual native display/audio scenarios exist. Required reviews have
+not been requested or fabricated.
+
+
+
+### Superseded checkpoint at campaign start
+
+### Instance-routing checkpoint
+
 Last updated: 2026-10-21, branch `exact-port`.
 
 `./acceptance/run.sh` still exits **1**: **54 obligations: 42 open, 11 partial,
@@ -82,8 +463,6 @@ Reproduce strict integration with:
 The whole-game contract remains unchanged. Continue the remaining 54-row
 campaign from this source state; do not promote absent end-to-end scenarios.
 
-
-## History
 
 Dated findings, superseded frontiers and retained oracle addresses follow. Read
 them for the reasoning and the addresses, never for the current status.

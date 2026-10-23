@@ -335,6 +335,9 @@ impl native_resource_load::AccessHost for AccessAdapter {
             2 => {
                 return crate::native_spatial::request_physics(m, raw, [quality, _priority, _time])
             }
+            //543c80 calls the embedded render getter5433d0, then requests
+            //spatial work only for render payload flags 0800/4000.
+            3 => m.r32(raw + 0xd8 + 0xbc) & 0x4800 != 0,
             0xe => true,
             5 => {
                 let shape = m.r32(raw + 0x98);

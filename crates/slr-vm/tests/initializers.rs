@@ -286,7 +286,10 @@ fn execute_body(
     thread.frames.push(frame);
     thread.pc = pc;
     thread.run(vm, 0., &mut || slr_x87::X87::from_f64(0.))?;
-    thread.pop_deref_with(vm)
+    let cell = thread.pop_deref_with(vm)?;
+    let value = cell.value();
+    thread.release(cell);
+    Ok(value)
 }
 #[test]
 fn resource_initializers_use_the_real_literal_boundary_in_both_drivers() {
