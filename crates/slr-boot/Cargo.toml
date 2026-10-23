@@ -24,3 +24,7 @@ slr-physics = { path = "../slr-physics" }
 serde_json = "1"
 serde = "1"
 sha2 = "0.10.9"
+slr-d3d9 = { path = "../slr-d3d9" }
+slr-fmt-texture = { path = "../slr-fmt-texture" }
+zune-jpeg = "0.5"
+zune-core = "0.5"

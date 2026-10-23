@@ -37,6 +37,7 @@ mod native_stack;
 mod native_world;
 mod part_render;
 mod parts;
+mod presentation;
 mod resource_identity;
 mod sched;
 mod telemetry;
@@ -680,6 +681,7 @@ fn install(vm: &mut VmHost) {
     vm.native_thread_hook = Some(sched::hook);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
+    presentation::install(vm);
     if std::env::var_os("SLR_NATIVE_AUDIT").is_some() {
         audit_natives(vm);
     }
@@ -969,6 +971,7 @@ fn run(
             probe_osd_levels(vm);
         }
         let active_menu = active_main_menu(vm).filter(|_| !sched::pending_menu_call(vm));
+        presentation::frame(vm, active_menu.is_some(), output)?;
         if active_menu.is_some() && active_menu == menu {
             menu_idle_frames += 1;
         } else {
@@ -1083,6 +1086,10 @@ fn execute() -> Result<(), String> {
                 }
                 _ => return Err("ArgumentBoundary: trace level must be metadata or full".into()),
             }
+        } else if arg == "--window" {
+            presentation::enable();
+        } else if arg == "--menu-frame" {
+            presentation::capture_path(args.next().ok_or("--menu-frame needs a PNG path")?);
         } else if arg == "--wall-clock" {
             wall_clock = true;
         } else if arg == "--config-instance-id" || arg == "--game-init-instance-id" {
@@ -1121,6 +1128,10 @@ fn execute() -> Result<(), String> {
         } else {
             return Err(format!("ArgumentBoundary: unknown argument {arg}"));
         }
+    }
+    if presentation::enabled() {
+        config_instance_id.get_or_insert(0xffff0080);
+        game_init_instance_id.get_or_insert(0xffff007f);
     }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1250,7 +1261,16 @@ fn execute() -> Result<(), String> {
 }
 
 fn main() {
-    if let Err(error) = execute() {
+    let outcome = if std::env::args().any(|arg| arg == "--window") {
+        slr_d3d9::window(|sender| {
+            presentation::connect(sender.clone());
+            let outcome = execute();
+            let _ = sender.send(slr_d3d9::Message::Finished(outcome));
+        })
+    } else {
+        execute()
+    };
+    if let Err(error) = outcome {
         eprintln!("STOP {error}");
         std::process::exit(1);
     }

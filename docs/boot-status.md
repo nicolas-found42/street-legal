@@ -83,6 +83,32 @@ The whole-game contract remains unchanged. Continue the remaining 54-row
 campaign from this source state; do not promote absent end-to-end scenarios.
 
 
+## Visible menu preview (2026-10-23)
+
+`cargo run -p slr-boot -- stock --window` opens a winit/wgpu Metal window
+and presents the menu built by the unchanged stock scripts. The optional
+presentation adapter observes native resource duplication/replacement, render
+instances, camera/viewport setup and text properties; it reads live group
+visibility and renders stock textures plus SCX font glyphs. It never provides
+native return values or changes script/engine state. `--menu-frame PATH` captures
+the same renderer to an 800×600 PNG without opening a window. Both options use
+the existing controlled Config/Init IDs by default, with explicit overrides.
+
+Scope is a display-only snapshot of the first completed main menu, held visible
+after the 600-frame diagnostic run. Live menu input, the animated 3D background,
+audio, full D3D9 equivalence and screenshot parity remain unimplemented or
+unaccepted. This does not accept P01, S1, S9 or any other campaign obligation.
+The strict-replay failure and next native-command target above remain unchanged.
+
+Validation receipts and generated frames are under `re/out/window-*`.
+The real-stock presentation regression compares the entire native-call log with
+a separate headless run, checks menu labels/hidden groups and asserts that the
+heading is on screen, the columns do not overlap and the GPU image is nonblank.
+The original menu regression remains unchanged. Workspace validation passes
+1,107 tests (zero failed or ignored), Clippy with `-D warnings`, formatting and
+diff checks. Receipts: `re/out/window-workspace-tests.log` and
+`re/out/window-workspace-clippy.log`.
+
 ## History
 
 Dated findings, superseded frontiers and retained oracle addresses follow. Read
