@@ -8,8 +8,9 @@ use std::{
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -24,7 +25,7 @@ pub struct Vertex {
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub rgba: Arc<Vec<u8>>,
 }
 #[derive(Default)]
 pub struct Frame {
@@ -32,6 +33,28 @@ pub struct Frame {
     pub draws: Vec<(String, Vec<Vertex>)>,
     pub labels: Vec<String>,
     pub text_bounds: HashMap<String, [f32; 4]>,
+}
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputEvent {
+    Key {
+        code: u32,
+        pressed: bool,
+        #[serde(default)]
+        repeat: bool,
+    },
+    Pointer {
+        x: f32,
+        y: f32,
+    },
+    Button {
+        pressed: bool,
+    },
+    Text {
+        text: String,
+    },
+    FocusLost,
+    Close,
 }
 pub enum Message {
     Frame(Frame),
@@ -320,6 +343,7 @@ struct App {
     frame: Frame,
     error: Option<String>,
     presented: bool,
+    input: mpsc::Sender<InputEvent>,
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -370,7 +394,49 @@ impl ApplicationHandler for App {
     }
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                let _ = self.input.send(InputEvent::Close);
+            }
+            WindowEvent::Focused(false) => {
+                let _ = self.input.send(InputEvent::FocusLost);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(config) = &self.config {
+                    let _ = self.input.send(InputEvent::Pointer {
+                        x: position.x as f32 / config.width as f32,
+                        y: position.y as f32 / config.height as f32,
+                    });
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let _ = self.input.send(InputEvent::Button {
+                    pressed: state == ElementState::Pressed,
+                });
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    if let Some(text) = &event.text {
+                        if text.chars().any(|c| !c.is_control()) {
+                            let _ = self.input.send(InputEvent::Text {
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                }
+                if let PhysicalKey::Code(key) = event.physical_key {
+                    if let Some(code) = key_code(key) {
+                        let _ = self.input.send(InputEvent::Key {
+                            code,
+                            pressed: event.state == ElementState::Pressed,
+                            repeat: event.repeat,
+                        });
+                    }
+                }
+            }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 if let (Some(config), Some(surface), Some(gpu)) =
                     (&mut self.config, &self.surface, &self.gpu)
@@ -393,7 +459,9 @@ impl ApplicationHandler for App {
                             self.error = Some(e);
                             el.exit();
                         }
-                        Message::Finished(Ok(())) => {}
+                        Message::Finished(Ok(())) => {
+                            el.exit();
+                        }
                     }
                 }
                 if let (Some(surface), Some(gpu)) = (&self.surface, &self.gpu) {
@@ -434,11 +502,14 @@ impl ApplicationHandler for App {
         }
     }
 }
-pub fn window(worker: impl FnOnce(mpsc::Sender<Message>) + Send + 'static) -> Result<(), String> {
+pub fn window(
+    worker: impl FnOnce(mpsc::SyncSender<Message>, mpsc::Receiver<InputEvent>) + Send + 'static,
+) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || worker(tx));
+    let (tx, rx) = mpsc::sync_channel(1);
+    let (input, input_rx) = mpsc::channel();
+    std::thread::spawn(move || worker(tx, input_rx));
     let mut app = App {
         rx,
         window: None,
@@ -448,7 +519,28 @@ pub fn window(worker: impl FnOnce(mpsc::Sender<Message>) + Send + 'static) -> Re
         frame: Frame::default(),
         error: None,
         presented: false,
+        input,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
+}
+
+/// macOS physical keys to the keyboard's Windows virtual-key namespace.
+/// Virtual controller-axis bindings are resolved by the script input adapter.
+fn key_code(key: KeyCode) -> Option<u32> {
+    Some(match key {
+        KeyCode::ArrowLeft => 0x25,
+        KeyCode::ArrowUp => 0x26,
+        KeyCode::ArrowRight => 0x27,
+        KeyCode::ArrowDown => 0x28,
+        KeyCode::Enter | KeyCode::NumpadEnter => 0x0d,
+        KeyCode::Escape => 0x1b,
+        KeyCode::Space => 0x20,
+        KeyCode::Tab => 9,
+        KeyCode::Backspace => 8,
+        KeyCode::Delete => 0x2e,
+        KeyCode::Home => 0x24,
+        KeyCode::End => 0x23,
+        _ => return None,
+    })
 }

@@ -2,6 +2,7 @@
 mod engine;
 mod factory;
 mod gc_runtime;
+mod live_input;
 mod materialise;
 mod missing_rows;
 mod native_assets;
@@ -682,6 +683,7 @@ fn install(vm: &mut VmHost) {
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
     presentation::install(vm);
+    live_input::install(vm);
     if std::env::var_os("SLR_NATIVE_AUDIT").is_some() {
         audit_natives(vm);
     }
@@ -935,7 +937,16 @@ fn run(
     let mut menu_since = 0;
     let mut menu_idle_frames = 0;
     telemetry::snapshot(vm, "before-frames", None)?;
-    for frame in 0..frames {
+    let mut frame = 0;
+    loop {
+        if frame >= frames && !live_input::window_open() {
+            break;
+        }
+        let started = std::time::Instant::now();
+        live_input::poll(vm)?;
+        if live_input::closed() {
+            break;
+        }
         slr_vm::diagnostics::set_frame(Some(frame));
         telemetry::detail("frame-enter", vec![("frame".into(), frame.to_string())]);
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
@@ -972,6 +983,13 @@ fn run(
         }
         let active_menu = active_main_menu(vm).filter(|_| !sched::pending_menu_call(vm));
         presentation::frame(vm, active_menu.is_some(), output)?;
+        if active_menu.is_some() {
+            live_input::ready();
+        }
+        live_input::record(vm, output)?;
+        if slr_lang::seam::with_lang_host(|h| h.exit_requested()) {
+            break;
+        }
         if active_menu.is_some() && active_menu == menu {
             menu_idle_frames += 1;
         } else {
@@ -979,14 +997,28 @@ fn run(
             menu_since = frame;
             menu_idle_frames = 0;
         }
+        frame += 1;
+        if live_input::window_open() {
+            if let Some(delay) = std::time::Duration::from_millis(16).checked_sub(started.elapsed())
+            {
+                std::thread::sleep(delay);
+            }
+        }
     }
+    let frames = pump.ticks;
     println!(
         "BOOT scheduler frames={frames} ticks={} thread runs={} simulated ms={:.3}",
         pump.ticks,
         pump.runs,
         sched::now_ms()
     );
-    if menu.is_some() && menu_idle_frames >= 300 {
+    live_input::finish()?;
+    if live_input::closed()
+        || live_input::interacted()
+        || slr_lang::seam::with_lang_host(|h| h.exit_requested())
+    {
+        Ok(())
+    } else if menu.is_some() && menu_idle_frames >= 300 {
         sched::finish_accepted()?;
         println!("BOOT MainMenu dialog complete at frame {menu_since}; idle frames={menu_idle_frames}; native-log parity remains a separate comparison");
         Ok(())
@@ -1088,6 +1120,9 @@ fn execute() -> Result<(), String> {
             }
         } else if arg == "--window" {
             presentation::enable();
+        } else if arg == "--input-script" {
+            presentation::enable();
+            live_input::script(args.next().ok_or("--input-script needs a JSON path")?)?;
         } else if arg == "--menu-frame" {
             presentation::capture_path(args.next().ok_or("--menu-frame needs a PNG path")?);
         } else if arg == "--wall-clock" {
@@ -1262,7 +1297,8 @@ fn execute() -> Result<(), String> {
 
 fn main() {
     let outcome = if std::env::args().any(|arg| arg == "--window") {
-        slr_d3d9::window(|sender| {
+        slr_d3d9::window(|sender, input| {
+            live_input::connect(input);
             presentation::connect(sender.clone());
             let outcome = execute();
             let _ = sender.send(slr_d3d9::Message::Finished(outcome));

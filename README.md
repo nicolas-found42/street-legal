@@ -8,15 +8,15 @@ port.** Real files drive the content (24 cars, 29 tyres, 14 engine blocks, real 
 real drivetrain numbers); the physics, career and tracks are new implementations. See
 [docs/fidelity.md](docs/fidelity.md) for exactly what is decoded, approximated or missing.
 
-## Exact-port window preview
+## Exact-port interactive main menu
 
 ```sh
 cargo run -p slr-boot -- stock --window
 ```
 
-The exact port can display the main menu built by the unchanged stock scripts,
-using the stock textures and fonts. This is a display-only preview; live menu
-input, the animated 3D background and audio are unfinished. See
+The exact port displays the main menu using stock textures and fonts. Mouse
+clicks, arrow keys, Enter/Space, Escape and name entry drive the unchanged stock
+scripts. The animated 3D background, audio and full gameplay remain unfinished. See
 [slr-boot](crates/slr-boot/README.md) for captures and limitations.
 
 ## Run the approximate slice

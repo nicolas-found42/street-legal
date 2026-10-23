@@ -942,6 +942,11 @@ impl VmHost {
         self.variable_names.len() as u32
     }
 
+    /// Read the live element cells without allocating or modifying the array.
+    pub fn array_cells(&self, word: u32) -> Option<&[Value]> {
+        self.array_cells.get(&word).map(Vec::as_slice)
+    }
+
     /// The element cells of an array object, for natives that copy payloads.
     pub fn array_cells_mut(&mut self, word: u32) -> Option<&mut Vec<Value>> {
         self.array_cells.get_mut(&word)

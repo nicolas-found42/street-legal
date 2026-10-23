@@ -83,6 +83,33 @@ The whole-game contract remains unchanged. Continue the remaining 54-row
 campaign from this source state; do not promote absent end-to-end scenarios.
 
 
+## Interactive menu input (2026-10-23)
+
+The visible exact-port menu now accepts native mouse and keyboard input through
+unchanged stock Hotkey/Group/Osd scripts. The adapter projects arrow/select/cancel
+keys, Latin-1 text and Backspace, resolves UI physics-box picks, and respects the
+original focused OSD. No host-side menu command table replaces script decisions.
+The window continues stepping and rendering until close or script `System.exit`.
+Modal projection uses its viewport bounds and activation order.
+
+The real-stock input regression covers keyboard and mouse Options navigation,
+disabled buttons, dragging away before release, focus loss during press, clicks
+behind a modal, repeated text/backspace, Cancel and confirmed script-driven exit.
+Native window QA also verifies mouse Options, Escape and name editing. Replay
+and evidence format are documented in `crates/slr-boot/README.md`; receipts are
+under `re/out/input/`. No-input presentation retains its native-log equality
+check against headless execution.
+
+Workspace validation passes 1,108 tests (zero failed or ignored), full Clippy
+with `-D warnings`, formatting and diff checks. Receipts:
+`re/out/input/workspace-tests.log`, `re/out/input/workspace-clippy-final.log`,
+and `re/out/input/integration-final.log`.
+
+This supersedes the display-only scope below. Full DirectInput/controller and
+remapped-control parity, 3D background, audio and gameplay remain unfinished.
+It does not accept P01, S1, S9 or any other whole-game campaign obligation, or
+resolve the strict-replay failure and next native-command target above.
+
 ## Visible menu preview (2026-10-23)
 
 `cargo run -p slr-boot -- stock --window` opens a winit/wgpu Metal window
