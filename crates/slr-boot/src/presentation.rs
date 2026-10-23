@@ -6,7 +6,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::mpsc::Sender,
+    sync::mpsc::SyncSender,
 };
 
 #[derive(Clone, Default)]
@@ -37,6 +37,12 @@ struct Camera {
     fov: f32,
     pos: [f32; 3],
 }
+#[derive(Clone)]
+struct UiBox {
+    owner: u32,
+    pos: [f32; 3],
+    size: [f32; 3],
+}
 #[derive(Default)]
 struct State {
     enabled: bool,
@@ -45,11 +51,15 @@ struct State {
     ids: HashMap<u32, u32>,
     visuals: HashMap<u32, Visual>,
     renders: HashMap<u32, Render>,
+    ui_boxes: HashMap<u32, UiBox>,
     texts: HashMap<u32, Text>,
     cameras: HashMap<u32, Camera>,
-    active_viewports: HashMap<u32, u32>,
-    sender: Option<Sender<Message>>,
+    active_viewports: HashMap<u32, u64>,
+    next_viewport_order: u64,
+    sender: Option<SyncSender<Message>>,
     presented: bool,
+    image_cache: RefCell<HashMap<u32, (String, Image)>>,
+    font_cache: RefCell<HashMap<u32, std::rc::Rc<slr_fmt_scx::V3Mesh>>>,
 }
 thread_local! {static STATE:RefCell<State> = RefCell::new(State::default());}
 pub fn enabled() -> bool {
@@ -65,10 +75,10 @@ pub fn capture_path(path: String) {
         s.capture = Some(path.into());
     });
 }
-pub fn connect(sender: Sender<Message>) {
+pub fn connect(sender: SyncSender<Message>) {
     STATE.with(|s| s.borrow_mut().sender = Some(sender));
 }
-fn field(vm: &VmHost, word: u32, name: &str) -> Option<u32> {
+pub(crate) fn field(vm: &VmHost, word: u32, name: &str) -> Option<u32> {
     let object = vm.objects.get(word.checked_sub(0x1000)? as usize)?;
     let slr_vm::vmclass::ClassRef::Loaded(class) = object.class else {
         return None;
@@ -76,7 +86,7 @@ fn field(vm: &VmHost, word: u32, name: &str) -> Option<u32> {
     let slot = vm.instance_field_slot_id(class, name).ok()?;
     object.fields.get(slot).map(|v| v.payload)
 }
-fn container(vm: &VmHost, word: u32) -> u32 {
+pub(crate) fn container(vm: &VmHost, word: u32) -> u32 {
     field(vm, word, "ptr")
         .and_then(|ptr| slr_resource::node::with_res(|h| h.node(ptr).map(|n| n.container)))
         .unwrap_or(0)
@@ -98,6 +108,14 @@ fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let _ = marshal_args(info, &mut w);
     // Some natives destroy/rebind the reference, so preserve argument identities.
     let before = w.map(|word| container(vm, word));
+    if info.class == "java.util.resource.PhysicsRef"
+        && info.name == "getPos"
+        && crate::live_input::interacted()
+    {
+        if let Some(pos) = STATE.with(|s| s.borrow().ui_boxes.get(&before[0]).map(|b| b.pos)) {
+            return vector_object(vm, pos);
+        }
+    }
     let result = original(vm, info);
     if vm.native_failure.is_some() {
         return result;
@@ -111,7 +129,33 @@ fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
                 s.ids.insert(key, id);
             }
         }
+        if info.name == "destroy" {
+            s.ui_boxes.remove(&before[0]);
+            s.renders.remove(&before[0]);
+            s.cameras.remove(&before[0]);
+        }
         match (info.class, info.name) {
+            ("java.util.resource.PhysicsRef", "createBox") if c != 0 => {
+                s.ui_boxes.insert(
+                    c,
+                    UiBox {
+                        owner: before[1],
+                        pos: [0.; 3],
+                        size: [
+                            f32::from_bits(w[2]),
+                            f32::from_bits(w[3]),
+                            f32::from_bits(w[4]),
+                        ],
+                    },
+                );
+            }
+            ("java.util.resource.PhysicsRef", "setMatrix") => {
+                if let Some(pos) = vector(vm, w[1]) {
+                    if let Some(b) = s.ui_boxes.get_mut(&c) {
+                        b.pos = pos;
+                    }
+                }
+            }
             ("java.util.resource.ResourceRef", "duplicate") if c != 0 => {
                 let visual = s.visuals.get(&before[1]).cloned().unwrap_or(Visual {
                     source: s.ids.get(&before[1]).copied().unwrap_or(0),
@@ -162,7 +206,9 @@ fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
                 }
             }
             ("java.render.Viewport", "activate") => {
-                s.active_viewports.insert(c, w[1]);
+                s.next_viewport_order += 1;
+                let order = s.next_viewport_order;
+                s.active_viewports.insert(c, order);
             }
             ("java.render.Viewport", "deactivate" | "destroy") => {
                 s.active_viewports.remove(&before[0]);
@@ -403,7 +449,7 @@ fn image(id: u32) -> Result<(String, Image), String> {
         Image {
             width: decoded.width,
             height: decoded.height,
-            rgba: decoded.pixels,
+            rgba: std::sync::Arc::new(decoded.pixels),
         },
     ))
 }
@@ -426,13 +472,17 @@ fn quad(rect: [f32; 4], uv: [[f32; 2]; 4], color: u32) -> Vec<Vertex> {
         })
         .to_vec()
 }
-fn texture(frame: &mut Frame, id: u32) -> Result<String, String> {
-    let path = source_file(id)?.to_string_lossy().into_owned();
-    if !frame.images.contains_key(&path) {
-        let (_, im) = image(id)?;
-        frame.images.insert(path.clone(), im);
+fn texture(s: &State, frame: &mut Frame, id: u32) -> Result<String, String> {
+    if !s.image_cache.borrow().contains_key(&id) {
+        s.image_cache.borrow_mut().insert(id, image(id)?);
     }
-    Ok(path)
+    let cache = s.image_cache.borrow();
+    let (name, image) = &cache[&id];
+    frame
+        .images
+        .entry(name.clone())
+        .or_insert_with(|| image.clone());
+    Ok(name.clone())
 }
 fn font_mesh(id: u32) -> Result<slr_fmt_scx::V3Mesh, String> {
     let path = source_file(id)?;
@@ -443,7 +493,23 @@ fn font_mesh(id: u32) -> Result<slr_fmt_scx::V3Mesh, String> {
         _ => Err("unsupported menu font geometry".into()),
     }
 }
-fn visible_owners(vm: &VmHost, s: &State) -> HashMap<u32, f32> {
+#[derive(Clone, Copy)]
+struct Projection {
+    half_height: f32,
+    viewport: [f32; 4],
+}
+impl Projection {
+    fn half_width(self) -> f32 {
+        self.half_height * self.viewport[2] * 800. / (self.viewport[3] * 600.)
+    }
+    fn x(self, local: f32) -> f32 {
+        2. * self.viewport[0] + self.viewport[2] * (local + 1.) - 1.
+    }
+    fn y(self, local: f32) -> f32 {
+        1. - 2. * self.viewport[1] - self.viewport[3] * (1. - local)
+    }
+}
+fn visible_owners(vm: &VmHost, s: &State) -> HashMap<u32, Projection> {
     let mut owners = HashMap::new();
     for (i, object) in vm.objects.iter().enumerate() {
         if object.class_name(&vm.loader) != "java.render.Osd" {
@@ -466,14 +532,24 @@ fn visible_owners(vm: &VmHost, s: &State) -> HashMap<u32, f32> {
         if !half_height.is_finite() || half_height <= 0. {
             continue;
         }
-        owners.insert(container(vm, word), half_height);
+        let Some(bounds) = crate::viewport::bounds(viewport) else {
+            continue;
+        };
+        if bounds[2] <= 0. || bounds[3] <= 0. {
+            continue;
+        }
+        let projection = Projection {
+            half_height,
+            viewport: bounds,
+        };
+        owners.insert(container(vm, word), projection);
         for (j, group) in vm.objects.iter().enumerate() {
             let group_word = 0x1000 + j as u32;
             if group.class_name(&vm.loader) == "java.render.Group"
                 && field(vm, group_word, "osd") == Some(word)
                 && field(vm, group_word, "active") == Some(1)
             {
-                owners.insert(container(vm, group_word), half_height);
+                owners.insert(container(vm, group_word), projection);
             }
         }
     }
@@ -483,6 +559,7 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
     let owners = visible_owners(vm, s);
     let mut frame = Frame::default();
     let mut rectangles = Vec::new();
+    let mut draw_layers = Vec::new();
     for (i, object) in vm.objects.iter().enumerate() {
         if object.class_name(&vm.loader) != "java.render.Rectangle" {
             continue;
@@ -508,37 +585,38 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
         let height =
             f32::from_bits(field(vm, template, "height").ok_or("rectangle height absent")?);
         let pos = render.pos;
-        let half_height = owners[&render.owner];
-        let half_width = half_height * 800. / 600.;
-        let name = texture(&mut frame, tex)?;
+        let projection = owners[&render.owner];
+        let half_height = projection.half_height;
+        let half_width = projection.half_width();
+        let name = texture(s, &mut frame, tex)?;
         rectangles.push((
+            owner_layer(vm, s, render.owner),
             pos[2],
             name,
             quad(
                 [
-                    (pos[0] - width / 2.) / half_width,
-                    (pos[1] + height / 2.) / half_height,
-                    (pos[0] + width / 2.) / half_width,
-                    (pos[1] - height / 2.) / half_height,
+                    projection.x((pos[0] - width / 2.) / half_width),
+                    projection.y((pos[1] + height / 2.) / half_height),
+                    projection.x((pos[0] + width / 2.) / half_width),
+                    projection.y((pos[1] - height / 2.) / half_height),
                 ],
                 [[0., 0.], [1., 0.], [0., 1.], [1., 1.]],
                 render.color,
             ),
         ));
     }
-    rectangles.sort_by(|a, b| a.0.total_cmp(&b.0));
-    frame.draws.extend(
-        rectangles
-            .into_iter()
-            .map(|(_, name, vertices)| (name, vertices)),
-    );
+    rectangles.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    for (layer, _, name, vertices) in rectangles {
+        draw_layers.push(layer);
+        frame.draws.push((name, vertices));
+    }
     let mut texts: Vec<_> = s
         .texts
         .values()
         .filter(|t| owners.contains_key(&t.owner))
         .collect();
     texts.sort_by_key(|t| t.word);
-    let mut fonts = HashMap::new();
+
     for text in texts {
         let Some(content) = field(vm, text.word, "text").and_then(|word| vm.string_bytes(word))
         else {
@@ -557,11 +635,13 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
         let (Some((mesh, _)), Some(tex)) = (asset.mesh, asset.texture) else {
             return Err("font lacks mesh/texture".into());
         };
-        if let std::collections::hash_map::Entry::Vacant(e) = fonts.entry(mesh) {
-            e.insert(font_mesh(mesh)?);
+        if !s.font_cache.borrow().contains_key(&mesh) {
+            s.font_cache
+                .borrow_mut()
+                .insert(mesh, std::rc::Rc::new(font_mesh(mesh)?));
         }
-        let font = &fonts[&mesh];
-        let name = texture(&mut frame, tex)?;
+        let font = s.font_cache.borrow()[&mesh].clone();
+        let name = texture(s, &mut frame, tex)?;
         let atlas = &frame.images[&name];
         let pixel_scale = font
             .positions
@@ -583,7 +663,8 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
                 .map_or(0., |p| p[0] * pixel_scale)
         };
         let width: f32 = content.iter().map(|&c| glyph_width(c)).sum();
-        let mut x = (text.pos[0] + 1.) * 400.
+        let projection = owners[&text.owner];
+        let mut x = (projection.x(text.pos[0]) + 1.) * 400.
             - if Some(text.align)
                 == vm
                     .read_loaded_static_field("java.render.Text", "ALIGN_RIGHT")
@@ -599,7 +680,7 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
             } else {
                 0.
             };
-        let y = (text.pos[1] + 1.) * 300.;
+        let y = (1. - projection.y(-text.pos[1])) * 300.;
         let mut vertices = Vec::new();
         for &c in content {
             let first = c as usize * 4;
@@ -643,31 +724,44 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
             );
             let label = String::from_utf8_lossy(content).into_owned();
             frame.text_bounds.insert(label.clone(), bounds);
+            draw_layers.push(owner_layer(vm, s, text.owner));
             frame.draws.push((name, vertices));
             frame.labels.push(label);
         }
     }
+    let mut draws: Vec<_> = draw_layers.into_iter().zip(frame.draws).collect();
+    draws.sort_by_key(|(layer, _)| *layer);
+    frame.draws = draws.into_iter().map(|(_, draw)| draw).collect();
     Ok(frame)
 }
+fn owner_layer(vm: &VmHost, s: &State, owner: u32) -> u64 {
+    let script = slr_resource::node::with_res(|h| {
+        h.container(owner)
+            .and_then(|c| c.instance.as_ref())
+            .map_or(0, |i| i.script)
+    });
+    let osd = field(vm, script, "osd").unwrap_or(script);
+    let vp = container(vm, field(vm, osd, "vp").unwrap_or(0));
+    s.active_viewports.get(&vp).copied().unwrap_or(0)
+}
 pub fn frame(vm: &VmHost, menu: bool, output: &Path) -> Result<(), String> {
-    if !menu
-        || !STATE.with(|s| {
-            let s = s.borrow();
-            s.enabled && !s.presented
-        })
-    {
-        return Ok(());
-    }
     STATE.with(|state| {
         let mut s=state.borrow_mut();
+        if !s.enabled || (!menu && !s.presented) || (s.presented && !crate::live_input::interacted()) {return Ok(());}
         let frame=scene(vm,&s)?;
-        if frame.draws.is_empty() || frame.labels.is_empty() {return Err("PresentationBoundary: menu has no visible draws/text".into());}
-        std::fs::write(output.join("presentation.json"),serde_json::to_vec_pretty(&serde_json::json!({"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"textures":frame.images.keys().collect::<Vec<_>>()})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        if let Some(path)=&s.capture {slr_d3d9::capture(&frame,path)?;}
-        println!("WINDOW stock menu: {} draws, {} labels, {} textures",frame.draws.len(),frame.labels.len(),frame.images.len());
+        if frame.draws.is_empty() || frame.labels.is_empty() {return Ok(());}
+        let metadata=serde_json::json!({"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"textures":frame.images.keys().collect::<Vec<_>>()});
+        std::fs::write(output.join("presentation.json"),serde_json::to_vec_pretty(&metadata).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        if !s.presented {
+            if let Some(path)=&s.capture {slr_d3d9::capture(&frame,path)?;}
+            println!("WINDOW stock menu: {} draws, {} labels, {} textures",frame.draws.len(),frame.labels.len(),frame.images.len());
+        }
         if let Some(sender)=&s.sender {sender.send(Message::Frame(frame)).map_err(|e|e.to_string())?;}
         s.presented=true;Ok(())
     })
+}
+pub(crate) fn labels(vm: &VmHost) -> Result<Vec<String>, String> {
+    STATE.with(|s| scene(vm, &s.borrow()).map(|f| f.labels))
 }
 
 fn ptx_image(path: &Path, bytes: &[u8]) -> Result<(String, Image), String> {
@@ -711,7 +805,90 @@ fn ptx_image(path: &Path, bytes: &[u8]) -> Result<(String, Image), String> {
         Image {
             width: info.width as u32,
             height: info.height as u32,
-            rgba,
+            rgba: std::sync::Arc::new(rgba),
         },
     ))
+}
+
+pub(crate) fn vector_object(vm: &mut VmHost, pos: [f32; 3]) -> Option<u32> {
+    let result = (|| {
+        let word = vm.alloc_object("java.lang.Vector3")?;
+        for (name, value) in ["x", "y", "z"].into_iter().zip(pos) {
+            vm.write_field(word, name, slr_vm::values::Value::float(value))?;
+        }
+        Ok::<_, slr_vm::host::HostError>(word)
+    })();
+    match result {
+        Ok(word) => Some(word),
+        Err(e) => {
+            vm.native_failure = Some(format!("UI position: {e:?}"));
+            None
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Hit {
+    pub group: u32,
+    pub osd: u32,
+    pub physics: u32,
+}
+pub(crate) fn hit_test(vm: &VmHost, osd: u32, x: f32, y: f32) -> Option<Hit> {
+    if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return None;
+    }
+    STATE.with(|s| {
+        let s = s.borrow();
+        let owners = visible_owners(vm, &s);
+        let mut hits = Vec::new();
+        for (&key, b) in &s.ui_boxes {
+            let group = slr_resource::node::with_res(|h| {
+                h.container(b.owner)
+                    .and_then(|c| c.instance.as_ref())
+                    .map_or(0, |i| i.script)
+            });
+            if field(vm, group, "osd") != Some(osd) {
+                continue;
+            }
+            let Some(&projection) = owners.get(&b.owner) else {
+                continue;
+            };
+            let [left, top, width, height] = projection.viewport;
+            if x < left || x > left + width || y < top || y > top + height {
+                continue;
+            }
+            let px = ((x - left) / width * 2. - 1.) * projection.half_width();
+            let py = (1. - (y - top) / height * 2.) * projection.half_height;
+            if (px - b.pos[0]).abs() <= b.size[0] / 2. && (py - b.pos[1]).abs() <= b.size[1] / 2. {
+                hits.push((
+                    b.pos[2],
+                    key,
+                    Hit {
+                        group,
+                        osd,
+                        physics: resource_id(key),
+                    },
+                ));
+            }
+        }
+        hits.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        hits.first().map(|(_, _, hit)| *hit)
+    })
+}
+
+pub(crate) fn pick_position(vm: &VmHost, osd: u32, point: [f32; 2]) -> Option<[f32; 3]> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        let owners = visible_owners(vm, &s);
+        let projection = *owners.get(&container(vm, osd))?;
+        let [left, top, width, height] = projection.viewport;
+        Some([
+            ((point[0] - left) / width * 2. - 1.) * projection.half_width(),
+            (1. - (point[1] - top) / height * 2.) * projection.half_height,
+            0.,
+        ])
+    })
+}
+
+pub(crate) fn capture(vm: &VmHost, path: &Path) -> Result<(), String> {
+    STATE.with(|s| slr_d3d9::capture(&scene(vm, &s.borrow())?, path))
 }

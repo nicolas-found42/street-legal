@@ -1,4 +1,4 @@
-# Stock bootstrap and visible main-menu preview
+# Stock bootstrap and interactive main menu
 
 From the repository root on macOS:
 
@@ -9,11 +9,21 @@ cargo run -p slr-boot -- stock --window
 This opens an 800×600 window through winit/wgpu (Metal). The unchanged stock
 scripts build MainMenu; the presentation adapter reads their live rectangle,
 text, camera and group state and renders the stock textures and font meshes.
-The menu appears after bootstrap, then stays visible when the default
-600-frame diagnostic run finishes. Close the window using its close button.
-This is a **display-only menu preview**: mouse/keyboard menu actions, the
-animated 3D background, audio and the full D3D9 state emulator are unfinished.
-It does not establish screenshot parity or make the exact port playable.
+The menu appears after bootstrap and keeps updating until the window closes or
+an original script calls `System.exit`.
+
+Use the mouse to hover and click buttons, arrow keys to navigate, Enter/Space
+to select, and Escape for the focused script's cancel/back action. Name entry
+accepts Latin-1 characters and Backspace through the original StringInput code.
+Dialogs retain their stock behavior; Escape is not universally a Cancel button.
+Input goes through the original Hotkey/Group callbacks and focused OSD, with
+picking based on the script-created UI physics boxes. Menu commands, disabled
+buttons, text editing and modal decisions remain in unchanged TUFA scripts.
+
+This platform adapter does not establish complete DirectInput/controller or
+remapped-control parity. The animated 3D background, audio, full D3D9 emulator
+and gameplay beyond the menu remain unfinished. It does not establish screenshot
+parity or make the exact port fully playable.
 
 Capture the same rendering path without opening a window:
 
@@ -29,11 +39,33 @@ Explicit instance-ID arguments override those defaults. These remain controlled
 inputs, not recovered original startup allocation history. Without either
 presentation option the headless defaults and logging behavior are unchanged.
 
+For deterministic input replay, pass `--input-script PATH` with a JSON array:
+
+```json
+[
+  {"tick":5,"event":{"type":"key","code":39,"pressed":true}},
+  {"tick":6,"event":{"type":"key","code":39,"pressed":false},"capture":true},
+  {"tick":10,"event":{"type":"pointer","x":0.65,"y":0.41}},
+  {"tick":11,"event":{"type":"button","pressed":true}},
+  {"tick":12,"event":{"type":"button","pressed":false}}
+]
+```
+
+Ticks begin at the first complete main menu. Pointer coordinates are normalized
+to the drawable window; key codes use Windows virtual-key values. Other events
+are `text` (with `text`), `focus_lost`, and `close`. Optional `capture` writes
+`input-{tick+1}.png` after the frame; `input-state.json` records up to 512 input
+snapshots. Replay enables presentation and uses the diagnostic frame budget
+without a window. Unconsumed events fail the run.
+
+`cargo test -p slr-boot --test stock_menu_input` exercises actual stock keyboard
+navigation, Options, mouse clicks, disabled buttons, drag/focus cancellation,
+modal isolation, repeated text/backspace, Cancel and script-driven exit.
 `cargo test -p slr-boot --test stock_menu_presentation` checks the real stock
 menu image, title/column bounds and hidden-panel exclusion, and compares every
-byte of the native-call log between presented and headless executions. It
-requires the local verified stock install and a Metal device. Generated captures
-and stock assets remain under ignored paths.
+byte of the native-call log between no-input presented and headless executions.
+These tests require the local verified stock install and a Metal device.
+Generated captures and stock assets remain under ignored paths.
 
 ## Headless bootstrap history
 

@@ -479,7 +479,12 @@ fn object_class(vm: &VmHost, word: u32) -> Option<slr_vm::vmclass::ClassId> {
 /// Call a script method on `script` synchronously on a fresh queued thread
 /// (`FUN_004255e0`: thread creation, argument push, call by name, then an
 /// unbudgeted run).
-fn call_script(vm: &mut VmHost, script: u32, method: &str, args: &[Value]) -> Result<(), String> {
+pub(crate) fn call_script(
+    vm: &mut VmHost,
+    script: u32,
+    method: &str,
+    args: &[Value],
+) -> Result<(), String> {
     let class = object_class(vm, script).ok_or("script instance has no loaded class")?;
     let container = with_res(|host| {
         host.node(host.object_node(script))

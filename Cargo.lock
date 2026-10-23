@@ -1657,6 +1657,7 @@ dependencies = [
  "bytemuck",
  "png 0.18.1",
  "pollster",
+ "serde",
  "wgpu",
  "winit",
 ]

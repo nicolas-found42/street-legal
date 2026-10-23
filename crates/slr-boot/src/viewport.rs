@@ -158,6 +158,20 @@ pub fn install(vm: &mut VmHost) {
     }
 }
 
+/// Normalized display rectangle of a live viewport, for presentation/input.
+pub(crate) fn bounds(container: u32) -> Option<[f32; 4]> {
+    VIEWPORTS.with(|v| {
+        v.borrow().get(&container).map(|w| {
+            [
+                f32::from_bits(w[1]),
+                f32::from_bits(w[2]),
+                f32::from_bits(w[3]),
+                f32::from_bits(w[4]),
+            ]
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
