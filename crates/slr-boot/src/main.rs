@@ -7,6 +7,7 @@ mod materialise;
 mod missing_rows;
 mod native_assets;
 mod native_body;
+mod native_button;
 mod native_camera;
 mod native_car;
 mod native_car_command;
@@ -133,6 +134,23 @@ impl Resources {
             .ok_or("mapped package is not available")?;
         if !package.entries.iter().any(|e| e.type_id == id & 0xffff) {
             return Err("mapped resource is outside the known package; original absence behavior is not asserted".into());
+        }
+        // Controlled system roots pre-exist, but individual descriptors must
+        // still acquire their real header before ResourceRef.set can bind them.
+        if index == 0 && slr_resource::node::with_res(|h| h.container_for_id(id).is_none()) {
+            let entry_index = package
+                .entries
+                .iter()
+                .position(|e| e.type_id == id)
+                .unwrap();
+            let parent = package.entries[entry_index].super_id;
+            if parent == 0 {
+                return Err("unprovided system root".into());
+            }
+            self.request_metadata(parent)?;
+            slr_resource::node::with_res(|h| {
+                slr_resource::package::install_header(h, &self.packages, 0, entry_index)
+            })?;
         }
         Ok(())
     }
@@ -432,6 +450,19 @@ fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Original47c3a0 resets the loading sample ring in the live native memory.
+fn loading_reset(vm: &mut VmHost, _info: &CallInfo<'_>) -> Option<u32> {
+    if let Err(error) = native_body::with_world_memory(|m| {
+        let seed = m.r32(0x618d6c);
+        for i in 0..32 {
+            m.w32(0x765e8c + i * 4, seed);
+        }
+        m.w32(0x765f24, seed.wrapping_shl(5));
+    }) {
+        vm.native_failure = Some(error);
+    }
+    None
+}
 fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let mut words = [0; 2];
     if let Err(error) = slr_vm::host::marshal_args(info, &mut words) {
@@ -682,6 +713,8 @@ fn install(vm: &mut VmHost) {
     vm.native_thread_hook = Some(sched::hook);
     vm.native_observer = Some(observe);
     vm.native_boundary = Some(native_boundary);
+    vm.native_impls
+        .insert(slr_lang::langobj::system::IS_LOADING_RESET, loading_reset);
     presentation::install(vm);
     live_input::install(vm);
     if std::env::var_os("SLR_NATIVE_AUDIT").is_some() {

@@ -399,6 +399,19 @@ pub fn pending_menu_call(vm: &VmHost) -> bool {
     })
 }
 
+pub fn pending_state_call(vm: &VmHost, class: &str) -> bool {
+    INTERP.with(|threads| {
+        threads.borrow().values().any(|thread| {
+            thread.frames.iter().any(|frame| {
+                vm.loader
+                    .context_id(frame.class_ctx)
+                    .and_then(|id| vm.loader.class_name(id))
+                    == Some(class)
+            })
+        })
+    })
+}
+
 fn mirror(thread: &mut Thread, before: bool) {
     let Some(id) = CURRENT.with(Cell::get) else {
         return;
@@ -717,6 +730,7 @@ impl Pump {
         let mut queues = with_threads(|h| std::mem::replace(h.queues_mut(), ThreadQueues::new()));
         refresh_clock_queues(vm, &queues);
         let mut failure: Option<Box<RunFailure>> = None;
+        let aborted = Cell::new(false);
         let mut runs = 0;
         let mut reap_error = None;
         let exit = {
@@ -733,6 +747,7 @@ impl Pump {
                     let vm = &mut **host;
                     let name = q.get(id).name.clone();
                     let Some(mut thread) = INTERP.with(|m| m.borrow_mut().remove(&id)) else {
+                        aborted.set(true);
                         failure = Some(Box::new(RunFailure {
                             id,
                             name,
@@ -765,6 +780,7 @@ impl Pump {
                             }
                         }
                         Err(error) => {
+                            aborted.set(true);
                             failure = Some(Box::new(RunFailure {
                                 id,
                                 name,
@@ -789,12 +805,20 @@ impl Pump {
                 if let Some(script) = script {
                     let mut host = vm.borrow_mut();
                     if let Err(error) = host.write_field(script, "ptr", Value::int(0)) {
+                        aborted.set(true);
                         reap_error = Some(format!("Thread destructor Native.ptr: {error:?}"));
                     }
                 }
             };
-            self.scheduler
-                .drive_with_reaper(&mut queues, 10.0, 0, &mut clock, &mut run, &mut reap)
+            self.scheduler.drive_with_reaper_until(
+                &mut queues,
+                10.0,
+                0,
+                &mut clock,
+                &mut run,
+                &mut reap,
+                &|| aborted.get(),
+            )
         };
         self.runs += runs;
         LAST_DRIVER_CURSOR.with(|v| v.set(self.scheduler.cursor()));

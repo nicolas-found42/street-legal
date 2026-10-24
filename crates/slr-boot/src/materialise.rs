@@ -53,7 +53,7 @@ pub fn load_like(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     result
 }
 
-fn materialise(container: u32, request: &str) -> Result<(), String> {
+pub(crate) fn materialise(container: u32, request: &str) -> Result<(), String> {
     let (id, type_id, loaded) = with_res(|h| {
         h.container(container)
             .map(|c| (c.id, c.type_id, c.load_state & 1 != 0))

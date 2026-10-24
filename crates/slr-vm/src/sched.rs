@@ -508,6 +508,22 @@ impl Scheduler {
         run: &mut Runner<'_>,
         reap: &mut dyn FnMut(&mut ThreadQueues, ThreadId),
     ) -> SchedExit {
+        self.drive_with_reaper_until(queues, budget, min_priority, clock, run, reap, &|| false)
+    }
+
+    /// Embedding exception escape: stop after a failed callback without changing
+    /// any original thread flags or requesting synthetic clock results.
+    #[allow(clippy::too_many_arguments)]
+    pub fn drive_with_reaper_until(
+        &mut self,
+        queues: &mut ThreadQueues,
+        budget: f32,
+        min_priority: i32,
+        clock: &mut dyn FnMut() -> X87,
+        run: &mut Runner<'_>,
+        reap: &mut dyn FnMut(&mut ThreadQueues, ThreadId),
+        cancel: &dyn Fn() -> bool,
+    ) -> SchedExit {
         let pc = SCRIPT_PRECISION;
         // 0x416943-0x416974: the entry flag is `budget == 0.0f`, and the
         // deadline is the f32 `clock() + budget`.
@@ -526,6 +542,9 @@ impl Scheduler {
         // `bl`: a thread has run since the cursor was last loaded.
         let mut ran = true;
         loop {
+            if cancel() {
+                return SchedExit::TimeUp;
+            }
             // 0x41699f: the deadline, for a non-zero budget. `fcomp` leaves
             // C0 (CF) set for `clock < deadline`, so a clear C0 is the exe's
             // `je` back to the caller.
@@ -880,6 +899,38 @@ mod tests {
         assert_eq!(sched.cursor(), None);
         assert!(log.borrow().is_empty());
         assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn embedding_failure_escapes_high_priority_loop_without_clock_forgery() {
+        let mut queues = ThreadQueues::new();
+        queues.spawn(100, 0, "failing");
+        queues.spawn(100, 0, "untouched");
+        let mut sched = Scheduler::new();
+        let (mut clock, reads) = ticking();
+        let aborted = Cell::new(false);
+        let runs = Cell::new(0);
+        assert_eq!(
+            sched.drive_with_reaper_until(
+                &mut queues,
+                100.0,
+                0,
+                &mut clock,
+                &mut |_, _, _, _| {
+                    runs.set(runs.get() + 1);
+                    aborted.set(true);
+                },
+                &mut |_, _| panic!("live thread must not be reaped"),
+                &|| aborted.get(),
+            ),
+            SchedExit::TimeUp
+        );
+        assert_eq!(runs.get(), 1);
+        assert_eq!(reads.get(), 2);
+        assert!(queues
+            .run_order()
+            .iter()
+            .all(|id| queues.get(*id).flags & flags::STOPPED == 0));
     }
 
     #[test]

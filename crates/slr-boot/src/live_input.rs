@@ -375,7 +375,11 @@ pub fn poll(vm: &mut VmHost) -> Result<(), String> {
 pub fn record(vm: &VmHost, output: &Path) -> Result<(), String> {
     if !STATE.with(|s| {
         let s = s.borrow();
-        s.ready && s.recorded != Some(s.event_count)
+        s.ready
+            && (s.recorded != Some(s.event_count)
+                || slr_vm::diagnostics::current_context()
+                    .frame
+                    .is_some_and(|f| f % 60 == 0))
     }) {
         return Ok(());
     }
@@ -391,7 +395,22 @@ pub fn record(vm: &VmHost, output: &Path) -> Result<(), String> {
     if let Some(tick) = capture {
         crate::presentation::capture(vm, &output.join(format!("input-{tick}.png")))?;
     }
-    let snapshot = serde_json::json!({"focus":focus,"selected":field(vm,gadget,"cmd"),"pressed":field(vm,gadget,"pressed"),"act":field(vm,focus,"actGadget"),"animates":crate::engine::registered_animate(container(vm,focus)),"queued_keys":STATE.with(|s|s.borrow().last_keys.len()),"labels":labels,"exit":slr_lang::seam::with_lang_host(|h|h.exit_requested())});
+    let state_word = vm
+        .read_loaded_static_field("java.game.GameLogic", "actualState")
+        .map(|v| v.payload)
+        .or_else(|| {
+            vm.objects
+                .iter()
+                .position(|o| o.class_name(&vm.loader) == "java.game.GameLogic")
+                .and_then(|i| field(vm, 0x1000 + i as u32, "actualState"))
+        });
+    let game_state = state_word
+        .and_then(|word| vm.objects.get(word.checked_sub(0x1000)? as usize))
+        .map(|o| o.class_name(&vm.loader).to_owned());
+    let pending = game_state
+        .as_ref()
+        .is_some_and(|class| crate::sched::pending_state_call(vm, class));
+    let snapshot = serde_json::json!({"game_state":game_state,"pending_state_call":pending,"focus":focus,"selected":field(vm,gadget,"cmd"),"pressed":field(vm,gadget,"pressed"),"act":field(vm,focus,"actGadget"),"animates":crate::engine::registered_animate(container(vm,focus)),"queued_keys":STATE.with(|s|s.borrow().last_keys.len()),"labels":labels,"exit":slr_lang::seam::with_lang_host(|h|h.exit_requested())});
     journal::emit(
         "menu-state",
         json!({"input_id":input_id(),"tick":STATE.with(|s|s.borrow().tick),"state":snapshot}),

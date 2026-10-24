@@ -47,7 +47,7 @@ def manifest(bundle):
 
 def menu_signature(row):
     state = row["data"]["state"]
-    return {key: state.get(key) for key in ("focus", "selected", "pressed", "act", "labels", "exit")}
+    return {key: state.get(key) for key in ("focus", "selected", "pressed", "act", "labels", "exit", "game_state", "pending_state_call") if key in state or key not in ("game_state", "pending_state_call")}
 
 
 def behavior(bundle):
@@ -264,6 +264,13 @@ def capture(args, arguments, prior=None):
             prefix_only = manifest(prior)["status"] != "completed"
             for key in ("states", "renders", "images"):
                 a, b = expected[key], observed[key]
+                if key=="states" and a:
+                    fields=set().union(*(row.keys() for row in a))
+                    projected=[]
+                    for row in b:
+                        row={field:value for field,value in row.items() if field in fields}
+                        if not projected or projected[-1]!=row:projected.append(row)
+                    b=projected
                 first = next((i for i, pair in enumerate(zip(a, b)) if pair[0] != pair[1]), min(len(a), len(b)))
                 if a != (b[:len(a)] if prefix_only else b): mismatches[key] = {"transition": first, "expected": a[first] if first < len(a) else None,
                                             "actual": b[first] if first < len(b) else None,
@@ -273,8 +280,8 @@ def capture(args, arguments, prior=None):
             if mismatches: raise ValueError("recorded menu behavior did not reproduce")
         if value.get("expectation") is not None:
             expected=value["expectation"]
-            if not isinstance(expected,dict) or set(expected)-{"labels_include","selected","exit"}:
-                raise ValueError("expectation supports labels_include, selected and exit")
+            if not isinstance(expected,dict) or set(expected)-{"labels_include","selected","exit","game_state","pending_state_call"}:
+                raise ValueError("expectation supports labels_include, selected, exit, game_state and pending_state_call")
             final=observed["states"][-1]
             assertions={key:(all(label in final.get("labels",[]) for label in wanted) if key=="labels_include" else final.get(key)==wanted) for key,wanted in expected.items()}
             report["assertions"]={"passed":all(assertions.values()),"results":assertions,"final":final}
@@ -330,7 +337,7 @@ def prune(root, keep, max_bytes):
     remaining = len(candidates)
     for row in candidates:
         if remaining <= keep and total <= max_bytes: break
-        if row["pinned"] or row["status"] == "running": continue
+        if row["pinned"] or row["status"] == "running" or row == candidates[-1]: continue
         bundle = Path(row["bundle"])
         total -= size(bundle)
         import shutil
@@ -397,10 +404,11 @@ def main(argv=None):
             if args.expect is None and (prior / "inputs/expect.json").exists():args.expect=prior/"inputs/expect.json"
             args.input_script = prior / "inputs/recorded-input.json"
             extra = list(value["configuration"]["arguments"])
-            for key in ("--output", "--run-id", "--input-script", "--frames"): get_option(extra, key)
+            recorded_frames = get_option(extra, "--frames")
+            for key in ("--output", "--run-id", "--input-script"): get_option(extra, key)
             extra = [arg for arg in extra if arg != "--window"]
             tape = json.loads(args.input_script.read_text())
-            extra.extend(["--frames", str(max((e["tick"] for e in tape), default=0) + 1000)])
+            extra.extend(["--frames", recorded_frames or str(max((e["tick"] for e in tape), default=0) + 1000)])
             args.headless = True
         if args.binary is None: args.binary = REPO / "target/debug/slr-boot"
         results = []

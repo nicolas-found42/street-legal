@@ -62,6 +62,7 @@ thread_local! { static WORLD: RefCell<Option<World>> = const { RefCell::new(None
 
 pub fn configure(config: Option<u32>, init: Option<u32>) {
     crate::native_body::clear();
+    crate::native_button::clear();
     crate::native_body::with_world_memory(|memory| {
         let manager = crate::native_resource_load::initialize_projection(memory);
         crate::native_resource_manager::initialize(memory, manager);
@@ -282,6 +283,17 @@ pub fn instantiate(
     default_class: Option<slr_vm::vmclass::ClassId>,
 ) -> Result<Created, String> {
     let (name, parameters) = text;
+    // 53a3c5..53a3f7: an unloaded owner is acquired before the new object's
+    // native constructor. Reuse the embedding's declared headless load path.
+    if let Some((container, _)) = owner_container {
+        let unloaded = node::with_res(|h| {
+            h.container(container)
+                .is_some_and(|c| c.type_id == 1 && c.load_state & 1 == 0)
+        });
+        if unloaded {
+            crate::materialise::materialise(container, "factory-parent-load")?;
+        }
+    }
     let (requested, root, configured) = WORLD.with(|world| {
         let mut world = world.borrow_mut();
         let w = world.as_mut().ok_or("factory world is not installed")?;
@@ -331,6 +343,30 @@ pub fn instantiate(
         Ok::<_, String>((requested, root, configured))
     })?;
     if let Some((class, container, path)) = configured {
+        if class == "button" {
+            crate::native_button::load(requested, &path)?;
+            let instance = WORLD.with(|world| {
+                let mut world = world.borrow_mut();
+                let world = world.as_mut().ok_or("factory unavailable")?;
+                world
+                    .factory
+                    .allocate_configured_instance(root, requested, script, name, &mut || {
+                        world.ids.allocate()
+                    })?
+                    .ok_or_else(|| "button allocation failed".to_owned())
+            })?;
+            crate::native_button::created(
+                requested,
+                instance.container,
+                root.container.unwrap_or(0),
+                parameters,
+            )?;
+            return Ok(Created {
+                id: instance.id,
+                container: instance.container,
+                template: requested,
+            });
+        }
         // Loading a configured native template can acquire other package
         // resources. Do not hold WORLD's mutation borrow across that work.
         let prepared =

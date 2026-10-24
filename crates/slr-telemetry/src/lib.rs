@@ -430,6 +430,9 @@ pub fn check() -> Result<(), String> {
 
 /// Synchronize every stream, then write the durable completion marker.
 pub fn finish(failure: Option<&str>) -> Result<(), String> {
+    if FINISHED.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     check()?;
     detail(
         "capture-end",

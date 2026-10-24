@@ -110,6 +110,26 @@ fn bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let _ = marshal_args(info, &mut w);
     // Some natives destroy/rebind the reference, so preserve argument identities.
     let before = w.map(|word| container(vm, word));
+    if info.name == "getPos"
+        && matches!(
+            info.class,
+            "java.util.resource.GameRef" | "java.util.resource.PhysicsRef"
+        )
+    {
+        if let Some((_, button)) = crate::native_button::buttons()
+            .into_iter()
+            .find(|(id, _)| *id == before[0])
+        {
+            return vector_object(
+                vm,
+                [
+                    button.transform[0],
+                    button.transform[1],
+                    button.transform[2],
+                ],
+            );
+        }
+    }
     if info.class == "java.util.resource.PhysicsRef"
         && info.name == "getPos"
         && crate::live_input::interacted()
@@ -404,7 +424,11 @@ fn source_file(id: u32) -> Result<PathBuf, String> {
     let (descriptor, _) = descriptor(id)?;
     let path = descriptor
         .lines()
-        .find_map(|l| l.trim().strip_prefix("sourcefile "))
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("sourcefile ")
+                .or_else(|| l.trim().strip_prefix("shape "))
+        })
         .ok_or_else(|| format!("sourcefile absent for {id:#x}"))?
         .trim()
         .replace('\\', "/");
@@ -494,6 +518,29 @@ fn font_mesh(id: u32) -> Result<slr_fmt_scx::V3Mesh, String> {
         slr_fmt_scx::Scx::V3 { mut groups, .. } if groups.len() == 1 => Ok(groups.remove(0).mesh),
         _ => Err("unsupported menu font geometry".into()),
     }
+}
+fn ui_mesh(s: &State, id: u32) -> Result<std::rc::Rc<slr_fmt_scx::V3Mesh>, String> {
+    if let Some(mesh) = s.font_cache.borrow().get(&id).cloned() {
+        return Ok(mesh);
+    }
+    let bytes = std::fs::read(source_file(id)?).map_err(|e| e.to_string())?;
+    let mesh = match slr_fmt_scx::parse(&bytes).map_err(|e| format!("UI mesh {id:#x}: {e:?}"))? {
+        slr_fmt_scx::Scx::V3 { mut groups, .. } if groups.len() == 1 => groups.remove(0).mesh,
+        slr_fmt_scx::Scx::V4 { mut meshes, .. } if meshes.len() == 1 => {
+            let mesh = meshes.remove(0);
+            slr_fmt_scx::V3Mesh {
+                positions: mesh.positions,
+                normals: mesh.normals,
+                uvs: mesh.uvs,
+                indices: mesh.indices.into_iter().map(u32::from).collect(),
+                ..Default::default()
+            }
+        }
+        _ => return Err(format!("unsupported multi-mesh UI resource {id:#x}")),
+    };
+    let mesh = std::rc::Rc::new(mesh);
+    s.font_cache.borrow_mut().insert(id, mesh.clone());
+    Ok(mesh)
 }
 #[derive(Clone, Copy)]
 struct Projection {
@@ -610,6 +657,40 @@ fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
     rectangles.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
     for (layer, _, name, vertices) in rectangles {
         draw_layers.push(layer);
+        frame.draws.push((name, vertices));
+    }
+    for (id, button) in crate::native_button::buttons() {
+        if slr_resource::node::with_res(|h| h.container(id).is_none()) {
+            continue;
+        }
+        let Some(projection) = owners.get(&button.owner).copied() else {
+            continue;
+        };
+        let render = slr_resource::node::with_res(|h| h.container_for_id(button.render))
+            .ok_or("button render unavailable")?;
+        let asset = s.asset(render, 0)?;
+        let (Some((mesh, scale)), Some(tex)) = (asset.mesh, asset.texture) else {
+            continue;
+        };
+        let mesh = ui_mesh(s, mesh)?;
+        let name = texture(s, &mut frame, tex)?;
+        let mut vertices = Vec::new();
+        for index in &mesh.indices {
+            let i = *index as usize;
+            let p = mesh
+                .positions
+                .get(i)
+                .ok_or("UI mesh index outside positions")?;
+            vertices.push(Vertex {
+                position: [
+                    projection.x((p[0] * scale[0] + button.transform[0]) / projection.half_width()),
+                    projection.y((p[1] * scale[1] + button.transform[1]) / projection.half_height),
+                ],
+                uv: mesh.uvs.get(i).copied().unwrap_or_default(),
+                color: [1.; 4],
+            });
+        }
+        draw_layers.push(owner_layer(vm, s, button.owner));
         frame.draws.push((name, vertices));
     }
     let mut texts: Vec<_> = s
@@ -894,6 +975,56 @@ pub(crate) fn hit_test(vm: &VmHost, osd: u32, x: f32, y: f32) -> Option<Hit> {
                         group,
                         osd,
                         physics: resource_id(key),
+                    },
+                ));
+            }
+        }
+        for (id, button) in crate::native_button::buttons() {
+            let group = slr_resource::node::with_res(|h| {
+                h.container(button.owner)
+                    .and_then(|c| c.instance.as_ref())
+                    .map_or(0, |i| i.script)
+            });
+            if field(vm, group, "osd") != Some(osd)
+                || slr_resource::node::with_res(|h| h.container(id).is_none())
+            {
+                continue;
+            }
+            let Some(projection) = owners.get(&button.owner).copied() else {
+                continue;
+            };
+            let Ok(mesh) = ui_mesh(&s, button.body) else {
+                continue;
+            };
+            let [left, top, width, height] = projection.viewport;
+            if x < left || x > left + width || y < top || y > top + height {
+                continue;
+            }
+            let px = ((x - left) / width * 2. - 1.) * projection.half_width() - button.transform[0];
+            let py = (1. - (y - top) / height * 2.) * projection.half_height - button.transform[1];
+            let bounds = mesh.positions.iter().fold(
+                [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ],
+                |mut b, p| {
+                    b[0] = b[0].min(p[0]);
+                    b[1] = b[1].min(p[1]);
+                    b[2] = b[2].max(p[0]);
+                    b[3] = b[3].max(p[1]);
+                    b
+                },
+            );
+            if px >= bounds[0] && px <= bounds[2] && py >= bounds[1] && py <= bounds[3] {
+                hits.push((
+                    button.transform[2],
+                    id,
+                    Hit {
+                        group,
+                        osd,
+                        physics: resource_id(id),
                     },
                 ));
             }
