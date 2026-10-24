@@ -588,6 +588,11 @@ pub fn dispatch(
     arg: &EventArg,
     name: Option<&str>,
 ) -> Result<(), String> {
+    if let EventArg::Str(Some(text)) = arg {
+        if let Some(class) = crate::factory::native_class(container) {
+            crate::world_scene::command(container, &class, text)?;
+        }
+    }
     let kind = mask & 0x0fff_ffff;
     let is_type1 = with_res(|h| h.container(container).is_some_and(|c| c.type_id == 1));
     let instance_mask = with(|s| s.masks.get(&container).copied().unwrap_or(0));

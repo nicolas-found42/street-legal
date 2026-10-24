@@ -30,7 +30,7 @@
 //!   indices land inside the chunk's own vertex array; the normal is perpendicular
 //!   to the indexed triangle and the winding is uniform (CCW into the normal)
 //!   (the map loader's PHYS branch: n1 x 7 dwords, n2 x 3 dwords).
-//! - `POLY`: `u32 1`, `u32 ngroups` (always 1 in the corpus; 1,769 chunks), then per
+//! - `POLY`: `u32 owner` (root resource ID, 1 in the four maps), `u32 ngroups` (always 1 in the corpus; 1,769 chunks), then per
 //!   group `u32 mat`, `u32 nvert`, `u32 ntri`, `nvert` x 56-byte vertices, `ntri` x
 //!   12-byte triangle index triples. Vertex bytes decode as position (3f, cm) +
 //!   normal (3f, unit) + color (u32 diffuse `A8R8G8B8`, u32 specular-gloss remainder)
@@ -177,6 +177,8 @@ pub enum Chunk {
     /// `POLY`: render groups. See [`PolyVertex`] for the 56-byte vertex split;
     /// `indices` holds triangle index triples into `verts`.
     Poly {
+        /// Local resource owner (1 in map packages; garage roots use their own IDs).
+        owner: u32,
         offset: usize,
         groups: Vec<PolyGroup>,
     },
@@ -501,12 +503,6 @@ pub fn parse_chunk_at(data: &[u8], offset: usize, end: usize) -> Result<(Chunk, 
             let mut p = Reader::new(payload);
             let w0 = p.u32()?;
             let ngroups = p.u32()? as usize;
-            if w0 != 1 {
-                return Err(FormatError::Inconsistent {
-                    what: "map POLY header",
-                    detail: format!("w0={w0} at {offset}"),
-                });
-            }
             let mut groups = Vec::with_capacity(ngroups);
             for _ in 0..ngroups {
                 let mat = p.u32()?;
@@ -533,6 +529,7 @@ pub fn parse_chunk_at(data: &[u8], offset: usize, end: usize) -> Result<(Chunk, 
                 });
             }
             Chunk::Poly {
+                owner: w0,
                 offset: offset + 8,
                 groups,
             }

@@ -1,5 +1,5 @@
-//! Tier-D OSD presentation fed only by unchanged script natives and live fields.
-//! This projection never supplies return values or mutates script/engine state.
+//! Tier-D OSD and world presentation fed by unchanged script natives and live fields.
+//! World scene observation does not supply script decisions or mutate engine state.
 use slr_d3d9::{Frame, Image, Message, Vertex};
 use slr_vm::host::{marshal_args, CallInfo, NativeFn, VmHost};
 use std::{
@@ -304,7 +304,7 @@ pub fn install(vm: &mut VmHost) {
     }
 }
 // RPK references are resolved from their package, never from oracle outputs.
-fn descriptor(id: u32) -> Result<(String, u8), String> {
+pub(crate) fn descriptor(id: u32) -> Result<(String, u8), String> {
     crate::RES.with(|r| {
         let r = r.borrow();
         let package = r
@@ -328,7 +328,7 @@ fn number(text: &str) -> Option<u32> {
         text.parse().ok()
     }
 }
-fn local_id(owner: u32, value: &str) -> Result<u32, String> {
+pub(crate) fn local_id(owner: u32, value: &str) -> Result<u32, String> {
     let id = number(value).ok_or("invalid presentation resource ID")?;
     if id >> 16 == 0 {
         return Ok((owner & 0xffff0000) | id);
@@ -420,8 +420,8 @@ impl State {
         Ok(asset)
     }
 }
-fn source_file(id: u32) -> Result<PathBuf, String> {
-    let (descriptor, _) = descriptor(id)?;
+pub(crate) fn source_file(id: u32) -> Result<PathBuf, String> {
+    let (descriptor, kind) = descriptor(id)?;
     let path = descriptor
         .lines()
         .find_map(|l| {
@@ -432,28 +432,56 @@ fn source_file(id: u32) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("sourcefile absent for {id:#x}"))?
         .trim()
         .replace('\\', "/");
-    // Windows paths are case insensitive. Resolve each component against the
-    // supplied install instead of requiring a case-insensitive host volume.
     let root = crate::RES.with(|r| r.borrow().root.clone());
-    let mut path_on_disk = root;
-    for component in Path::new(&path).components() {
+    if let Some(found) = resolve_asset(&root, Path::new(&path)) {
+        return Ok(found);
+    }
+    // Tier D media alias: some stock descriptors keep their export PNG folder
+    // while the installer ships a DDS sibling. Resolve only that exact name.
+    if kind == 7 {
+        let requested = Path::new(&path);
+        let mut alias = requested.with_extension("dds");
+        if requested
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|v| v.eq_ignore_ascii_case("png"))
+        {
+            alias = requested
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new(""))
+                .join(requested.file_name().unwrap())
+                .with_extension("dds");
+        }
+        if let Some(found) = resolve_asset(&root, &alias) {
+            slr_telemetry::journal::emit(
+                "asset-alias",
+                serde_json::json!({"resource":id,"requested":path,"resolved":alias,"projection":"tier-d"}),
+            )?;
+            return Ok(found);
+        }
+    }
+    Err(format!("presentation asset {path}"))
+}
+fn resolve_asset(root: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut path = root.to_owned();
+    for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
-            return Err("unsafe asset path".into());
+            return None;
         };
-        let wanted = name.to_string_lossy();
-        let entry = std::fs::read_dir(&path_on_disk)
-            .map_err(|e| e.to_string())?
+        path = std::fs::read_dir(&path)
+            .ok()?
             .filter_map(Result::ok)
             .find(|e| {
                 e.file_name()
                     .to_string_lossy()
-                    .eq_ignore_ascii_case(&wanted)
-            })
-            .ok_or_else(|| format!("presentation asset {path}"))?;
-        path_on_disk = entry.path();
+                    .eq_ignore_ascii_case(&name.to_string_lossy())
+            })?
+            .path();
     }
-    Ok(path_on_disk)
+    path.is_file().then_some(path)
 }
+
 fn image(id: u32) -> Result<(String, Image), String> {
     let path = source_file(id)?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -607,6 +635,36 @@ fn visible_owners(vm: &VmHost, s: &State) -> HashMap<u32, Projection> {
 fn scene(vm: &VmHost, s: &State) -> Result<Frame, String> {
     let owners = visible_owners(vm, s);
     let mut frame = Frame::default();
+    let mut world_instances: Vec<_> = s
+        .renders
+        .iter()
+        .filter(|(id, _)| slr_resource::node::with_res(|h| h.container(**id).is_some()))
+        .map(|(id, r)| {
+            (
+                *id,
+                r.owner,
+                s.visuals
+                    .get(&r.template)
+                    .filter(|v| v.source != 0)
+                    .map_or_else(|| resource_id(r.template), |v| v.source),
+                r.pos,
+            )
+        })
+        .collect();
+    world_instances.sort_by_key(|r| r.0);
+    let world_instances: Vec<_> = world_instances
+        .into_iter()
+        .map(|(_, owner, resource, pos)| (owner, resource, pos))
+        .collect();
+    crate::world_scene::draw(
+        &mut frame,
+        &world_instances,
+        |id| {
+            slr_resource::node::with_res(|h| h.container_for_id(id))
+                .is_some_and(|c| s.active_viewports.contains_key(&c))
+        },
+        |frame, id| texture(s, frame, id),
+    )?;
     let mut rectangles = Vec::new();
     let mut draw_layers = Vec::new();
     for (i, object) in vm.objects.iter().enumerate() {
@@ -838,7 +896,7 @@ pub fn frame(vm: &VmHost, menu: bool, output: &Path) -> Result<(), String> {
         let recipe=frame.fingerprint();
         let changed=recipe!=s.last_recipe;
         if changed {
-            let metadata=serde_json::json!({"frame_id":frame.id,"input_id":frame.input_id,"recipe_sha256":recipe,"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"textures":frame.images.keys().collect::<Vec<_>>(),"picking":picking_state(vm,&s)});
+            let metadata=serde_json::json!({"frame_id":frame.id,"input_id":frame.input_id,"recipe_sha256":recipe,"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"world_draws":frame.world_draws.len(),"world_triangles":frame.world_draws.iter().map(|(_,v)|v.len()/3).sum::<usize>(),"textures":frame.images.keys().collect::<Vec<_>>(),"picking":picking_state(vm,&s)});
             std::fs::write(output.join("presentation.json.tmp"),serde_json::to_vec_pretty(&metadata).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
             std::fs::rename(output.join("presentation.json.tmp"),output.join("presentation.json")).map_err(|e|e.to_string())?;
             slr_telemetry::journal::emit("render-state",metadata)?;

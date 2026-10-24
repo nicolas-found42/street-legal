@@ -7,7 +7,34 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
-Last updated: 2026-10-23, New Career integration on `codex/new-career-to-garage`.
+Last updated: 2026-10-24, garage room on `codex/garage-room-rendering`.
+
+The original New Career script path now displays the actual stock 3D garage:
+RPK polygon-tree room surfaces, script-created SCX workshop objects and marker,
+stock textures and the script-created directional light. The native camera's
+initial script pose, look target, zoom, player selection and active viewport
+choose the view. The wgpu world pass uses perspective texture interpolation,
+depth testing and alpha cutout before the existing OSD pass. Diagnostics retain
+camera commands, selected camera, loaded geometry/material identities, texture
+aliases, world draw/triangle counts and replayable image recipes.
+
+The regression checks room pixels after welcome dismissal and at least 11,000
+triangles, including attached workshop meshes; separate tests cover depth/OSD
+ordering, garage payload ownership and v4 vertex UVs after packed color words.
+The formerly black room produced zero visible room pixels; it now produces
+17 world draw batches / 11,541 triangles. No stock scripts or assets changed.
+Frozen capture and replay completed with matching state, render-recipe and PNG
+transitions: `re/out/garage-room/runs/2026-10-24T050713.389889_0000-3df3c4d03a/`
+and `2026-10-24T050818.844107_0000-7da5ebc2cf/`. Native surface presentation
+was observed in telemetry; physical window inspection was blocked by the locked
+Mac. That window capture was deliberately interrupted and retained, not accepted
+as a clean window run.
+
+This is Tier D presentation. Native camera movement dynamics, the full material
+combiner (including secondary texture stages), complete D3D9 stream parity and
+driving remain unfinished. No parity obligation is accepted.
+
+Previous New Career entry milestone (2026-10-23):
 
 The original TUFA New Career path now reaches `java.game.Garage`, completes
 entry, dismisses its welcome dialog and remains idle with the original HUD and
@@ -19,7 +46,7 @@ and image transitions. Local evidence: `re/out/career/window-final/` and
 
 This adds lazy system camera headers, a retained player camera link and loading
 sample reset. Configured garage buttons use a Tier D static OSD projection of
-stock CFG/SCX assets. Full 3D garage rendering and driving remain unfinished;
+stock CFG/SCX assets. At that milestone, 3D rendering was still absent;
 no feature-parity row or native exactness obligation is accepted. The new
 state/entry checkpoints, scheduler failure escape and retention safeguards are
 documented in [menu-diagnostics.md](menu-diagnostics.md).
@@ -2346,7 +2373,34 @@ still require the next strict trace's later resource-recycle comparison.
 
 ### State before the active projection port
 
-Last updated: 2026-10-23, New Career integration on `codex/new-career-to-garage`.
+Last updated: 2026-10-24, garage room on `codex/garage-room-rendering`.
+
+The original New Career script path now displays the actual stock 3D garage:
+RPK polygon-tree room surfaces, script-created SCX workshop objects and marker,
+stock textures and the script-created directional light. The native camera's
+initial script pose, look target, zoom, player selection and active viewport
+choose the view. The wgpu world pass uses perspective texture interpolation,
+depth testing and alpha cutout before the existing OSD pass. Diagnostics retain
+camera commands, selected camera, loaded geometry/material identities, texture
+aliases, world draw/triangle counts and replayable image recipes.
+
+The regression checks room pixels after welcome dismissal and at least 11,000
+triangles, including attached workshop meshes; separate tests cover depth/OSD
+ordering, garage payload ownership and v4 vertex UVs after packed color words.
+The formerly black room produced zero visible room pixels; it now produces
+17 world draw batches / 11,541 triangles. No stock scripts or assets changed.
+Frozen capture and replay completed with matching state, render-recipe and PNG
+transitions: `re/out/garage-room/runs/2026-10-24T050713.389889_0000-3df3c4d03a/`
+and `2026-10-24T050818.844107_0000-7da5ebc2cf/`. Native surface presentation
+was observed in telemetry; physical window inspection was blocked by the locked
+Mac. That window capture was deliberately interrupted and retained, not accepted
+as a clean window run.
+
+This is Tier D presentation. Native camera movement dynamics, the full material
+combiner (including secondary texture stages), complete D3D9 stream parity and
+driving remain unfinished. No parity obligation is accepted.
+
+Previous New Career entry milestone (2026-10-23):
 
 The original TUFA New Career path now reaches `java.game.Garage`, completes
 entry, dismisses its welcome dialog and remains idle with the original HUD and
@@ -2358,7 +2412,7 @@ and image transitions. Local evidence: `re/out/career/window-final/` and
 
 This adds lazy system camera headers, a retained player camera link and loading
 sample reset. Configured garage buttons use a Tier D static OSD projection of
-stock CFG/SCX assets. Full 3D garage rendering and driving remain unfinished;
+stock CFG/SCX assets. At that milestone, 3D rendering was still absent;
 no feature-parity row or native exactness obligation is accepted. The new
 state/entry checkpoints, scheduler failure escape and retention safeguards are
 documented in [menu-diagnostics.md](menu-diagnostics.md).

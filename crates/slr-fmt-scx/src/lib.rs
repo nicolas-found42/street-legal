@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Vertex stride is `(chunk_len - 16) / vertex_count`; the FVF flags (0x1 position,
-//! 0x40 normal, 0x200 texcoord) place the attributes.
+//! 0x40 normal, 0x80/0x100 packed colors, 0x200 texcoord) place the attributes.
 //!
 //! Version 3 (390 stock files: map pieces, fonts, the water plane; plus all 13
 //! stock `*.scy` collision-surface files, which share the container) is a flat
@@ -299,6 +299,17 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     });
                 }
                 let stride = (len - 16) / n;
+                let attributes = 12
+                    + usize::from(flags & 0x40 != 0) * 12
+                    + usize::from(flags & 0x80 != 0) * 4
+                    + usize::from(flags & 0x100 != 0) * 4
+                    + usize::from(flags & 0x200 != 0) * 8;
+                if stride < attributes {
+                    return Err(FormatError::Inconsistent {
+                        what: "scx vertex attributes",
+                        detail: format!("stride {stride} needs {attributes} bytes"),
+                    });
+                }
                 let mut m = Mesh {
                     flags,
                     stride,
@@ -310,6 +321,14 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     m.positions.push([vr.f32()?, vr.f32()?, vr.f32()?]);
                     if flags & 0x40 != 0 && stride >= 24 {
                         m.normals.push([vr.f32()?, vr.f32()?, vr.f32()?]);
+                    }
+                    // Custom FVF: packed diffuse/specular words follow normals.
+                    // Reading them as UVs yields NaNs for opaque white vertices.
+                    if flags & 0x80 != 0 {
+                        vr.u32()?;
+                    }
+                    if flags & 0x100 != 0 {
+                        vr.u32()?;
                     }
                     if flags & 0x200 != 0 && stride >= 32 {
                         m.uvs.push([vr.f32()?, vr.f32()?]);
