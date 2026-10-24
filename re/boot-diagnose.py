@@ -283,6 +283,26 @@ class InterruptedRun(Exception):
     pass
 
 
+def signal_process_group(pgid, signum):
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if sys.platform != "darwin":
+            raise
+        # XNU killpg1 filters SZOMB members and returns EPERM if none remain
+        # signalable. Confirm the group is gone or zombie-only; never hide a
+        # genuine denial for a live descendant. Inspection failures fail closed.
+        # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c
+        listing = subprocess.run(["ps", "-axo", "pgid=,stat="], check=True,
+                                 capture_output=True, text=True, timeout=3).stdout
+        for line in listing.splitlines():
+            group, state = line.split()
+            if int(group) == pgid and not state.startswith("Z"):
+                raise
+
+
 def child(argv, cwd, environment, stdout, stderr, timeout):
     process = None
     try:
@@ -293,13 +313,11 @@ def child(argv, cwd, environment, stdout, stderr, timeout):
         return {"returncode": None, "pid": process.pid, "timed_out": True}
     finally:
         if process is not None:
-            try: os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError: pass
+            signal_process_group(process.pid, signal.SIGTERM)
             try: process.wait(timeout=3)
             except subprocess.TimeoutExpired: pass
             # The process leader may have exited while grandchildren remain.
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
+            signal_process_group(process.pid, signal.SIGKILL)
             process.wait()
 
 

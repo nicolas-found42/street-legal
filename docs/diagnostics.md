@@ -395,3 +395,7 @@ not change older optional suites or integration availability checks; it does not
 that every oracle suite has run.
 CI's workspace command uses `--show-output` so its fixture skips are visible.
 A green fixture-free CI job verifies code/tests, not stock parity.
+
+On macOS, process-group cleanup confirms that an `EPERM` group has no live
+members before treating it as already exited. A live member, failed process
+inspection, or a permission error on another platform still fails the run.
