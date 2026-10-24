@@ -129,7 +129,7 @@ fn script_string_literals_and_native_producers_share_the_actual_heap_object() {
     thread.pc = pc;
     thread.frames.push(frame);
     thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
-    let Slot::Value(value) = thread.frames[0].stack[0] else {
+    let Slot::Value(value) = &thread.frames[0].stack[0] else {
         panic!("literal lvalue")
     };
     assert_eq!(value.tag.name(), rows[0]["result"]["stack"][0]["type"]);

@@ -976,7 +976,7 @@ fn object_natives_match_oracle_vectors() {
 /// the fixture words are the port's own, so the row's identity names
 /// (`o1`/`o2`/`hn`/`hd`) line up row by row.
 fn gc_fixture_step(row: &serde_json::Value) {
-    use std::sync::{LazyLock, Mutex};
+    use std::cell::RefCell;
 
     struct Fixture {
         vm: VmHost,
@@ -985,37 +985,41 @@ fn gc_fixture_step(row: &serde_json::Value) {
         o2: u32,
     }
 
-    static SEQ: LazyLock<Mutex<Option<Fixture>>> = LazyLock::new(|| Mutex::new(None));
-    let mut guard = SEQ.lock().expect("sequence lock");
-    let fixture = guard.get_or_insert_with(|| {
-        with_gc_lists(|l| *l = GcLists::new());
-        let (mut vm, o1) = host_with("java.game.Car");
-        let o2 = 0x1000 + vm.objects.len() as u32;
-        let car_id = vm.loader.lookup("java.game.Car").unwrap();
-        vm.objects.push(Object {
-            class: slr_vm::vmclass::ClassRef::Loaded(car_id),
-            fields: Vec::new(),
-        });
-        Fixture {
-            vm,
-            class: "java.game.Car".to_owned(),
-            o1,
-            o2,
-        }
-    });
-    let word = if row["target"].as_str() == Some("o1") {
-        fixture.o1
-    } else {
-        fixture.o2
-    };
-    let args = [Value::reference(word)];
-    let call = object_info(&args, "()V", row["name"].as_str().expect("name"));
-    match call.name {
-        "disableGC" => assert_eq!(disable_gc(&mut fixture.vm, &call), None),
-        "enableGC" => assert_eq!(enable_gc(&mut fixture.vm, &call), None),
-        other => panic!("unexpected gc native {other}"),
+    thread_local! {
+        static SEQ: RefCell<Option<Fixture>> = const { RefCell::new(None) };
     }
-    let got = with_gc_lists(|l| snapshot(l, &fixture.class, fixture.o1, fixture.o2))
-        .expect("class context");
-    assert_eq!(got, row_state(row), "{}", row["id"]);
+    SEQ.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let fixture = guard.get_or_insert_with(|| {
+            with_gc_lists(|l| *l = GcLists::new());
+            let (mut vm, o1) = host_with("java.game.Car");
+            let o2 = 0x1000 + vm.objects.len() as u32;
+            let car_id = vm.loader.lookup("java.game.Car").unwrap();
+            vm.objects.push(Object {
+                class: slr_vm::vmclass::ClassRef::Loaded(car_id),
+                fields: Vec::new(),
+            });
+            Fixture {
+                vm,
+                class: "java.game.Car".to_owned(),
+                o1,
+                o2,
+            }
+        });
+        let word = if row["target"].as_str() == Some("o1") {
+            fixture.o1
+        } else {
+            fixture.o2
+        };
+        let args = [Value::reference(word)];
+        let call = object_info(&args, "()V", row["name"].as_str().expect("name"));
+        match call.name {
+            "disableGC" => assert_eq!(disable_gc(&mut fixture.vm, &call), None),
+            "enableGC" => assert_eq!(enable_gc(&mut fixture.vm, &call), None),
+            other => panic!("unexpected gc native {other}"),
+        }
+        let got = with_gc_lists(|l| snapshot(l, &fixture.class, fixture.o1, fixture.o2))
+            .expect("class context");
+        assert_eq!(got, row_state(row), "{}", row["id"]);
+    });
 }

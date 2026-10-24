@@ -564,8 +564,9 @@ pub fn run_callback(
             thread.run(vm, 0.0, &mut clock_ms)?;
         }
         if request_return || flow == Flow::Advance {
-            let value = thread.pop_deref_with(vm)?;
-            thread.release();
+            let cell = thread.pop_deref_with(vm)?;
+            let value = cell.value();
+            thread.release(cell);
             Ok(Some(value))
         } else {
             Ok(None)
@@ -580,8 +581,10 @@ pub fn run_callback(
         if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
             cache_clock_thread(vm, id, &thread);
             INTERP.with(|threads| {
-                threads.borrow_mut().insert(id, thread.clone());
+                threads.borrow_mut().insert(id, thread);
             });
+            CURRENT.with(|current| current.set(outer));
+            return Ok(None);
         }
     } else {
         with_threads(|host| {

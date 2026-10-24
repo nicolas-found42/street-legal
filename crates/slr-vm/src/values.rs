@@ -23,6 +23,342 @@
 //! class loading, GC write barriers) is deliberately absent.
 
 use core::fmt;
+use std::{
+    cell::RefCell,
+    rc::{Rc, Weak},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+/// Identity of one allocation lifetime. The slot is reused by the original
+/// freelist; the generation distinguishes successive owners. These are opaque
+/// arena identities, never executable/native memory addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CellId {
+    pub pool: u64,
+    pub slot: u32,
+    pub generation: u32,
+}
+
+/// Unique ownership of a semantic value cell. Moving or re-pushing preserves
+/// the identity; copying its Value explicitly creates a different cell.
+/// Dropping on an error path does not synthesize an original release.
+#[derive(Debug)]
+pub struct OwnedCell {
+    id: CellId,
+    value: Value,
+    pool: Weak<RefCell<OwnedPool>>,
+    released: bool,
+}
+impl PartialEq for OwnedCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.value == other.value
+    }
+}
+impl Eq for OwnedCell {}
+impl OwnedCell {
+    pub fn id(&self) -> CellId {
+        self.id
+    }
+    pub fn value(&self) -> Value {
+        self.value
+    }
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut Value) -> R) -> R {
+        let before = self.value;
+        let result = f(&mut self.value);
+        if let Some(pool) = self.pool.upgrade() {
+            pool.borrow()
+                .trace
+                .machine()
+                .note(crate::machine::Event::CellStore {
+                    identity: self.id,
+                    before,
+                    after: self.value,
+                });
+        }
+        result
+    }
+}
+impl PartialEq<Value> for OwnedCell {
+    fn eq(&self, other: &Value) -> bool {
+        self.value == *other
+    }
+}
+impl Drop for OwnedCell {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // Original errors can abandon a popped pointer without freeing it.
+        // Preserve an immutable view of that still-live cell; never invent a
+        // destructor/release or make the address available for reuse.
+        if let Some(pool) = self.pool.upgrade() {
+            let mut pool = pool.borrow_mut();
+            let entry = &mut pool.entries[self.id.slot as usize];
+            if entry.leased && entry.generation == self.id.generation {
+                entry.abandoned = Some(self.value);
+                pool.trace
+                    .machine()
+                    .note(crate::machine::Event::CellAbandon {
+                        identity: self.id,
+                        value: self.value,
+                    });
+            }
+        }
+    }
+}
+impl std::ops::Deref for OwnedCell {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.value
+    }
+}
+impl std::ops::DerefMut for OwnedCell {
+    fn deref_mut(&mut self) -> &mut Value {
+        if let Some(pool) = self.pool.upgrade() {
+            pool.borrow()
+                .trace
+                .machine()
+                .note(crate::machine::Event::CellWriteAccess {
+                    identity: self.id,
+                    before: self.value,
+                });
+        }
+        &mut self.value
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValuePoolSnapshot {
+    pub handed: u32,
+    pub capacity: u32,
+    /// Head first, as in the original intrusive freelist.
+    pub free: Vec<u32>,
+    pub live: i32,
+    /// Still-allocated cells abandoned by an original error/stop path.
+    pub abandoned: Vec<(CellId, Value)>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellEvent {
+    Allocate { id: CellId, origin: AllocOrigin },
+    Release { id: CellId },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PoolKind {
+    Value,
+    Variable,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PoolEvent {
+    Allocate {
+        kind: PoolKind,
+        slot: u32,
+        origin: AllocOrigin,
+        cell: PoolCellView,
+    },
+    Release {
+        kind: PoolKind,
+        slot: u32,
+        cell: PoolCellView,
+    },
+}
+/// Immutable observation of a precise allocation lifetime. The name word is
+/// present only for a variable cell; it is a semantic name identity, not a
+/// claimed original pointer. Raw observers must resolve it explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolCellView {
+    pub kind: PoolKind,
+    pub pool: u64,
+    pub slot: u32,
+    pub generation: u32,
+    pub value: Value,
+    pub name: Option<u32>,
+}
+impl OwnedCell {
+    pub fn view(&self) -> PoolCellView {
+        PoolCellView {
+            kind: PoolKind::Value,
+            pool: self.id.pool,
+            slot: self.id.slot,
+            generation: self.id.generation,
+            value: self.value,
+            name: None,
+        }
+    }
+}
+/// Shared, opt-in immutable event observations across both global pools.
+#[derive(Clone, Debug, Default)]
+pub struct PoolTrace {
+    events: Rc<RefCell<Option<Vec<PoolEvent>>>>,
+    machine: crate::machine::Trace,
+}
+impl PoolTrace {
+    pub(crate) fn machine(&self) -> crate::machine::Trace {
+        self.machine.clone()
+    }
+    pub fn observe(&self, enabled: bool) {
+        *self.events.borrow_mut() = enabled.then(Vec::new);
+    }
+    pub fn events(&self) -> Vec<PoolEvent> {
+        self.events.borrow().clone().unwrap_or_default()
+    }
+    pub(crate) fn note(&self, event: PoolEvent) {
+        self.machine
+            .note(crate::machine::Event::Pool(event.clone()));
+        if let Some(events) = &mut *self.events.borrow_mut() {
+            events.push(event);
+        }
+    }
+}
+#[derive(Debug)]
+struct OwnedEntry {
+    generation: u32,
+    leased: bool,
+    stale: Value,
+    abandoned: Option<Value>,
+}
+#[derive(Debug)]
+struct OwnedPool {
+    id: u64,
+    entries: Vec<OwnedEntry>,
+    free: Vec<u32>,
+    live: i32,
+    events: Option<Vec<CellEvent>>,
+    trace: PoolTrace,
+}
+/// Explicit shared owner of the original global value pool. Cloning this
+/// handle shares the pool, not any OwnedCell. Standalone threads create their
+/// own pool; VmHost-created threads receive the same handle.
+#[derive(Clone, Debug)]
+pub struct SharedValuePool(Rc<RefCell<OwnedPool>>);
+impl Default for SharedValuePool {
+    fn default() -> Self {
+        Self::with_trace(PoolTrace::default())
+    }
+}
+impl SharedValuePool {
+    pub(crate) fn with_trace(trace: PoolTrace) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(Rc::new(RefCell::new(OwnedPool {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            entries: vec![],
+            free: vec![],
+            live: 0,
+            events: None,
+            trace,
+        })))
+    }
+    pub fn allocate(&self, value: Value) -> OwnedCell {
+        let mut pool = self.0.borrow_mut();
+        let (slot, origin) = if let Some(slot) = pool.free.pop() {
+            (slot, AllocOrigin::Freelist)
+        } else {
+            let slot = pool.entries.len() as u32;
+            pool.entries.push(OwnedEntry {
+                generation: 0,
+                leased: false,
+                stale: Value::int(0),
+                abandoned: None,
+            });
+            (slot, AllocOrigin::Pooled)
+        };
+        let pool_id = pool.id;
+        let entry = &mut pool.entries[slot as usize];
+        assert!(!entry.leased, "value pool returned an already-owned cell");
+        entry.leased = true;
+        entry.abandoned = None;
+        let id = CellId {
+            pool: pool_id,
+            slot,
+            generation: entry.generation,
+        };
+        pool.live += 1;
+        if let Some(events) = &mut pool.events {
+            events.push(CellEvent::Allocate { id, origin });
+        }
+        pool.trace.note(PoolEvent::Allocate {
+            kind: PoolKind::Value,
+            slot,
+            origin,
+            cell: PoolCellView {
+                kind: PoolKind::Value,
+                pool: id.pool,
+                slot,
+                generation: id.generation,
+                value,
+                name: None,
+            },
+        });
+        OwnedCell {
+            id,
+            value,
+            pool: Rc::downgrade(&self.0),
+            released: false,
+        }
+    }
+    pub fn release(&self, mut cell: OwnedCell) {
+        let mut pool = self.0.borrow_mut();
+        assert_eq!(cell.id.pool, pool.id, "release into a different value pool");
+        let entry = &mut pool.entries[cell.id.slot as usize];
+        assert!(
+            entry.leased && entry.generation == cell.id.generation,
+            "stale or duplicated value ownership"
+        );
+        cell.released = true;
+        entry.leased = false;
+        entry.stale = cell.value;
+        entry.generation = entry.generation.wrapping_add(1);
+        pool.free.push(cell.id.slot);
+        pool.live -= 1;
+        if let Some(events) = &mut pool.events {
+            events.push(CellEvent::Release { id: cell.id });
+        }
+        pool.trace.note(PoolEvent::Release {
+            kind: PoolKind::Value,
+            slot: cell.id.slot,
+            cell: cell.view(),
+        });
+    }
+    pub fn owns(&self, cell: &OwnedCell) -> bool {
+        self.0.borrow().id == cell.id.pool
+    }
+    pub fn live(&self) -> i32 {
+        self.0.borrow().live
+    }
+    pub fn snapshot(&self) -> ValuePoolSnapshot {
+        let pool = self.0.borrow();
+        let handed = pool.entries.len() as u32;
+        ValuePoolSnapshot {
+            handed,
+            capacity: handed.div_ceil(512) * 512,
+            free: pool.free.iter().rev().copied().collect(),
+            live: pool.live,
+            abandoned: pool
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| {
+                    entry.abandoned.map(|value| {
+                        (
+                            CellId {
+                                pool: pool.id,
+                                slot: slot as u32,
+                                generation: entry.generation,
+                            },
+                            value,
+                        )
+                    })
+                })
+                .collect(),
+        }
+    }
+    /// Opt-in bounded investigation trace; normal execution retains no log.
+    pub fn observe(&self, enabled: bool) {
+        self.0.borrow_mut().events = enabled.then(Vec::new);
+    }
+    pub fn events(&self) -> Vec<CellEvent> {
+        self.0.borrow().events.clone().unwrap_or_default()
+    }
+}
 
 /// A type name: the exe's full type identity for values.
 ///
