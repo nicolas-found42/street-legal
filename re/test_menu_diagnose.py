@@ -125,6 +125,25 @@ class SessionTests(unittest.TestCase):
         with tarfile.open(destination) as archive:
             self.assertIn(bundle.name+'/manifest.json',archive.getnames())
         with self.assertRaises(ValueError):menu.main(['export',str(bundle),str(bundle/'bad.tar.gz')])
+    def test_verification_preserves_explicit_frame_budget(self):
+        _,first=self.run_case(['--frames','800'])
+        self.assertEqual(menu.main(['verify',str(first),'--binary',str(self.binary),'--runs-root',str(self.args.runs_root)]),0)
+        second=Path(menu.recover(self.args.runs_root)[-1]['bundle'])
+        arguments=menu.manifest(second)['child_arguments']
+        self.assertEqual(arguments[arguments.index('--frames')+1],'800')
+    def test_newest_success_survives_pinned_failures_over_budget(self):
+        _,failed=self.run_case(['--crash']);_,passed=self.run_case()
+        result=menu.prune(self.args.runs_root,1,1)
+        self.assertEqual(result['removed'],[])
+        self.assertTrue(result['budget_blocked_by_protected_runs'])
+        self.assertTrue(failed.exists());self.assertTrue(passed.exists())
+    def test_older_state_schema_verifies_with_new_observer_fields(self):
+        _,first=self.run_case()
+        self.binary.write_text(FAKE.replace("'exit':False", "'exit':False,'game_state':'java.game.Garage','pending_state_call':False"))
+        self.args.input_script=first/'inputs/recorded-input.json'
+        code,second=self.run_case(prior=first)
+        self.assertEqual(code,0)
+        self.assertTrue(json.loads((second/'report.json').read_text())['verification']['passed'])
     def test_retention_preserves_index_after_pruning_successes(self):
         _,first=self.run_case();_,second=self.run_case()
         result=menu.prune(self.args.runs_root,1,2**30)

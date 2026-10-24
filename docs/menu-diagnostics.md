@@ -100,7 +100,8 @@ default; build it first, or supply `--binary PATH`. Both restore the frozen inpu
 tape, preserve application ticks/batch order, require identical stock content,
 and run headlessly through the original scripts. `--repeat N` creates an
 independent bundle for each attempt and reports the observed failure rate.
-These tools never substitute recorded native results into the VM.
+An explicit recorded `--frames` budget is preserved during replay. These tools
+never substitute recorded native results into the VM.
 
 For a previously completed session, verification compares exact menu-state,
 render-recipe and offscreen PNG-hash transitions. It reports the first changed
@@ -118,10 +119,12 @@ python3 re/menu-diagnose.py record --headless --input-script events.json \
   --expect expected.json --timeout 120 -- stock
 ```
 
-`expected.json` supports `labels_include`, `selected` and `exit`:
+`expected.json` supports `labels_include`, `selected`, `exit`, `game_state` and
+`pending_state_call`. State checkpoints also run every 60 VM frames, so autonomous
+state entry and completion remain visible after input callbacks return:
 
 ```json
-{"labels_include":["MAIN MENU","OPTIONS"],"exit":false}
+{"labels_include":["$20000"],"game_state":"java.game.Garage","pending_state_call":false,"exit":false}
 ```
 
 The assertion file is frozen and automatically reused during replay/verification;
@@ -152,7 +155,9 @@ parity tracing and checkpoints are unchanged.
 Finished JSONL streams larger than 1 MiB are gzip-compressed. The default policy
 keeps at most 20 unprotected bundles within a 2 GiB **logical artifact** budget;
 projected stock and binary snapshots count even when APFS shares their blocks.
-Failures are pinned, running/orphaned sessions are protected, and over-budget
+Failures are pinned; running/orphaned sessions and the newest managed bundle
+are protected, so a successful capture remains inspectable even when older
+failures fill the budget. Over-budget
 protected evidence is reported instead of deleted. The append-only index
 survives pruning. Explicit output bundles outside the managed runs root remain
 indexed and discoverable but are not automatically pruned. Unreferenced content-store entries are collected by hash,
@@ -188,3 +193,16 @@ changed render detection, successful-prefix fix verification, explicit scenario
 assertions, orphan discovery and retention. Journal tests exercise concurrent
 writers and rotation without sequence gaps. Licensed-stock checks remain local;
 CI exercises the runner and telemetry without licensed assets.
+
+## New Career coverage
+
+`cargo test -p slr-boot --test stock_new_career` drives the shipped menu,
+name entry, character selection and welcome dialog into `java.game.Garage`.
+It checks entry completion and several idle checkpoints, original player/money
+HUD labels, and toolbar geometry. It requires verified local stock.
+
+Camera template registration, native player camera references and loading reset
+now support this script path. Garage toolbar render/body resources use a Tier D
+static OSD projection from the shipped CFG and SCX data. Full 3D garage rendering,
+car control and all garage operations remain outside this scenario's coverage;
+this is not native parity acceptance. Stock scripts are unchanged.

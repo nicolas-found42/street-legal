@@ -88,6 +88,7 @@ impl Default for FrameConfig {
 struct PlayerFrameState {
     targets: u32,
     focus: u32,
+    camera: u32,
     render_refs: [u32; 8],
     unmodelled_command: Option<String>,
 }
@@ -627,9 +628,42 @@ pub fn dispatch(
                     // The stock Controller has no addDeviceMapping body. Its native
                     // mapping is still a declared headless-input gap.
                 }
+                Some("camera") => {
+                    let id = text
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .ok_or("NativePlayerBoundary: malformed camera command")?
+                        as u32;
+                    let link = slr_resource::node::with_res(|host| {
+                        if id == 0 {
+                            return Ok(0);
+                        }
+                        let target = host
+                            .container_for_id(id)
+                            .ok_or("camera resource unavailable")?;
+                        if host.container(target).is_none_or(|c| c.type_id != 1) {
+                            return Err("camera requires a game resource");
+                        }
+                        Ok(host.add_bound_node(id, target))
+                    })?;
+                    let old = with(|state| {
+                        std::mem::replace(
+                            &mut state
+                                .players
+                                .get_mut(&container)
+                                .expect("registered player")
+                                .camera,
+                            link,
+                        )
+                    });
+                    if old != 0 {
+                        slr_resource::node::with_res(|h| h.release_embedded_link(old));
+                    }
+                }
                 Some(
-                    command @ ("viewport" | "osd" | "renderinstance" | "camera" | "controllable"
-                    | "control" | "uncontrol"),
+                    command @ ("viewport" | "osd" | "renderinstance" | "controllable" | "control"
+                    | "uncontrol"),
                 ) => {
                     with(|state| {
                         if let Some(player) = state.players.get_mut(&container) {

@@ -93,8 +93,8 @@ fn install_headers(
     } else {
         &package.entries
     };
-    if index == 0 {
-        return Err("the system package is registered by the boot driver".into());
+    if index == 0 && entry_index.is_none() {
+        return Err("the system package roots are registered by the boot driver".into());
     }
     let package_index = u16::try_from(index).map_err(|_| "package index too large")?;
     let prefix = u32::from(package_index) << 16;
@@ -251,6 +251,23 @@ mod tests {
             })
             .collect();
         package
+    }
+
+    #[test]
+    fn lazy_system_child_keeps_boot_roots_and_rejects_bulk_install() {
+        let packages = vec![(
+            "system.rpk".into(),
+            Some(package(&[(21, 0), (51, 21)], &[])),
+        )];
+        let mut host = ResHost::new();
+        let root = host.add_container(Container::new(8, 21));
+        host.bind_id(21, root);
+        assert!(install_package(&mut host, &packages, 0).is_err());
+        install_header(&mut host, &packages, 0, 1).unwrap();
+        assert_eq!(host.container_for_id(21), Some(root));
+        let camera = host.container_for_id(51).unwrap();
+        assert_eq!(host.container(camera).unwrap().parent, root);
+        assert!(host.container(root).unwrap().header.is_none());
     }
 
     #[test]

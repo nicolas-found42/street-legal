@@ -7,7 +7,25 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
-Last updated: 2026-10-21, branch `exact-port`.
+Last updated: 2026-10-23, New Career integration on `codex/new-career-to-garage`.
+
+The original TUFA New Career path now reaches `java.game.Garage`, completes
+entry, dismisses its welcome dialog and remains idle with the original HUD and
+native toolbar geometry. The stock integration test covers name and character
+confirmation through five completed-entry checkpoints. A supervised visible
+window completed cleanly; frozen headless replay matched state, render-recipe
+and image transitions. Local evidence: `re/out/career/window-final/` and
+`re/out/career/accepted/2026-10-24T025652.742305_0000-7adf7eb1c8/`.
+
+This adds lazy system camera headers, a retained player camera link and loading
+sample reset. Configured garage buttons use a Tier D static OSD projection of
+stock CFG/SCX assets. Full 3D garage rendering and driving remain unfinished;
+no feature-parity row or native exactness obligation is accepted. The new
+state/entry checkpoints, scheduler failure escape and retention safeguards are
+documented in [menu-diagnostics.md](menu-diagnostics.md).
+
+The previous native-oracle checkpoint below remains the strict-parity assessment
+(as of 2026-10-21, branch `exact-port`):
 
 `./acceptance/run.sh` still exits **1**: **54 obligations: 42 open, 11 partial,
 1 passed**. No obligation moved in this checkpoint. S11's evidence is refreshed
@@ -2328,7 +2346,25 @@ still require the next strict trace's later resource-recycle comparison.
 
 ### State before the active projection port
 
-Last updated: 2026-10-21, branch `exact-port`.
+Last updated: 2026-10-23, New Career integration on `codex/new-career-to-garage`.
+
+The original TUFA New Career path now reaches `java.game.Garage`, completes
+entry, dismisses its welcome dialog and remains idle with the original HUD and
+native toolbar geometry. The stock integration test covers name and character
+confirmation through five completed-entry checkpoints. A supervised visible
+window completed cleanly; frozen headless replay matched state, render-recipe
+and image transitions. Local evidence: `re/out/career/window-final/` and
+`re/out/career/accepted/2026-10-24T025652.742305_0000-7adf7eb1c8/`.
+
+This adds lazy system camera headers, a retained player camera link and loading
+sample reset. Configured garage buttons use a Tier D static OSD projection of
+stock CFG/SCX assets. Full 3D garage rendering and driving remain unfinished;
+no feature-parity row or native exactness obligation is accepted. The new
+state/entry checkpoints, scheduler failure escape and retention safeguards are
+documented in [menu-diagnostics.md](menu-diagnostics.md).
+
+The previous native-oracle checkpoint below remains the strict-parity assessment
+(as of 2026-10-21, branch `exact-port`):
 
 **Status is not prose any more.** `acceptance/matrix.json` is the one
 machine-readable inventory of the 54 obligations (P01–P30, G1–G11, S1–S13);

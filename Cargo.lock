@@ -1615,6 +1615,7 @@ dependencies = [
  "sha2",
  "slr-calllog",
  "slr-d3d9",
+ "slr-fmt-cfg",
  "slr-fmt-rpak",
  "slr-fmt-scx",
  "slr-fmt-texture",
