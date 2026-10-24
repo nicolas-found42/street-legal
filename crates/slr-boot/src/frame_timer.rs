@@ -243,8 +243,10 @@ impl FrameTimerReplay {
 mod tests {
     #[test]
     fn paired_passive_capture_loads_with_validated_clock_and_reset_inputs() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl");
+        let Some(base) = crate::oracle_fixture::clock_capture() else {
+            return;
+        };
+        let path = base.join("clock-inputs.jsonl");
         let (mut timer, accepted) = super::FrameTimerReplay::load_companion(&path).unwrap();
         assert_eq!(timer.available(), 352);
         assert_eq!(accepted, 331);

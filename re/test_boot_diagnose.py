@@ -47,6 +47,22 @@ if mode=='empty-states': (out/'states.jsonl').write_text('')
 if mode=='missing-events': (out/'events.jsonl').unlink()
 '''
 
+class ProcessGroupTests(unittest.TestCase):
+ def test_macos_exited_group_permission_error_is_harmless(self):
+  for listing in ('', '123 Z\n123 Z+\n999 S\n'):
+   with self.subTest(listing=listing):
+    with mock.patch.object(diag.sys,'platform','darwin'), mock.patch.object(diag.os,'killpg',side_effect=PermissionError(1,'denied')), mock.patch.object(diag.subprocess,'run',return_value=subprocess.CompletedProcess([],0,listing,'')):
+     diag.signal_process_group(123,signal.SIGKILL)
+ def test_live_group_permission_error_remains_fatal(self):
+  with mock.patch.object(diag.sys,'platform','darwin'), mock.patch.object(diag.os,'killpg',side_effect=PermissionError(1,'denied')), mock.patch.object(diag.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'123 Z\n123 S\n','')):
+   with self.assertRaises(PermissionError):diag.signal_process_group(123,signal.SIGKILL)
+ def test_process_inspection_failure_remains_fatal(self):
+  with mock.patch.object(diag.sys,'platform','darwin'), mock.patch.object(diag.os,'killpg',side_effect=PermissionError(1,'denied')), mock.patch.object(diag.subprocess,'run',side_effect=subprocess.CalledProcessError(1,'ps')):
+   with self.assertRaises(subprocess.CalledProcessError):diag.signal_process_group(123,signal.SIGKILL)
+ def test_non_macos_permission_error_remains_fatal(self):
+  with mock.patch.object(diag.sys,'platform','linux'), mock.patch.object(diag.os,'killpg',side_effect=PermissionError(1,'denied')):
+   with self.assertRaises(PermissionError):diag.signal_process_group(123,signal.SIGKILL)
+
 class Fixture(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.repo=Path(self.temp.name)

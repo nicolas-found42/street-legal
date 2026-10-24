@@ -309,6 +309,9 @@ mod tests {
     fn original_spring_parameter_projection_matches() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-spring-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).expect("run re/oracle/native_spring_probe.py"),
         )
@@ -333,6 +336,9 @@ mod tests {
     fn original_spring_constructor_graphs_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-spring-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).expect("run re/oracle/native_spring_probe.py"),
         )

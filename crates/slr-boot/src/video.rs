@@ -179,6 +179,9 @@ mod tests {
     fn original_native_rows_match_guards_com_failure_and_state_stores() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/video-open-original.jsonl");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let rows = std::fs::read_to_string(path).expect("original video probe rows required");
         for line in rows.lines() {
             let row: serde_json::Value = serde_json::from_str(line).unwrap();

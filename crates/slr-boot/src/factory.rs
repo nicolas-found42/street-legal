@@ -1134,6 +1134,9 @@ mod tests {
         use slr_vm::vmclass::{Class, Field};
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/game-ref-create-arguments-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let capture: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).expect("run re/oracle/game_ref_create_arguments_probe.py"),
         )

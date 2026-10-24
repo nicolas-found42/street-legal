@@ -584,6 +584,9 @@ mod tests {
     fn original_mesh_body_mass_integrals_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-geometry-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let rows: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).expect("run re/oracle/native_geometry_probe.py"),
         )

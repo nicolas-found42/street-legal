@@ -846,13 +846,15 @@ mod clock_provider_tests {
     use slr_vm::clock::{with_site, ClockSite};
     #[test]
     fn shared_raw_input_provider_stops_on_wrong_role_and_legacy_begin_is_noop() {
+        let Some(base) = crate::oracle_fixture::clock_capture() else {
+            return;
+        };
         slr_vm::diagnostics::configure("clock-provider-test".into(), 64, None);
         configure_clock(0.01);
         begin_replay_after_game_init().unwrap();
         assert!(!replaying());
         assert_eq!(clock_f32(), 0.0);
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl");
+        let path = base.join("clock-inputs.jsonl");
         configure_replay(&path).unwrap();
         assert!(replaying());
         assert!(begin_replay_after_game_init()
@@ -896,6 +898,9 @@ mod callback_wrapper_tests {
 
     #[test]
     fn stock_script_returns_scalar_and_destroys_protected_callback_thread() {
+        let Some(_) = crate::oracle_fixture::stock_root() else {
+            return;
+        };
         slr_lang::thread::reset();
         configure_clock(0.0);
         slr_vm::diagnostics::configure("callback-scalar".into(), 128, None);
@@ -938,6 +943,9 @@ mod callback_wrapper_tests {
 
     #[test]
     fn void_callback_that_waits_retains_real_continuation_and_unprotected_flags() {
+        let Some(_) = crate::oracle_fixture::stock_root() else {
+            return;
+        };
         fn close(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
             with_threads(|host| host.wait(0x1234).unwrap());
             None

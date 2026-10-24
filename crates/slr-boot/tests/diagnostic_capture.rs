@@ -45,10 +45,7 @@ fn command(output: &std::path::Path, frames: &str) -> Command {
     cmd
 }
 
-#[test]
-fn failed_run_has_correlated_state_and_durable_end_marker() {
-    // The licensed install is not in CI or fresh worktrees; this suite would
-    // otherwise fail on a missing stock directory rather than skip.
+fn stock_available() -> bool {
     let stock = std::env::var_os("SLR_STOCK")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -56,6 +53,14 @@ fn failed_run_has_correlated_state_and_durable_end_marker() {
         });
     if !stock.join(slr_io::stock::MANIFEST_NAME).is_file() {
         eprintln!("SKIP: no verified stock install at {}", stock.display());
+        return false;
+    }
+    true
+}
+
+#[test]
+fn failed_run_has_correlated_state_and_durable_end_marker() {
+    if !stock_available() {
         return;
     }
     let output = output("failure");
@@ -138,6 +143,9 @@ fn failed_run_has_correlated_state_and_durable_end_marker() {
 
 #[test]
 fn killing_process_preserves_prior_native_records_without_completed_marker() {
+    if !stock_available() {
+        return;
+    }
     let output = output("killed");
     let mut process = Running(
         command(&output, "1000000")

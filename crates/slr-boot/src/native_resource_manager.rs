@@ -312,6 +312,9 @@ mod tests {
     fn original_synchronous_descriptor_promotion_preserves_pending_and_recycles_ready() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-resource-manager-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: Value = serde_json::from_slice(
             &std::fs::read(path).expect("run native_resource_manager_probe.py"),
         )
@@ -359,6 +362,9 @@ mod tests {
     fn original_async_descriptor_requests_match_intrusive_memory_and_callbacks() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-resource-manager-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: Value = serde_json::from_slice(
             &std::fs::read(path).expect("run native_resource_manager_probe.py"),
         )
