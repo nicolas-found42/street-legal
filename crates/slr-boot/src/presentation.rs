@@ -58,6 +58,8 @@ struct State {
     next_viewport_order: u64,
     sender: Option<SyncSender<Message>>,
     presented: bool,
+    last_recipe: String,
+    screenshots: std::collections::VecDeque<PathBuf>,
     image_cache: RefCell<HashMap<u32, (String, Image)>>,
     font_cache: RefCell<HashMap<u32, std::rc::Rc<slr_fmt_scx::V3Mesh>>>,
 }
@@ -747,16 +749,42 @@ fn owner_layer(vm: &VmHost, s: &State, owner: u32) -> u64 {
 pub fn frame(vm: &VmHost, menu: bool, output: &Path) -> Result<(), String> {
     STATE.with(|state| {
         let mut s=state.borrow_mut();
-        if !s.enabled || (!menu && !s.presented) || (s.presented && !crate::live_input::interacted()) {return Ok(());}
-        let frame=scene(vm,&s)?;
+        if !s.enabled || (!menu && !s.presented) || (s.presented && !crate::live_input::interacted() && s.sender.is_none()) {return Ok(());}
+        let mut frame=scene(vm,&s)?;
         if frame.draws.is_empty() || frame.labels.is_empty() {return Ok(());}
-        let metadata=serde_json::json!({"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"textures":frame.images.keys().collect::<Vec<_>>()});
-        std::fs::write(output.join("presentation.json"),serde_json::to_vec_pretty(&metadata).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        frame.id=slr_vm::diagnostics::current_context().frame.unwrap_or(0)+1;
+        frame.input_id=crate::live_input::input_id();
+        let recipe=frame.fingerprint();
+        let changed=recipe!=s.last_recipe;
+        if changed {
+            let metadata=serde_json::json!({"frame_id":frame.id,"input_id":frame.input_id,"recipe_sha256":recipe,"labels":frame.labels,"text_bounds":frame.text_bounds,"draws":frame.draws.len(),"textures":frame.images.keys().collect::<Vec<_>>(),"picking":picking_state(vm,&s)});
+            std::fs::write(output.join("presentation.json.tmp"),serde_json::to_vec_pretty(&metadata).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            std::fs::rename(output.join("presentation.json.tmp"),output.join("presentation.json")).map_err(|e|e.to_string())?;
+            slr_telemetry::journal::emit("render-state",metadata)?;
+            if std::env::var_os("SLR_SESSION_CAPTURE").is_some() {
+                let path=output.join(format!("frame-{}.png",frame.id));
+                slr_d3d9::capture(&frame,&path)?;
+                slr_telemetry::journal::emit("state-image",serde_json::json!({"frame_id":frame.id,"recipe_sha256":recipe,"path":path.file_name().unwrap().to_string_lossy(),"png_sha256":png_hash(&path)?}))?;
+                s.screenshots.push_back(path);
+                if s.screenshots.len()>8 {
+                    let old=s.screenshots.pop_front().unwrap();
+                    slr_telemetry::journal::emit("image-evicted",serde_json::json!({"path":old.file_name().unwrap().to_string_lossy(),"reason":"latest-eight-state-images"}))?;
+                    std::fs::remove_file(old).map_err(|e|e.to_string())?;
+                }
+            }
+            s.last_recipe=recipe.clone();
+        }
         if !s.presented {
             if let Some(path)=&s.capture {slr_d3d9::capture(&frame,path)?;}
             println!("WINDOW stock menu: {} draws, {} labels, {} textures",frame.draws.len(),frame.labels.len(),frame.images.len());
         }
-        if let Some(sender)=&s.sender {sender.send(Message::Frame(frame)).map_err(|e|e.to_string())?;}
+        if let Some(sender)=&s.sender {
+            let started=std::time::Instant::now();
+            let id=frame.id;let input_id=frame.input_id;
+            slr_telemetry::journal::emit("frame-enqueue",serde_json::json!({"frame_id":id,"input_id":input_id,"recipe_sha256":recipe}))?;
+            sender.send(Message::Frame(frame)).map_err(|e|e.to_string())?;
+            slr_telemetry::journal::emit("frame-submitted",serde_json::json!({"frame_id":id,"input_id":input_id,"recipe_sha256":recipe,"send_ns":started.elapsed().as_nanos()}))?;
+        }
         s.presented=true;Ok(())
     })
 }
@@ -891,4 +919,21 @@ pub(crate) fn pick_position(vm: &VmHost, osd: u32, point: [f32; 2]) -> Option<[f
 
 pub(crate) fn capture(vm: &VmHost, path: &Path) -> Result<(), String> {
     STATE.with(|s| slr_d3d9::capture(&scene(vm, &s.borrow())?, path))
+}
+
+fn png_hash(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(path).map_err(|e| e.to_string())?)
+    ))
+}
+fn picking_state(vm: &VmHost, s: &State) -> serde_json::Value {
+    serde_json::json!({"focus":crate::live_input::focused_osd(vm),
+        "boxes":s.ui_boxes.iter().map(|(id,b)|serde_json::json!({"container":id,"physics":resource_id(*id),"owner":b.owner,"position":b.pos,"size":b.size})).collect::<Vec<_>>(),
+        "viewports":s.active_viewports.iter().map(|(id,order)|serde_json::json!({"container":id,"order":order,"bounds":crate::viewport::bounds(*id)})).collect::<Vec<_>>()})
+}
+pub(crate) fn failure_state(vm: &VmHost) -> Result<(), String> {
+    STATE
+        .with(|s| slr_telemetry::write_artifact("ui-failure.json", &picking_state(vm, &s.borrow())))
 }

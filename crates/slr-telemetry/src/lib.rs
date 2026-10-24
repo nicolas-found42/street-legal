@@ -20,6 +20,8 @@
 //! * `capture.json` / `capture-end.json` — liveness and completion markers.
 //! * `failure.json`, `divergence.json`, `crash.json` — targeted artifacts.
 
+pub mod journal;
+
 use serde_json::{json, Value};
 use slr_calllog::{LogRecord, LogWriter};
 use slr_vm::diagnostics::{self, Event, EventKind, Stats};
@@ -80,6 +82,8 @@ struct State {
     full: bool,
     wall_clock: bool,
     skipped_steps: u64,
+    skipped_stores: u64,
+    compact: bool,
     error: Option<String>,
     events_written: u64,
     states_written: u64,
@@ -173,6 +177,8 @@ pub fn configure(
         full,
         wall_clock,
         skipped_steps: 0,
+        skipped_stores: 0,
+        compact: std::env::var_os("SLR_SESSION_CAPTURE").is_some(),
         error: None,
         events_written: 0,
         states_written: 0,
@@ -291,6 +297,10 @@ fn event(event: &Event) {
         let Some(state) = slot.as_mut() else { return };
         if !state.full && matches!(event.kind, EventKind::Step { .. }) {
             state.skipped_steps += 1;
+            return;
+        }
+        if state.compact && !state.full && matches!(event.kind, EventKind::Store { .. }) {
+            state.skipped_stores += 1;
             return;
         }
         let mut value = match serde_json::to_value(event) {
@@ -451,6 +461,7 @@ pub fn finish(failure: Option<&str>) -> Result<(), String> {
             "file_io_written":state.file_io_written,"last_sequence":state.last_sequence,
             "diagnostics":diagnostics::stats(),
             "trace_level":if state.full{"full"}else{"metadata"},"suppressed_steps":state.skipped_steps,
+            "suppressed_stores":state.skipped_stores,"compact":state.compact,
             "pending_records":0,"truncated":false}))?;
         marker.sync_all().map_err(|e|e.to_string())
     });

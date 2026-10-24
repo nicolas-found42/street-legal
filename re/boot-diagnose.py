@@ -409,7 +409,7 @@ def correlate(bundle, comparisons):
 def analyze(bundle):
     bundle = Path(bundle).resolve(strict=True)
     manifest = bundle_manifest(bundle)
-    if manifest.get("status") == "running":
+    if manifest.get("status") == "running" or manifest.get("pinned"):
         context = correlate(bundle,{})
         return {"run_id":manifest.get("run_id"),"status":"unfinished","diagnostic_only":True,"acceptance":False,
             "inventory_verified":False,"inventory_warning":"Wrapper did not finalize; process liveness is unknown and artifact identities are unverified.",
@@ -1093,6 +1093,7 @@ def read_index(runs_root):
             return Path(record["bundle"]).stat().st_mtime
         except (OSError, KeyError):
             return 0.0
+    records = list({record.get("bundle"): record for record in records}.values())
     records.sort(key=lambda record: (started(record), mtime(record)))
     return records
 

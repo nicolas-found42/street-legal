@@ -1,5 +1,9 @@
 # Boot diagnostics and historical replay
 
+For the exact-port native window, see [interactive session diagnostics](menu-diagnostics.md).
+Window launches automatically create supervised, indexed input/presentation bundles.
+The boot comparison runner below retains its separate parity verdict.
+
 Use the unattended runner for boot investigations. It builds before running and
 creates a new evidence bundle every time; it never reuses an old runtime log.
 

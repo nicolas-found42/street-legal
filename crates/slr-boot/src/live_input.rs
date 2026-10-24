@@ -1,7 +1,9 @@
 //! Platform input projection into stock Hotkey and Group cursor callbacks.
 //! Menu navigation/commands and modal decisions stay in unchanged TUFA scripts.
 use crate::presentation::{container, field};
-use slr_d3d9::InputEvent;
+use serde_json::json;
+use slr_d3d9::{InputEvent, PlatformInput};
+use slr_telemetry::journal;
 use slr_vm::{
     host::{marshal_args, CallInfo, NativeFn, VmHost},
     values::Value,
@@ -32,13 +34,14 @@ struct Scheduled {
 struct State {
     original: HashMap<u32, NativeFn>,
     hotkeys: Vec<Option<Hotkey>>,
-    input: Option<Receiver<InputEvent>>,
+    input: Option<Receiver<PlatformInput>>,
     schedule: Vec<Scheduled>,
     ready: bool,
     closed: bool,
     tick: u64,
     last_event: Option<serde_json::Value>,
     event_count: u64,
+    input_id: u64,
     held: HashSet<u32>,
     last_keys: VecDeque<u32>,
     want_capture: bool,
@@ -49,7 +52,7 @@ struct State {
     down: Option<crate::presentation::Hit>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
-pub fn connect(input: Receiver<InputEvent>) {
+pub fn connect(input: Receiver<PlatformInput>) {
     STATE.with(|s| s.borrow_mut().input = Some(input));
 }
 pub fn script(path: String) -> Result<(), String> {
@@ -175,6 +178,10 @@ fn keyboard(vm: &mut VmHost, code: u32, pressed: bool, repeat: bool) -> Result<(
         }
     });
     if !deliver {
+        route(
+            "ignored-key",
+            json!({"reason":"duplicate-press-or-orphan-release","code":code}),
+        )?;
         return Ok(());
     }
     if pressed && matches!(code, 8 | 13 | 27) {
@@ -233,6 +240,10 @@ fn keyboard(vm: &mut VmHost, code: u32, pressed: bool, repeat: bool) -> Result<(
         if !matched || h.filter & filter == 0 {
             continue;
         }
+        route(
+            "hotkey",
+            json!({"hotkey":h.word,"target":h.target,"osd":focus,"key":h.key,"flags":h.flags,"filter":h.filter,"pressed":pressed}),
+        )?;
         vm.write_field(h.word, "state", Value::int(i32::from(pressed)))
             .map_err(|e| format!("Hotkey.state: {e:?}"))?;
         crate::engine::call_script(
@@ -244,71 +255,120 @@ fn keyboard(vm: &mut VmHost, code: u32, pressed: bool, repeat: bool) -> Result<(
         // The original checkHotkeys dispatches the first changed matching slot.
         return Ok(());
     }
+    route(
+        "unmatched-key",
+        json!({"focus":focus,"physical":physical_key,"axis":virtual_axis,"filter":filter}),
+    )?;
+    Ok(())
+}
+pub fn input_id() -> u64 {
+    STATE.with(|s| s.borrow().input_id)
+}
+fn route(kind: &str, data: serde_json::Value) -> Result<(), String> {
+    journal::emit(
+        "input-route",
+        json!({"input_id":input_id(),"route":kind,"detail":data}),
+    )?;
     Ok(())
 }
 pub fn poll(vm: &mut VmHost) -> Result<(), String> {
-    let events = STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        if !s.ready {
-            let close = s
-                .input
-                .as_ref()
-                .is_some_and(|input| input.try_iter().any(|e| matches!(e, InputEvent::Close)));
-            if close {
-                s.closed = true;
-            }
-            return Vec::new();
-        }
+    let (ready, tick, mut events) = STATE.with(|state| {
+        let mut s = state.borrow_mut();
         let tick = s.tick;
-        s.tick += 1;
-        let mut events = Vec::new();
-        if let Some(input) = &s.input {
-            events.extend(input.try_iter());
-        }
-        let mut remaining = Vec::new();
-        for event in std::mem::take(&mut s.schedule) {
-            if event.tick == tick {
-                s.want_capture |= event.capture;
-                events.push(event.event);
-            } else {
-                remaining.push(event);
-            }
-        }
-        s.schedule = remaining;
-        events
-    });
-    for event in events {
-        STATE.with(|s| {
-            let mut s = s.borrow_mut();
-            let tick = s.tick;
-            s.event_count += 1;
-            s.last_event = Some(serde_json::json!({"tick":tick,"event":event}));
-        });
-        match &event {
-            InputEvent::Key {
-                code,
-                pressed,
-                repeat,
-            } => keyboard(vm, *code, *pressed, *repeat)?,
-            InputEvent::Close => STATE.with(|s| s.borrow_mut().closed = true),
-            InputEvent::Pointer { x, y } => pointer(vm, *x, *y)?,
-            InputEvent::Button { pressed } => button(vm, *pressed)?,
-            InputEvent::FocusLost => cancel(vm)?,
-            InputEvent::Text { text } => {
-                if field(vm, focused_osd(vm), "actGadget").unwrap_or(0) != 0 {
-                    STATE.with(|s| {
-                        s.borrow_mut().last_keys.extend(
-                            text.chars()
-                                .filter(|c| (*c as u32) >= 32 && (*c as u32) <= 255)
-                                .flat_map(|c| {
-                                    let code = c as u32;
-                                    [(code << 16) | code, 0]
-                                }),
-                        )
+        let ready = s.ready;
+        let mut events: Vec<_> = s
+            .input
+            .as_ref()
+            .map(|input| input.try_iter().collect())
+            .unwrap_or_default();
+        if ready {
+            s.tick += 1;
+            let mut remaining = Vec::new();
+            for scheduled in std::mem::take(&mut s.schedule) {
+                if scheduled.tick == tick {
+                    s.want_capture |= scheduled.capture;
+                    events.push(PlatformInput {
+                        source_id: 0,
+                        event: scheduled.event,
                     });
+                } else {
+                    remaining.push(scheduled);
                 }
             }
+            s.schedule = remaining;
         }
+        (ready, tick, events)
+    });
+    for received in events.drain(..) {
+        let event = received.event;
+        if !ready {
+            journal::emit(
+                "input-ignored",
+                json!({"source_id":received.source_id,"event":event,"reason":"menu-not-ready"}),
+            )?;
+            if matches!(event, InputEvent::Close) {
+                STATE.with(|s| s.borrow_mut().closed = true);
+            }
+            continue;
+        }
+        // Written and synchronized before any callback can fail or terminate.
+        let id = journal::emit(
+            "input-apply",
+            json!({"tick":tick,"source_id":received.source_id,"event":event,"focus":focused_osd(vm)}),
+        )?;
+        STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            s.event_count += 1;
+            s.input_id = id;
+            s.last_event = Some(json!({"tick":tick+1,"event":event,"input_id":id}));
+        });
+        let sequence =
+            crate::telemetry::detail("input-begin", vec![("input_id".into(), id.to_string())]);
+        let result = slr_vm::diagnostics::with_context(
+            slr_vm::diagnostics::Context {
+                parent_sequence: sequence,
+                ..Default::default()
+            },
+            || match &event {
+                InputEvent::Key {
+                    code,
+                    pressed,
+                    repeat,
+                } => keyboard(vm, *code, *pressed, *repeat),
+                InputEvent::Close => {
+                    STATE.with(|s| s.borrow_mut().closed = true);
+                    Ok(())
+                }
+                InputEvent::Pointer { x, y } => pointer(vm, *x, *y),
+                InputEvent::Button { pressed } => button(vm, *pressed),
+                InputEvent::FocusLost => cancel(vm),
+                InputEvent::Text { text } => {
+                    let active = field(vm, focused_osd(vm), "actGadget").unwrap_or(0);
+                    route(
+                        "text",
+                        json!({"active_gadget":active,"accepted":active!=0,"characters":text.chars().count()}),
+                    )?;
+                    if active != 0 {
+                        STATE.with(|s| {
+                            s.borrow_mut().last_keys.extend(
+                                text.chars()
+                                    .filter(|c| (*c as u32) >= 32 && (*c as u32) <= 255)
+                                    .flat_map(|c| {
+                                        let code = c as u32;
+                                        [(code << 16) | code, 0]
+                                    }),
+                            )
+                        });
+                    }
+                    Ok(())
+                }
+            },
+        );
+        journal::emit(
+            "input-result",
+            json!({"input_id":id,"vm_sequence":sequence,"error":result.as_ref().err(),"focus_after":focused_osd(vm)}),
+        )?;
+        result?;
     }
     Ok(())
 }
@@ -332,6 +392,10 @@ pub fn record(vm: &VmHost, output: &Path) -> Result<(), String> {
         crate::presentation::capture(vm, &output.join(format!("input-{tick}.png")))?;
     }
     let snapshot = serde_json::json!({"focus":focus,"selected":field(vm,gadget,"cmd"),"pressed":field(vm,gadget,"pressed"),"act":field(vm,focus,"actGadget"),"animates":crate::engine::registered_animate(container(vm,focus)),"queued_keys":STATE.with(|s|s.borrow().last_keys.len()),"labels":labels,"exit":slr_lang::seam::with_lang_host(|h|h.exit_requested())});
+    journal::emit(
+        "menu-state",
+        json!({"input_id":input_id(),"tick":STATE.with(|s|s.borrow().tick),"state":snapshot}),
+    )?;
     STATE.with(|state| {
         let mut s = state.borrow_mut();
         let tick = s.tick;
@@ -343,11 +407,12 @@ pub fn record(vm: &VmHost, output: &Path) -> Result<(), String> {
         }
         s.recorded = Some(s.event_count);
         std::fs::write(
-            output.join("input-state.json"),
+            output.join("input-state.json.tmp"),
             serde_json::to_vec_pretty(&serde_json::json!({"history":s.history,"bindings":s.hotkeys.iter().flatten().map(|h|serde_json::json!({"key":h.key,"flags":h.flags,"filter":h.filter,"osd":h.osd,"target":h.target,"command":field(vm,h.word,"command")})).collect::<Vec<_>>(),"escape":constant(vm,"java.io.Input","RCDIK_ESCAPE")}))
                 .map_err(|e| e.to_string())?,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        std::fs::rename(output.join("input-state.json.tmp"),output.join("input-state.json")).map_err(|e|e.to_string())
     })
 }
 
@@ -374,6 +439,10 @@ fn cursor_event(vm: &mut VmHost, hit: crate::presentation::Hit, event: &str) -> 
         constant(vm, "java.lang.GameType", "EVENT_CURSOR").ok_or("EVENT_CURSOR unavailable")?;
     // Group.handleEvent reads the picked ID at token 2 for click/drop,
     // token 3 for down/up, and tokens 3/4 (ID/enter flag) for hover/leave.
+    route(
+        "cursor",
+        json!({"event":event,"physics":hit.physics,"group":hit.group,"osd":hit.osd}),
+    )?;
     let id = hit.physics as i32;
     let text = match event {
         "EC_LCLICK" => format!("{ec} 0 {id}"),
@@ -395,6 +464,10 @@ fn pointer(vm: &mut VmHost, x: f32, y: f32) -> Result<(), String> {
         s.pointer = [x, y];
         s.hover
     });
+    route(
+        "pick",
+        json!({"point":[x,y],"focus":focused_osd(vm),"hit":hit.map(|h|json!({"physics":h.physics,"group":h.group,"osd":h.osd})),"previous":previous.map(|h|h.physics)}),
+    )?;
     if previous != hit {
         if let Some(old) = previous {
             cursor_event(vm, old, "EC_LEAVE")?;
