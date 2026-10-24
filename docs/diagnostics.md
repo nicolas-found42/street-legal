@@ -399,3 +399,8 @@ A green fixture-free CI job verifies code/tests, not stock parity.
 On macOS, process-group cleanup confirms that an `EPERM` group has no live
 members before treating it as already exited. A live member, failed process
 inspection, or a permission error on another platform still fails the run.
+
+The separate [VM machine-event API](vm-machine-events.md) exposes chronological
+owner and execution events in-process. It requires recording before owner
+creation and explicit prefix acknowledgements; the durable archive does not yet
+persist this stream.

@@ -1,7 +1,238 @@
 //! Controlled original initializer drivers through parsed TUFA and VmHost.
+#[path = "support/local_oracle.rs"]
+mod local_oracle;
 use serde_json::{json, Value as Json};
 use slr_fmt_tufa::{Node, PoolEntry};
 use slr_vm::host::VmHost;
+
+#[test]
+fn original_initializer_invocations_reuse_one_thread_and_retain_the_source_frame_lifetimes() {
+    use sha2::{Digest, Sha256};
+    use slr_vm::machine::{Event, FramePhase};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(bytes) =
+        local_oracle::read(&root.join("re/out/boot/initializer-thread-chronology-attempt1.json"))
+    else {
+        return;
+    };
+    let v: Json = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["schema"], 1);
+    assert_eq!(
+        v["exe_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(
+                std::fs::read(root.join("reference/raw/StreetLegal_Redline.bak.exe")).unwrap()
+            )
+        )
+    );
+    let producers = v["producer_sources"].as_object().unwrap();
+    assert_eq!(producers.len(), 5);
+    for name in [
+        "initializer_thread_chronology_probe.py",
+        "vminit_vectors.py",
+        "vmexec_vectors.py",
+        "thread_vectors.py",
+        "oracle.py",
+    ] {
+        assert_eq!(
+            producers[name],
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(root.join("re/oracle").join(name)).unwrap())
+            )
+        )
+    }
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 6);
+    for (index, row) in rows.iter().enumerate() {
+        let static_fields = index < 3;
+        let count = [0, 1, 3][index % 3];
+        assert_eq!(
+            row["mode"],
+            if static_fields { "static" } else { "instance" }
+        );
+        assert_eq!(row["count"], count);
+        assert_eq!(row["outcome"], "ok");
+        let name = if static_fields {
+            "THRD-CLASSVAR-INI"
+        } else {
+            "THRD-INSTVAR-INI"
+        };
+        let original = row["events"].as_array().unwrap();
+        let constructors = original
+            .iter()
+            .filter(|e| e["pc"] == 0x41f340 && e["name"] == name)
+            .collect::<Vec<_>>();
+        assert_eq!(constructors.len(), 1);
+        let pointer = constructors[0]["this"].as_u64().unwrap();
+        assert_eq!(constructors[0]["args"][1], 10);
+        assert_eq!(constructors[0]["args"][2], 1);
+        let frame_entries = original
+            .iter()
+            .filter(|e| e["pc"] == 0x407b10 && e["args"][0] == pointer)
+            .collect::<Vec<_>>();
+        assert_eq!(frame_entries.len(), count + 1);
+        let runs = original
+            .iter()
+            .filter(|e| e["pc"] == 0x420ff0 && e["this"] == pointer)
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), count);
+        assert!(runs.iter().all(|e| e["flags"] == 1));
+        for pc in [0x41f780, 0x41f4d0] {
+            assert_eq!(
+                original
+                    .iter()
+                    .filter(|e| e["pc"] == pc && e["this"] == pointer)
+                    .count(),
+                1
+            );
+        }
+        let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
+        let mut pool = vec![
+            PoolEntry::Str("Lifecycle".into()),
+            PoolEntry::Class(0),
+            PoolEntry::Str("I".into()),
+        ];
+        let mut fields = Vec::new();
+        let mut bodies = Vec::new();
+        for i in 0..count {
+            let slot = pool.len() as u32;
+            pool.push(PoolEntry::Str(format!("f{i}")));
+            fields.push([if static_fields { 0x28 } else { 1 }, slot, 2, i as u32]);
+            bodies.push(vec![n(0x1007, 0x1c), n(0x100b, i as u32 + 11), n(0x10, 0)]);
+        }
+        let file = module(
+            &pool,
+            if static_fields { &fields } else { &[] },
+            if static_fields { &[] } else { &fields },
+            &[u32::MAX, 0, 1, u32::MAX, 0],
+            &bodies,
+        );
+        vm.loader.load_file(&file).unwrap();
+        let object = vm.alloc_object("Lifecycle").unwrap();
+        let events = vm.machine_trace().pending(usize::MAX);
+        let origins = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::ThreadOrigin {
+                    identity,
+                    priority: 10,
+                    flags: 1,
+                    name: observed,
+                } if observed == name => Some(*identity),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            origins.len(),
+            1,
+            "one original temporary thread for {name}/{count}"
+        );
+        let thread = origins[0];
+        let created = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Frame {
+                    thread: owner,
+                    phase: FramePhase::Create,
+                    frame,
+                    ..
+                } if *owner == thread => Some((e.sequence, frame.identity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), frame_entries.len());
+        let entered=events.iter().filter(|e|matches!(e.event,Event::Run{thread:owner,enter:true,flags:1,..}if owner==thread)).count();
+        assert_eq!(entered, runs.len());
+        for i in 0..count {
+            let field = format!("f{i}");
+            let actual = if static_fields {
+                vm.read_loaded_static_field("Lifecycle", &field).unwrap()
+            } else {
+                vm.read_field(object, &field).unwrap()
+            };
+            assert_eq!(actual.payload, i as u32 + 11);
+        }
+        let destroyed = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Frame {
+                    thread: owner,
+                    phase: FramePhase::Destroy,
+                    frame,
+                    ..
+                } if *owner == thread => Some((e.sequence, frame.identity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(destroyed.len(), created.len());
+        let expected_flags = original
+            .iter()
+            .find(|e| e["pc"] == 0x41f4d0 && e["this"] == pointer)
+            .unwrap()["flags"]
+            .as_u64()
+            .unwrap() as u32;
+        let retirement=events.iter().find(|e|matches!(e.event,Event::ThreadRetire{identity,flags}if identity==thread&&flags==expected_flags)).unwrap();
+        assert!(destroyed
+            .iter()
+            .any(|(sequence, _)| *sequence > retirement.sequence));
+        for (field_index, (_, frame)) in created.iter().skip(1).enumerate() {
+            let operations=events.iter().filter(|e|matches!(&e.event,Event::Operand{thread:owner,frame:which,..}if *owner==thread&&which==frame)).collect::<Vec<_>>();
+            let destination = if static_fields {
+                slr_vm::interp::HeapSlot::Static {
+                    context: vm.class_context("Lifecycle").unwrap(),
+                    slot: field_index,
+                }
+            } else {
+                slr_vm::interp::HeapSlot::Object {
+                    word: object,
+                    slot: field_index,
+                }
+            };
+            assert!(
+                matches!(&operations.first().unwrap().event,Event::Operand{action:slr_vm::machine::OperandAction::Push,slot:slr_vm::machine::Operand::Heap(slot),..}if *slot==destination)
+            );
+            assert!(
+                matches!(&operations.last().unwrap().event,Event::Operand{action:slr_vm::machine::OperandAction::Pop,slot:slr_vm::machine::Operand::Heap(slot),..}if *slot==destination)
+            );
+            let store = events
+                .iter()
+                .find(|e| matches!(&e.event,Event::HeapStore{slot,..}if *slot==destination))
+                .unwrap()
+                .sequence;
+            let destroy = destroyed
+                .iter()
+                .find(|(_, identity)| identity == frame)
+                .unwrap()
+                .0;
+            assert!(
+                store < destroy,
+                "source assignment precedes field frame destruction"
+            );
+        }
+        if static_fields {
+            for i in 1..created.len() - 1 {
+                let retirement = destroyed
+                    .iter()
+                    .find(|(_, frame)| *frame == created[i].1)
+                    .unwrap()
+                    .0;
+                assert!(
+                    retirement < created[i + 1].0,
+                    "static field frame retires before next allocation"
+                );
+            }
+        } else if count > 1 {
+            let last = created.last().unwrap().0;
+            assert!(
+                destroyed.iter().all(|(sequence, _)| *sequence > last),
+                "instance field frames survive until thread destructor"
+            );
+        }
+    }
+}
 
 fn n(opword: u16, imm: u32) -> Node {
     Node {
@@ -286,7 +517,10 @@ fn execute_body(
     thread.frames.push(frame);
     thread.pc = pc;
     thread.run(vm, 0., &mut || slr_x87::X87::from_f64(0.))?;
-    thread.pop_deref_with(vm)
+    let cell = thread.pop_deref_with(vm)?;
+    let value = cell.value();
+    thread.release(cell);
+    Ok(value)
 }
 #[test]
 fn resource_initializers_use_the_real_literal_boundary_in_both_drivers() {

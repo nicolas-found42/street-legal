@@ -15,6 +15,7 @@ pub mod format;
 pub mod gc;
 pub mod host;
 pub mod interp;
+pub mod machine;
 pub mod monitor;
 pub mod natives;
 pub mod ops;
