@@ -63,6 +63,7 @@ thread_local! { static WORLD: RefCell<Option<World>> = const { RefCell::new(None
 pub fn configure(config: Option<u32>, init: Option<u32>) {
     crate::native_body::clear();
     crate::native_button::clear();
+    crate::world_scene::clear();
     crate::native_body::with_world_memory(|memory| {
         let manager = crate::native_resource_load::initialize_projection(memory);
         crate::native_resource_manager::initialize(memory, manager);
@@ -401,6 +402,13 @@ pub fn instantiate(
             .ok_or("native instance allocation returned zero")?;
         if w.factory.templates[&requested].native_class.as_deref() == Some("player") {
             crate::engine::player_created(instance.container);
+        }
+        if w.factory.templates[&requested].native_class.as_deref() == Some("camera") {
+            crate::world_scene::created(
+                instance.container,
+                root.container.unwrap_or(0),
+                parameters,
+            )?;
         }
         Ok(Created {
             id: instance.id,

@@ -65,7 +65,7 @@ using the recorded process identity. Such evidence is diagnostic and unverified.
 `frame-presented` means submission through the window surface's present call,
 not physical display scanout or GPU timing-query completion. Frame/input IDs
 join the UI thread to worker records; enqueue time and blocked-send duration
-expose queue delay. CPU-rendered state images use the same offscreen OSD recipe
+expose queue delay. Offscreen state images use the same world and OSD recipe
 at 800×600, rather than screenshots of the compositor's window decorations.
 
 The latest eight distinct state images are retained. Every image's render
@@ -203,6 +203,30 @@ HUD labels, and toolbar geometry. It requires verified local stock.
 
 Camera template registration, native player camera references and loading reset
 now support this script path. Garage toolbar render/body resources use a Tier D
-static OSD projection from the shipped CFG and SCX data. Full 3D garage rendering,
-car control and all garage operations remain outside this scenario's coverage;
+static OSD projection from the shipped CFG and SCX data. Car control and all garage operations remain outside this scenario's coverage;
 this is not native parity acceptance. Stock scripts are unchanged.
+
+## 3D world diagnostics
+
+Garage presentation observes the original native camera creation and its queued
+`render`, `zoom`, `look` and player `camera` commands. `world-camera-created`,
+`world-camera-command` and `world-camera-selected` preserve those inputs and
+identities. The view uses the initial script pose with its stationary look
+reference; native movement/spring dynamics are still outside this projection.
+`world-scene-loaded` identifies the RPK root, material mesh, texture resources,
+surface count and triangle count. `world-mesh-loaded` records attached SCX
+render instances. `asset-alias` records exact-name DDS resolutions for stale
+export PNG paths in stock descriptors; this is a Tier D media projection.
+
+`render-state` / `presentation.json` now include `world_draws` and
+`world_triangles`. The render recipe includes clip-space world vertices, UVs,
+colors and texture identities, so verification detects changed world geometry
+or camera projections. World depth/perspective/alpha cutout and the OSD use the
+same GPU backend for window presentation and retained PNGs. Directional ambient
+and diffuse lighting are projected from the script-created light resource;
+secondary material stages and full fixed-function/native-camera parity remain
+unaccepted.
+
+The stock New Career regression now captures a settled frame and checks pixels
+in the central room area, excluding the HUD and dialogs. It additionally requires
+room plus workshop geometry, so a HUD-only success cannot pass this scenario.

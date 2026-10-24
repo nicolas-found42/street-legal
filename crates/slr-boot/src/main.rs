@@ -46,6 +46,7 @@ mod telemetry;
 mod video;
 mod viewport;
 mod wheel;
+mod world_scene;
 use slr_boot::settings::{Kind, Settings, Source};
 use slr_fmt_rpak::Package;
 use slr_vm::{

@@ -33,6 +33,7 @@ fn original_new_career_enters_garage_and_remains_idle() {
             json!({"tick":tick+2,"event":{"type":"button","pressed":false}}),
         ]);
     }
+    events.push(json!({"tick":400,"capture":true,"event":{"type":"pointer","x":0.5,"y":0.5}}));
     events.push(json!({"tick":20,"event":{"type":"text","text":"DIAG"}}));
     let tape = output.join("events.json");
     std::fs::write(&tape, serde_json::to_vec(&events).unwrap()).unwrap();
@@ -89,6 +90,31 @@ fn original_new_career_enters_garage_and_remains_idle() {
     assert!(
         presentation["draws"].as_u64().unwrap() > labels.len() as u64,
         "native toolbar geometry missing"
+    );
+    assert!(
+        presentation["world_draws"].as_u64().unwrap_or(0) >= 16,
+        "room and attached workshop meshes missing"
+    );
+    assert!(
+        presentation["world_triangles"].as_u64().unwrap_or(0) >= 11000,
+        "garage geometry incomplete"
+    );
+    let (_, room) = slr_fmt_texture::pngdec::decode(
+        &std::fs::read(output.join("runtime/input-401.png")).unwrap(),
+    )
+    .unwrap();
+    let mut visible = 0;
+    let mut samples = 0;
+    for y in room.height / 4..room.height * 3 / 4 {
+        for x in room.width / 4..room.width * 3 / 4 {
+            let pixel = room.pixel(x, y);
+            visible += usize::from(pixel[..3].iter().any(|v| *v > 8));
+            samples += 1;
+        }
+    }
+    assert!(
+        visible > samples / 4,
+        "3D garage room is black: {visible}/{samples} visible pixels"
     );
     assert_eq!(
         serde_json::from_slice::<Value>(

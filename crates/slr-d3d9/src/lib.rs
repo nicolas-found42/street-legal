@@ -1,5 +1,6 @@
 //! Tier-D textured triangle presentation on wgpu. The full D3D9 fixed-function
-//! state emulator remains unfinished; this backend presents the script OSD.
+//! state emulator remains unfinished; this backend presents script-selected world
+//! geometry with depth and perspective textures, then the script OSD.
 use serde_json::json;
 use slr_telemetry::journal;
 use std::{
@@ -23,6 +24,14 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub color: [f32; 4],
 }
+/// Homogeneous clip position retains perspective-correct UV interpolation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct WorldVertex {
+    pub position: [f32; 4],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
 #[derive(Clone)]
 pub struct Image {
     pub width: u32,
@@ -35,6 +44,7 @@ pub struct Frame {
     pub input_id: u64,
     pub images: HashMap<String, Image>,
     pub draws: Vec<(String, Vec<Vertex>)>,
+    pub world_draws: Vec<(String, Vec<WorldVertex>)>,
     pub labels: Vec<String>,
     pub text_bounds: HashMap<String, [f32; 4]>,
 }
@@ -43,6 +53,13 @@ impl Frame {
     pub fn fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
+        for (name, vertices) in &self.world_draws {
+            h.update(b"world");
+            h.update((name.len() as u64).to_le_bytes());
+            h.update(name.as_bytes());
+            h.update((vertices.len() as u64).to_le_bytes());
+            h.update(bytemuck::cast_slice::<WorldVertex, u8>(vertices));
+        }
         for (name, vertices) in &self.draws {
             h.update((name.len() as u64).to_le_bytes());
             h.update(name.as_bytes());
@@ -87,18 +104,28 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    world_pipeline: wgpu::RenderPipeline,
+    world_sampler: wgpu::Sampler,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: HashMap<String, (wgpu::Texture, wgpu::BindGroup)>,
+    textures: HashMap<String, (wgpu::Texture, wgpu::BindGroup, wgpu::BindGroup)>,
 }
 const SHADER: &str = r#"
 struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f, @location(1) color: vec4f }
 @vertex fn vs(@location(0) p:vec2f, @location(1) uv:vec2f, @location(2) color:vec4f) -> V {
  return V(vec4f(p,0.,1.),uv,color);
 }
+@vertex fn vs_world(@location(0) p:vec4f, @location(1) uv:vec2f, @location(2) color:vec4f) -> V {
+ return V(p,uv,color);
+}
 @group(0) @binding(0) var image:texture_2d<f32>;
 @group(0) @binding(1) var samp:sampler;
 @fragment fn fs(v:V)->@location(0) vec4f { return textureSample(image,samp,v.uv)*v.color; }
+@fragment fn fs_world(v:V)->@location(0) vec4f {
+ let color = textureSample(image,samp,v.uv)*v.color;
+ if color.a < 0.01 { discard; }
+ return color;
+}
 "#;
 impl Gpu {
     async fn new(
@@ -197,12 +224,56 @@ impl Gpu {
             multiview: None,
             cache: None,
         });
+        let world_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stock world depth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_world"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<WorldVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x2,2=>Float32x4],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_world"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let world_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Ok(Self {
+            world_pipeline,
+            world_sampler,
             device,
             queue,
             pipeline,
@@ -256,10 +327,85 @@ impl Gpu {
                     },
                 ],
             });
-            self.textures.insert(name.clone(), (texture, binding));
+            let world_binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(name),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.world_sampler),
+                    },
+                ],
+            });
+            self.textures
+                .insert(name.clone(), (texture, binding, world_binding));
         }
     }
-    fn render(&self, view: &wgpu::TextureView, frame: &Frame, encoder: &mut wgpu::CommandEncoder) {
+    fn render(
+        &self,
+        view: &wgpu::TextureView,
+        frame: &Frame,
+        encoder: &mut wgpu::CommandEncoder,
+        size: wgpu::Extent3d,
+    ) {
+        if !frame.world_draws.is_empty() {
+            let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("world depth"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth_view = depth.create_view(&Default::default());
+            let buffers: Vec<_> = frame
+                .world_draws
+                .iter()
+                .map(|(_, v)| {
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("world vertices"),
+                            contents: bytemuck::cast_slice(v),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        })
+                })
+                .collect();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("stock world"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.world_pipeline);
+            for ((name, vertices), buffer) in frame.world_draws.iter().zip(&buffers) {
+                if let Some((_, _, binding)) = self.textures.get(name) {
+                    pass.set_bind_group(0, binding, &[]);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..vertices.len() as u32, 0..1);
+                }
+            }
+        }
         let buffers: Vec<_> = frame
             .draws
             .iter()
@@ -278,7 +424,11 @@ impl Gpu {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: if frame.world_draws.is_empty() {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -288,7 +438,7 @@ impl Gpu {
         });
         pass.set_pipeline(&self.pipeline);
         for ((name, vertices), buffer) in frame.draws.iter().zip(&buffers) {
-            if let Some((_, binding)) = self.textures.get(name) {
+            if let Some((_, binding, _)) = self.textures.get(name) {
                 pass.set_bind_group(0, binding, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..vertices.len() as u32, 0..1);
@@ -324,6 +474,7 @@ impl Gpu {
             &target.create_view(&Default::default()),
             frame,
             &mut encoder,
+            target.size(),
         );
         encoder.copy_texture_to_buffer(
             target.as_image_copy(),
@@ -558,7 +709,7 @@ impl ApplicationHandler for App {
                             gpu.render(
                                 &output.texture.create_view(&Default::default()),
                                 &self.frame,
-                                &mut encoder,
+                                &mut encoder, output.texture.size(),
                             );
                             gpu.queue.submit([encoder.finish()]);
                             output.present();
@@ -677,4 +828,95 @@ fn key_code(key: KeyCode) -> Option<u32> {
         KeyCode::End => 0x23,
         _ => return None,
     })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod world_tests {
+    use super::*;
+    #[test]
+    fn world_depth_and_osd_overlay_use_separate_passes() {
+        let path = std::env::temp_dir().join(format!("slr-world-depth-{}.png", std::process::id()));
+        let mut frame = Frame::default();
+        frame.images.insert(
+            "white".into(),
+            Image {
+                width: 1,
+                height: 1,
+                rgba: Arc::new(vec![255; 4]),
+            },
+        );
+        let triangle = |z, color| {
+            vec![
+                WorldVertex {
+                    position: [-0.9, -0.9, z, 1.],
+                    uv: [0.; 2],
+                    color,
+                },
+                WorldVertex {
+                    position: [0.9, -0.9, z, 1.],
+                    uv: [0.; 2],
+                    color,
+                },
+                WorldVertex {
+                    position: [0., 0.9, z, 1.],
+                    uv: [0.; 2],
+                    color,
+                },
+            ]
+        };
+        // Farther green is submitted last: painter ordering would overwrite red.
+        frame
+            .world_draws
+            .push(("white".into(), triangle(0.2, [1., 0., 0., 1.])));
+        frame
+            .world_draws
+            .push(("white".into(), triangle(0.8, [0., 1., 0., 1.])));
+        frame.draws.push((
+            "white".into(),
+            vec![
+                Vertex {
+                    position: [-0.2, -0.2],
+                    uv: [0.; 2],
+                    color: [0., 0., 1., 1.],
+                },
+                Vertex {
+                    position: [0.2, -0.2],
+                    uv: [0.; 2],
+                    color: [0., 0., 1., 1.],
+                },
+                Vertex {
+                    position: [0., 0.2],
+                    uv: [0.; 2],
+                    color: [0., 0., 1., 1.],
+                },
+            ],
+        ));
+        capture(&frame, &path).unwrap();
+        let mut reader =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
+                .read_info()
+                .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        let pixel = |x, y| {
+            let i = ((y * info.width + x) * 4) as usize;
+            &pixels[i..i + 4]
+        };
+        assert_eq!(
+            pixel(400, 300),
+            [0, 0, 255, 255],
+            "OSD must cover the world"
+        );
+        assert_eq!(
+            pixel(400, 450),
+            [255, 0, 0, 255],
+            "depth must keep the nearer triangle"
+        );
+        assert_eq!(
+            pixel(0, 0),
+            [0, 0, 0, 255],
+            "clear remains black outside geometry"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }
