@@ -99,6 +99,24 @@ fn mouse_keyboard_and_text_drive_unchanged_stock_menu_scripts() {
     let evidence: Value =
         serde_json::from_slice(&std::fs::read(output.join("runtime/input-state.json")).unwrap())
             .unwrap();
+    // Durable input evidence must retain every event, including events that
+    // share a VM frame, and pair each application with its callback outcome.
+    let journal: Vec<Value> = std::fs::read_to_string(output.join("runtime/session-00000.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let applied: Vec<_> = journal
+        .iter()
+        .filter(|row| row["kind"] == "input-apply")
+        .collect();
+    assert_eq!(applied.len(), events.len());
+    for row in applied {
+        assert!(row["context"]["frame"].is_number());
+        assert!(journal.iter().any(|result| result["kind"] == "input-result"
+            && result["data"]["input_id"] == row["sequence"]
+            && result["data"]["error"].is_null()));
+    }
     let history = evidence["history"].as_array().unwrap();
     let at = |tick: u64| -> &Value {
         &history

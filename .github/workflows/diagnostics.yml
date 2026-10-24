@@ -37,6 +37,8 @@ jobs:
       # never touch stock/, so they belong in CI.
       - name: Diagnostic runner tests
         run: python3 -m unittest discover -s re -p "test_boot_diagnose.py" -v
+      - name: Interactive diagnostic runner tests
+        run: python3 -m unittest discover -s re -p "test_menu_diagnose.py" -v
       - name: Telemetry crate tests
         run: cargo test -p slr-telemetry -p slr-io -p slr-game
       # Proves the archive tooling works from a clean checkout: an empty index

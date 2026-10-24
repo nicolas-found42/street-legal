@@ -1,5 +1,7 @@
 //! Tier-D textured triangle presentation on wgpu. The full D3D9 fixed-function
 //! state emulator remains unfinished; this backend presents the script OSD.
+use serde_json::json;
+use slr_telemetry::journal;
 use std::{
     collections::HashMap,
     path::Path,
@@ -29,10 +31,31 @@ pub struct Image {
 }
 #[derive(Default)]
 pub struct Frame {
+    pub id: u64,
+    pub input_id: u64,
     pub images: HashMap<String, Image>,
     pub draws: Vec<(String, Vec<Vertex>)>,
     pub labels: Vec<String>,
     pub text_bounds: HashMap<String, [f32; 4]>,
+}
+impl Frame {
+    /// Stable image recipe hash, excluding host timing, frame IDs and GPU state.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for (name, vertices) in &self.draws {
+            h.update((name.len() as u64).to_le_bytes());
+            h.update(name.as_bytes());
+            h.update((vertices.len() as u64).to_le_bytes());
+            h.update(bytemuck::cast_slice::<Vertex, u8>(vertices));
+        }
+        format!("{:x}", h.finalize())
+    }
+}
+#[derive(Clone, Debug)]
+pub struct PlatformInput {
+    pub source_id: u64,
+    pub event: InputEvent,
 }
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -90,6 +113,10 @@ impl Gpu {
             })
             .await
             .map_err(|e| e.to_string())?;
+        journal::emit(
+            "gpu-adapter",
+            json!({"info":format!("{:?}",adapter.get_info())}),
+        )?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("stock OSD"),
@@ -97,6 +124,20 @@ impl Gpu {
             })
             .await
             .map_err(|e| e.to_string())?;
+        device.on_uncaptured_error(Box::new(|error| {
+            let _ = journal::emit("gpu-error", json!({"error":error.to_string()}));
+            panic!("wgpu: {error}");
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            let _ = journal::emit(
+                if matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+                    "gpu-device-destroyed"
+                } else {
+                    "gpu-device-lost"
+                },
+                json!({"reason":format!("{reason:?}"),"message":message}),
+            );
+        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -343,7 +384,32 @@ struct App {
     frame: Frame,
     error: Option<String>,
     presented: bool,
-    input: mpsc::Sender<InputEvent>,
+    input: mpsc::Sender<PlatformInput>,
+    last_presented: u64,
+    last_heartbeat: std::time::Instant,
+    last_received: std::time::Instant,
+    stalled: bool,
+}
+impl App {
+    fn send_input(&mut self, event: InputEvent) {
+        let result = journal::emit(
+            "input-received",
+            json!({"event":event,"window_id":self.window.as_ref().map(|w|format!("{:?}",w.id())),"drawable":self.config.as_ref().map(|c|[c.width,c.height]),"scale_factor":self.window.as_ref().map(|w|w.scale_factor())}),
+        );
+        match result {
+            Ok(source_id) => {
+                if let Err(e) = self.input.send(PlatformInput { source_id, event }) {
+                    self.error = Some(e.to_string());
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+    fn note(&mut self, kind: &str, data: serde_json::Value) {
+        if let Err(e) = journal::emit(kind, data) {
+            self.error = Some(e);
+        }
+    }
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -381,6 +447,7 @@ impl ApplicationHandler for App {
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&gpu.device, &config);
+            self.note("window-created",json!({"width":size.width,"height":size.height,"scale_factor":window.scale_factor(),"present_mode":"fifo","format":"bgra8unorm"}));
             self.surface = Some(surface);
             self.gpu = Some(gpu);
             self.config = Some(config);
@@ -395,14 +462,21 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                let _ = self.input.send(InputEvent::Close);
+                self.send_input(InputEvent::Close);
+            }
+            WindowEvent::Focused(true) => self.note("window-focus", json!({"focused":true})),
+            WindowEvent::CursorLeft { .. } => {
+                self.send_input(InputEvent::Pointer { x: -1., y: -1. })
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.note("window-scale", json!({"scale_factor":scale_factor}))
             }
             WindowEvent::Focused(false) => {
-                let _ = self.input.send(InputEvent::FocusLost);
+                self.send_input(InputEvent::FocusLost);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(config) = &self.config {
-                    let _ = self.input.send(InputEvent::Pointer {
+                    self.send_input(InputEvent::Pointer {
                         x: position.x as f32 / config.width as f32,
                         y: position.y as f32 / config.height as f32,
                     });
@@ -413,15 +487,20 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                let _ = self.input.send(InputEvent::Button {
+                self.send_input(InputEvent::Button {
                     pressed: state == ElementState::Pressed,
                 });
             }
+            WindowEvent::MouseInput {state,button,..}=>self.note("input-ignored-native",json!({"reason":"unsupported-mouse-button","button":format!("{button:?}"),"state":format!("{state:?}")})),
+            WindowEvent::MouseWheel {delta,..}=>self.note("input-ignored-native",json!({"reason":"unsupported-wheel","delta":format!("{delta:?}")})),
+            WindowEvent::Touch(touch)=>self.note("input-ignored-native",json!({"reason":"unsupported-touch","detail":format!("{touch:?}")})),
+            WindowEvent::ModifiersChanged(modifiers)=>self.note("keyboard-modifiers",json!({"state":format!("{modifiers:?}")})),
             WindowEvent::KeyboardInput { event, .. } => {
+                self.note("keyboard-native",json!({"physical":format!("{:?}",event.physical_key),"logical":format!("{:?}",event.logical_key),"state":format!("{:?}",event.state),"text":event.text.as_ref().map(|text|text.as_str()),"repeat":event.repeat}));
                 if event.state == ElementState::Pressed {
                     if let Some(text) = &event.text {
                         if text.chars().any(|c| !c.is_control()) {
-                            let _ = self.input.send(InputEvent::Text {
+                            self.send_input(InputEvent::Text {
                                 text: text.to_string(),
                             });
                         }
@@ -429,7 +508,7 @@ impl ApplicationHandler for App {
                 }
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if let Some(code) = key_code(key) {
-                        let _ = self.input.send(InputEvent::Key {
+                        self.send_input(InputEvent::Key {
                             code,
                             pressed: event.state == ElementState::Pressed,
                             repeat: event.repeat,
@@ -438,6 +517,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                self.note(
+                    "window-resize",
+                    json!({"width":size.width,"height":size.height}),
+                );
                 if let (Some(config), Some(surface), Some(gpu)) =
                     (&mut self.config, &self.surface, &self.gpu)
                 {
@@ -446,10 +529,13 @@ impl ApplicationHandler for App {
                     surface.configure(&gpu.device, config);
                 }
             }
+            WindowEvent::Resized(size)=>self.note("window-zero-size",json!({"width":size.width,"height":size.height})),
             WindowEvent::RedrawRequested => {
                 while let Ok(message) = self.rx.try_recv() {
                     match message {
                         Message::Frame(frame) => {
+                            self.last_received = std::time::Instant::now();
+                            self.stalled = false;
                             if let Some(gpu) = &mut self.gpu {
                                 gpu.upload(&frame);
                             }
@@ -476,17 +562,36 @@ impl ApplicationHandler for App {
                             );
                             gpu.queue.submit([encoder.finish()]);
                             output.present();
+                            if self.last_presented != self.frame.id {
+                                let result = journal::emit(
+                                    "frame-presented",
+                                    json!({"frame_id":self.frame.id,"input_id":self.frame.input_id,"recipe_sha256":self.frame.fingerprint(),"drawable":self.config.as_ref().map(|c|[c.width,c.height])}),
+                                );
+                                if let Err(e) = result {
+                                    self.error = Some(e);
+                                    el.exit();
+                                }
+                                self.last_presented = self.frame.id;
+                            }
                             if !self.presented && !self.frame.draws.is_empty() {
                                 println!("WINDOW presented stock menu to visible surface");
                                 self.presented = true;
                             }
                         }
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            let _ = journal::emit(
+                                "surface-reconfigure",
+                                json!({"frame_id":self.frame.id}),
+                            );
                             if let Some(config) = &self.config {
                                 surface.configure(&gpu.device, config);
                             }
                         }
                         Err(e) => {
+                            self.note(
+                                "surface-error",
+                                json!({"error":e.to_string(),"frame_id":self.frame.id}),
+                            );
                             self.error = Some(e.to_string());
                             el.exit();
                         }
@@ -496,14 +601,35 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.error.is_some() {
+            el.exit();
+        }
+        if self.last_heartbeat.elapsed().as_secs() >= 1 {
+            self.note("ui-heartbeat",json!({"last_frame_id":self.last_presented,"worker_silence_ms":self.last_received.elapsed().as_millis()}));
+            self.last_heartbeat = std::time::Instant::now();
+            if !self.stalled
+                && self.last_presented != 0
+                && self.last_received.elapsed().as_secs() >= 5
+            {
+                self.stalled = true;
+                self.note("worker-stall", json!({"last_frame_id":self.last_presented}));
+                if let Some(root) = journal::root() {
+                    let result = capture(&self.frame, &root.join("stall.png"));
+                    self.note(
+                        "incident-image",
+                        json!({"path":"stall.png","error":result.err(),"frame_id":self.frame.id}),
+                    );
+                }
+            }
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 }
 pub fn window(
-    worker: impl FnOnce(mpsc::SyncSender<Message>, mpsc::Receiver<InputEvent>) + Send + 'static,
+    worker: impl FnOnce(mpsc::SyncSender<Message>, mpsc::Receiver<PlatformInput>) + Send + 'static,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -520,8 +646,16 @@ pub fn window(
         error: None,
         presented: false,
         input,
+        last_presented: 0,
+        last_heartbeat: std::time::Instant::now(),
+        last_received: std::time::Instant::now(),
+        stalled: false,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
+    journal::emit(
+        "ui-exit",
+        json!({"error":app.error,"last_frame_id":app.last_presented}),
+    )?;
     app.error.map_or(Ok(()), Err)
 }
 

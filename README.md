@@ -17,7 +17,9 @@ cargo run -p slr-boot -- stock --window
 The exact port displays the main menu using stock textures and fonts. Mouse
 clicks, arrow keys, Enter/Space, Escape and name entry drive the unchanged stock
 scripts. The animated 3D background, audio and full gameplay remain unfinished. See
-[slr-boot](crates/slr-boot/README.md) for captures and limitations.
+[slr-boot](crates/slr-boot/README.md) for captures and limitations. Window launches
+automatically archive inputs, script state and presentation evidence; see
+[session diagnostics](docs/menu-diagnostics.md) for historical replay and verification.
 
 ## Run the approximate slice
 

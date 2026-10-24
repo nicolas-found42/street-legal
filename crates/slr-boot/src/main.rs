@@ -943,11 +943,11 @@ fn run(
             break;
         }
         let started = std::time::Instant::now();
+        slr_vm::diagnostics::set_frame(Some(frame));
         live_input::poll(vm)?;
         if live_input::closed() {
             break;
         }
-        slr_vm::diagnostics::set_frame(Some(frame));
         telemetry::detail("frame-enter", vec![("frame".into(), frame.to_string())]);
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
         pump.tick(vm).map_err(|f| {
@@ -973,7 +973,15 @@ fn run(
             engine::set_frame_dt(seconds);
         }
         telemetry::detail("frame-exit", vec![("frame".into(), frame.to_string())]);
-        telemetry::snapshot(vm, "frame-end", None)?;
+        if std::env::var_os("SLR_SESSION_CAPTURE").is_none() || frame % 60 == 0 {
+            telemetry::snapshot(vm, "frame-end", None)?;
+        }
+        if frame % 60 == 0 {
+            slr_telemetry::journal::emit(
+                "worker-heartbeat",
+                serde_json::json!({"frame":frame,"input_id":live_input::input_id(),"step_ns":started.elapsed().as_nanos()}),
+            )?;
+        }
         telemetry::check()?;
         if let Some(error) = sched::replay_error() {
             return Err(error);
@@ -1207,6 +1215,9 @@ fn execute() -> Result<(), String> {
         trace_level == "full",
         wall_clock,
     )?;
+    if presentation::enabled() {
+        slr_telemetry::journal::configure(&output, &run_id)?;
+    }
     telemetry::target_native(snapshot_native);
     slr_telemetry::install_panic_hook(slr_telemetry::crash_context);
     println!("BOOT diagnostics {}", output.display());
@@ -1274,6 +1285,14 @@ fn execute() -> Result<(), String> {
     .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
     if let Err(error) = &outcome {
         telemetry::snapshot(&vm, "failure", Some(error))?;
+        if presentation::enabled() {
+            presentation::failure_state(&vm)?;
+            let capture = presentation::capture(&vm, &output.join("failure.png"));
+            slr_telemetry::journal::emit(
+                "incident-image",
+                serde_json::json!({"path":"failure.png","error":capture.err()}),
+            )?;
+        }
     } else {
         telemetry::snapshot(&vm, "completed", None)?;
     }
@@ -1296,6 +1315,37 @@ fn execute() -> Result<(), String> {
 }
 
 fn main() {
+    // Supervise normal window launches so UI failures and hard exits still leave
+    // an indexed bundle. Headless parity execution keeps its existing path.
+    if std::env::args().any(|arg| arg == "--window")
+        && std::env::var_os("SLR_SESSION_CAPTURE").is_none()
+    {
+        let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../re/menu-diagnose.py");
+        let status = std::process::Command::new("python3")
+            .arg(runner)
+            .arg("record")
+            .arg("--binary")
+            .arg(std::env::current_exe().expect("current binary"))
+            .arg("--")
+            .args(std::env::args().skip(1))
+            .status();
+        match status {
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!("SessionRunnerBoundary: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+    if let (Some(root), Ok(run_id)) = (
+        std::env::var_os("SLR_SESSION_RUNTIME"),
+        std::env::var("SLR_SESSION_RUN_ID"),
+    ) {
+        if let Err(e) = slr_telemetry::journal::configure(Path::new(&root), &run_id) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
     let outcome = if std::env::args().any(|arg| arg == "--window") {
         slr_d3d9::window(|sender, input| {
             live_input::connect(input);

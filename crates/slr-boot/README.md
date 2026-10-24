@@ -6,6 +6,12 @@ From the repository root on macOS:
 cargo run -p slr-boot -- stock --window
 ```
 
+Normal window launches automatically archive an indexed diagnostic bundle under
+`re/out/menu/runs/` (Python 3 required). The terminal prints its path. Complete
+input tapes can be replayed and checked with `re/menu-diagnose.py`; see
+[interactive diagnostics](../../docs/menu-diagnostics.md). With `--window`,
+`--output PATH` selects the bundle directory and streams live in `PATH/runtime/`.
+
 This opens an 800×600 window through winit/wgpu (Metal). The unchanged stock
 scripts build MainMenu; the presentation adapter reads their live rectangle,
 text, camera and group state and renders the stock textures and font meshes.
