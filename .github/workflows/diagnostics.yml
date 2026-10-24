@@ -31,8 +31,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests
-        run: cargo test --workspace
+      # Show explicit optional-fixture skips in CI output. The local strict
+      # mode (SLR_REQUIRE_ORACLE_FIXTURES=1) requires the covered local fixtures.
+      - name: Tests (fixture-free, no parity claim)
+        run: cargo test --workspace -- --show-output
       # The runner's own unit and end-to-end tests use a fake child process and
       # never touch stock/, so they belong in CI.
       - name: Diagnostic runner tests

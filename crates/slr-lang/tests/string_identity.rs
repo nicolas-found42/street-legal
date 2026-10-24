@@ -456,6 +456,17 @@ fn stock_string_token_wrapper_passes_index_and_separator_to_native() {
     use slr_vm::{interp::Thread, values::Value};
     use slr_x87::X87;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    match std::fs::metadata(root.join("stock")) {
+        Ok(metadata) => assert!(metadata.is_dir(), "stock must be a directory"),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("SLR_REQUIRE_ORACLE_FIXTURES").is_none() =>
+        {
+            eprintln!("SKIP: local stock String classes unavailable");
+            return;
+        }
+        Err(error) => panic!("required/readable stock directory: {error}"),
+    }
     let mut vm = VmHost::new();
     for name in ["Object", "Native", "String"] {
         let data = std::fs::read(root.join(format!("stock/system/Scripts/lang/{name}.class")))

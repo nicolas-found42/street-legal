@@ -358,6 +358,9 @@ mod worker_tests {
     fn original_worker_priority_cache_ranges_failures_and_callback_order_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-file-worker-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: Value = serde_json::from_slice(
             &std::fs::read(path).expect("run re/oracle/native_file_worker_probe.py first"),
         )
@@ -735,6 +738,9 @@ mod range_tests {
     fn original_range_request_allocation_publication_and_length_result_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-file-range-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("run native_file_range_probe.py"))
                 .unwrap();

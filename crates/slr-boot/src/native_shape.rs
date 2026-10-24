@@ -657,6 +657,9 @@ mod synchronous_tests {
     fn original_synchronous_mesh_queue_lifecycle_and_retry_pass_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-shape-sync-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let bytes = std::fs::read(path).expect("run native_shape_sync_probe.py");
         let data: Value = serde_json::from_slice(&bytes).unwrap();
         for row in data["rows"].as_array().unwrap() {

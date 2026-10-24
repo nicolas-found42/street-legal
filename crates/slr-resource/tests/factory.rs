@@ -351,6 +351,18 @@ fn append_child_original_rows() {
 fn type8_lod_scalar_parser_matches_original_words_and_inheritance() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../re/out/boot/gametype-lod-original.json");
+    match std::fs::metadata(&path) {
+        Ok(metadata) => assert!(metadata.is_file(), "oracle fixture must be a file"),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("SLR_REQUIRE_ORACLE_FIXTURES").is_none() =>
+        {
+            eprintln!("SKIP: local oracle unavailable at {}; set SLR_REQUIRE_ORACLE_FIXTURES=1 to require it", path.display());
+            return;
+        }
+        Err(error) => panic!("required/readable oracle {}: {error}", path.display()),
+    }
+
     let fixture: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).expect("run re/oracle/gametype_lod_probe.py"))
             .unwrap();

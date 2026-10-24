@@ -182,6 +182,9 @@ mod tests {
 
     #[test]
     fn stock_finalize_runs_on_scoped_thread_and_cannot_leave_a_monitor_waiter() {
+        let Some(_) = crate::oracle_fixture::stock_root() else {
+            return;
+        };
         slr_lang::thread::reset();
         CALLS.with(|calls| calls.borrow_mut().clear());
         let (mut vm, word) = stock_file();

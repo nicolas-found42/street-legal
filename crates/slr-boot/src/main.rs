@@ -1438,6 +1438,9 @@ mod tests {
         use slr_vm::vmclass::{Class, Field};
         let oracle =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../re/out/boot/openlib-header.json");
+        let Some(oracle) = crate::oracle_fixture::file(&oracle) else {
+            return;
+        };
         let row: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(oracle)
                 .expect("generate re/oracle/openlib_header_probe.py output first"),
@@ -1678,3 +1681,6 @@ mod tests {
         slr_resource::node::with_res(|h| assert_eq!(h.node(ptr).unwrap().id, 0));
     }
 }
+
+#[cfg(test)]
+mod oracle_fixture;

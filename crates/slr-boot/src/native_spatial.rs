@@ -370,6 +370,9 @@ mod request_tests {
     fn original_request_pool_and_physics_scheduling_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-spatial-request-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let bytes = std::fs::read(path).expect("run native_spatial_request_probe.py");
         let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let manager = data["manager"].as_u64().unwrap() as u32;
@@ -620,6 +623,9 @@ mod index_tests {
     fn original_spatial_resource_tree_relocation_matches() {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-spatial-index-original.json");
+        let Some(p) = crate::oracle_fixture::file(&p) else {
+            return;
+        };
         let data: serde_json::Value =
             serde_json::from_slice(&std::fs::read(p).expect("run native_spatial_index_probe.py"))
                 .unwrap();
@@ -895,6 +901,9 @@ mod queue_tests {
     fn original_spatial_queue_refresh_and_consumption_match() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/native-spatial-queue-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
         let data: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).expect("run native_spatial_queue_probe.py"),
         )

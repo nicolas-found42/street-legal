@@ -365,3 +365,33 @@ provide full memory rewind, establish real-device fidelity, or establish boot
 parity without the complete oracle comparison. The frontend does not run the
 original VM, so its native call log stays an empty valid header; its value is
 the gameplay state history and the crash record, not script parity.
+
+## Optional local oracle captures in workspace tests
+
+GitHub CI does not contain licensed installs or original-derived captures. The
+passive clock/timer tests use the local capture directory
+`re/out/headless/clock-investigation/menu1800M/`. They print an explicit `SKIP:`
+when that directory is absent. An existing directory is always passed to the
+strict loaders: missing member files, malformed manifests, digest failures and
+invalid provenance remain failures. Runtime replay loading has no skip policy.
+The parser's hash-tampering regression uses synthetic test data and runs in CI.
+
+The boot unit tests also check local `re/out/boot/` vectors individually and
+stock-dependent unit tests require `stock/`. These tests skip only absent
+fixtures; installed files are still read and parsed normally. Both process
+capture integration tests use the existing verified-stock availability check.
+
+Require the fixtures covered by this policy during a local oracle check:
+
+```sh
+SLR_REQUIRE_ORACLE_FIXTURES=1 cargo test --workspace
+```
+
+Any value of `SLR_REQUIRE_ORACLE_FIXTURES` enables this requirement for those
+unit tests converted to this policy (passive clock/timer, boot vectors, and
+stock callback/finalizer tests). Controller mapping, LOD, GC, string addition,
+and stock String wrapper tests also honor this flag. This test-only flag does
+not change older optional suites or integration availability checks; it does not establish
+that every oracle suite has run.
+CI's workspace command uses `--show-output` so its fixture skips are visible.
+A green fixture-free CI job verifies code/tests, not stock parity.

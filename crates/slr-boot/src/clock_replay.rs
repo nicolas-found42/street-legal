@@ -840,16 +840,34 @@ mod tests {
         );
     }
     #[test]
+    fn incomplete_capture_still_fails_strict_runtime_loaders() {
+        let temp =
+            std::env::temp_dir().join(format!("slr-clock-incomplete-{}", std::process::id()));
+        fs::create_dir_all(&temp).unwrap();
+        let tape = temp.join("clock-inputs.jsonl");
+        assert!(Replay::load(&tape).is_err());
+        assert!(crate::frame_timer::FrameTimerReplay::load_companion(&tape).is_err());
+        fs::write(temp.join("clock-verification.json"), b"corrupt manifest").unwrap();
+        assert!(Replay::load(&tape).is_err());
+        fs::remove_dir_all(temp).unwrap();
+    }
+    #[test]
     fn parser_rejects_role_caller_disagreement_and_hash_tampering() {
         assert!(Sample::parse(&json!({"caller":0x428a5b,"role":"ThreadEnter"})).is_err());
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../re/out/headless/clock-investigation/menu1800M");
+
         let temp =
             std::env::temp_dir().join(format!("slr-clock-replay-hash-{}", std::process::id()));
         fs::create_dir_all(&temp).unwrap();
-        fs::copy(
-            base.join("clock-verification.json"),
+        // Synthetic provenance is sufficient: the loader must reject the
+        // digest before it could read passive source facts or clock results.
+        fs::write(
             temp.join("clock-verification.json"),
+            serde_json::to_vec(&json!({
+                "truncated":false,"pending_clocks":0,"context_errors":[],
+                "events":1,"event_limit":1,
+                "files":{"clock-inputs.jsonl":{"sha256":digest(b"untampered input"),"bytes":b"untampered input".len()}}
+            }))
+            .unwrap(),
         )
         .unwrap();
         fs::write(temp.join("clock-inputs.jsonl"), b"changed capture").unwrap();
@@ -859,8 +877,9 @@ mod tests {
     }
     #[test]
     fn earliest_capture_boundary_recomputes_all_original_clock_inputs() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../re/out/headless/clock-investigation/menu1800M");
+        let Some(base) = crate::oracle_fixture::clock_capture() else {
+            return;
+        };
         let mut replay = Replay::load(base.join("clock-inputs.jsonl"))
             .expect("local original replay capture required");
         let selected = replay.select_start().unwrap();
@@ -914,8 +933,9 @@ mod tests {
     }
     #[test]
     fn original_capture_loads_and_counter_arithmetic_matches_reference_through_menu() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../re/out/headless/clock-investigation/menu1800M");
+        let Some(base) = crate::oracle_fixture::clock_capture() else {
+            return;
+        };
         let mut replay = Replay::load(base.join("clock-inputs.jsonl"))
             .expect("local original replay capture required");
         let selected = replay.select_after_game_init().unwrap();
