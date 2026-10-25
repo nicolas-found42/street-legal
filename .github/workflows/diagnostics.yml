@@ -21,6 +21,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Coverage tooling dependencies
+        run: python3 -m pip install -r re/coverage/requirements.txt
+      - name: Acceptance validator tests (data-free)
+        run: python3 acceptance/selftest.py
+      - name: Coverage inventory tests (data-free)
+        run: python3 re/coverage/test_inventory.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
