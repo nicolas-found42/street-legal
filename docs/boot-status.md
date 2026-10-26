@@ -7,6 +7,50 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
+### 2026-10-26: strict 331-frame replay matches 7,001 records
+
+On `claude/native-vm-raw-runtime-f0ad55`, the strict clock replay
+(`--frames 331 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`)
+matches 7,001 unfiltered / 4,892 filtered records with no ABI-guard
+rejections. Its first divergence is a latched clock-context mismatch at
+unfiltered #7002: the tape expects a `THRD-RUNVMI Dummy.handleEvent`
+(`java.render.Group`) callback where the port runs `Osd.animate`. That is
+consistent with the skipped car native drive `0x454500` (below), which the
+original runs at frame 31. The four stock integration tests pass. Changes:
+
+- **Record 647 was a queue regression, not the ABI guard.** The raw-native
+  checkpoint made `sched::run_callback` destroy a finished void callback at
+  once. The original clock tape (request 6224) shows the driver cursor on a
+  STOPPED `THRD-RUNVMI Controller.setcontrol` thread: the original keeps
+  finished void callbacks queued until the driver kills and reaps them, as
+  `main` did. Finished void callbacks now stay queued and the reaper retires
+  them. A latched replay divergence now leads the failure text.
+- **Audited nested-native admission** (`native_nested.rs`). Inside a script
+  callback entered from a validated 425a90 wrapper CALL (return PC 427111
+  animate, 426da3 control or 447c41 car add-part, with its fixed argument
+  words, nothing entered since), the ABI guard admits only natives whose
+  production implementation is audited not to touch native memory:
+  `Input.lastKey`, `System.currentTime`, `System.arraycopy`,
+  `GameRef.getScriptInstance`, `RenderRef.setMatrix(Vector3;Ypr)`,
+  `Vector3.length`, `String.length`, `String.append(I)`,
+  `ResourceRef.newNative/set/cache/destroy`, `Text.update/changeColor` and
+  `SfxRef.nplay`. The car add-part port now makes the original CALL from
+  447c3c. Every other nested native stays rejected.
+- **Unported native class callbacks are skipped as on main** and recorded as
+  `native-callback-skipped`: the car drive `0x454500` and the raw cursor's
+  animate pick (461d20 through 4fdc40/516c20), which needs renderer/camera
+  lists headless boot does not construct.
+
+Not modelled by the admission: the original's 0x530 bytes of wrapper,
+4255e0/41fbc0 interpreter and native-wrapper frames between the 425a90 entry
+and the native CALL, and the admitted natives' own stack scratch writes. This
+is call-log and result parity for those natives, not ABI-exact execution. The
+raw runtime (`native_vm_*`) remains unwired in production (#110).
+
+New diagnostics (`docs/diagnostics.md`): `frame-phase`, `scheduler-decision`,
+`script-callback-enter`/`-return`, `native-abi-boundary`,
+`native-nested-admitted` and `native-callback-skipped`.
+
 Last updated: 2026-10-24, garage room on `codex/garage-room-rendering`.
 
 The original New Career script path now displays the actual stock 3D garage:

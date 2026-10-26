@@ -287,7 +287,35 @@ impl native_install::Host for Runtime<'_> {
                 ))
             }
         };
-        self.callback(m, |vm| engine::call_script(vm, script, method, &args))
+        let scope = |validated| crate::native_diagnostics::Scope {
+            kind: "command",
+            envelope,
+            script,
+            method: method.into(),
+            validated,
+        };
+        if !crate::native_stack::has_pending_call(m) {
+            // No modelled 425a90 CALL at this site: nested natives stay rejected.
+            return self.callback(m, |vm| {
+                crate::native_nested::within(None, || {
+                    crate::native_diagnostics::script_callback(scope(false), || {
+                        engine::call_script(vm, script, method, &args)
+                    })
+                })
+            });
+        }
+        // Enter the 425a90 frame the caller's CALL left pending.
+        crate::native_stack::function_cdecl(m, &[], |m| {
+            let entered = crate::native_nested::validate(m, envelope);
+            let scope = scope(entered.is_some());
+            self.callback(m, |vm| {
+                crate::native_nested::within(entered, || {
+                    crate::native_diagnostics::script_callback(scope, || {
+                        engine::call_script(vm, script, method, &args)
+                    })
+                })
+            })
+        })
     }
     fn vm_class(&mut self, _m: &mut Space, name: &str) -> Result<u32, String> {
         self.vm

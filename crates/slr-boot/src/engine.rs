@@ -1209,7 +1209,21 @@ impl crate::native_frame::Host for Drive<'_> {
         envelope: u32,
     ) -> Result<(), String> {
         let script = m.r32(envelope + 0x50);
-        crate::native_body::during_vm_callback(m, || call_script(self.vm, script, "drive", &[]))
+        // The drive wrapper site is not validated: nested natives stay rejected.
+        let scope = crate::native_diagnostics::Scope {
+            kind: "drive",
+            envelope,
+            script,
+            method: "drive".into(),
+            validated: false,
+        };
+        crate::native_body::during_vm_callback(m, || {
+            crate::native_nested::within(None, || {
+                crate::native_diagnostics::script_callback(scope, || {
+                    call_script(self.vm, script, "drive", &[])
+                })
+            })
+        })
     }
 }
 impl crate::native_frame::CallbackHost for Drive<'_> {
@@ -1289,7 +1303,21 @@ impl crate::native_frame::CallbackHost for Drive<'_> {
         } else {
             "animate"
         };
-        crate::native_body::during_vm_callback(m, || call_script(self.vm, script, method, &args))
+        let entered = crate::native_nested::validate(m, envelope);
+        let scope = crate::native_diagnostics::Scope {
+            kind: method,
+            envelope,
+            script,
+            method: method.into(),
+            validated: entered.is_some(),
+        };
+        crate::native_body::during_vm_callback(m, || {
+            crate::native_nested::within(entered, || {
+                crate::native_diagnostics::script_callback(scope, || {
+                    call_script(self.vm, script, method, &args)
+                })
+            })
+        })
     }
 }
 

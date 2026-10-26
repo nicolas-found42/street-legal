@@ -40,6 +40,7 @@ mod native_matrix_interval;
 mod native_mesh_inertia;
 mod native_mesh_resource;
 mod native_message;
+mod native_nested;
 mod native_notifications;
 mod native_part;
 mod native_player;
@@ -542,6 +543,15 @@ fn frame_phase(frame: u64, phase: &str, edge: &str) {
 
 fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
     if native_body::has_active_native_frame() {
+        let admitted = native_body::inspect_world_memory(|m| {
+            native_nested::admits(m, info.class, info.name, info.sig)
+        })
+        .unwrap_or(false);
+        if admitted {
+            native_diagnostics::admitted(info.class, info.name, info.sig);
+            return Ok(());
+        }
+        native_diagnostics::boundary(info.class, info.name, info.sig, "nested-native");
         return Err("NativeAbiBoundary: nested VM native entry requires the original callback/interpreter/wrapper CALL context".into());
     }
     if info.class == "java.lang.GameType"

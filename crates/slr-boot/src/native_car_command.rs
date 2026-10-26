@@ -788,8 +788,20 @@ impl Install<'_> {
                 }
                 let cell = self.host.vm_field(self.m, object, "ptr")?;
                 self.m.w32(cell + 8, link);
-                self.host
-                    .script(self.m, data, "addpart", &[0, 4, object, 0x4f])?;
+                // 447c2d-447c3c: the actual 425a90 CALL with its pushed words,
+                // when the caller's native frame is modelled on the stack.
+                let host = &mut *self.host;
+                if crate::native_stack::active(self.m) {
+                    crate::native_stack::call(
+                        self.m,
+                        0x447c41,
+                        &[data, 0x610000, 0, 4, object, 0x4f],
+                        None,
+                        |m| host.script(m, data, "addpart", &[0, 4, object, 0x4f]),
+                    )?;
+                } else {
+                    host.script(self.m, data, "addpart", &[0, 4, object, 0x4f])?;
+                }
             }
         }
         let wheel_record = self.slot_record(k, body, 0x191);
