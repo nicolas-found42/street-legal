@@ -1,0 +1,16 @@
+[package]
+name = "x87-target-diagnostic"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license-file = "LICENSE"
+
+# Deliberately excluded from the production workspace and dependency graph.
+[workspace]
+
+[build-dependencies]
+cc = "1"
+
+# SoftFloat INLINE_LEVEL=5 expects optimized C inlining, like the main build.
+[profile.dev]
+opt-level = 1

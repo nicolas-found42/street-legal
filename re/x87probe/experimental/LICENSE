@@ -1,0 +1,13 @@
+Diagnostic extraction only. The Bochs-derived intel_trig.rs retains its
+per-file SoftFloat Release 2b derivative notice verbatim. No relicensing
+as MIT/Apache is claimed. Other adapter code follows the repository license.
+The shared Berkeley SoftFloat 3e vendor tree retains its own BSD notice.
+
+Upstream Bochs license clarification:
+The following points clarify the Bochs license:
+
+1) Bochs as a whole is released under the GNU Lesser General Public License
+
+2) Parts of Bochs have specific licenses which are compatible with the
+   GNU Lesser General Public License. Hence each source file contains its
+   own licensing information.
