@@ -1553,6 +1553,14 @@ fn execute() -> Result<(), String> {
     })
 }
 
+    // A latched clock-replay divergence precedes any later failure in the
+    // same frame; report it first instead of the downstream symptom.
+    let outcome = match (outcome, sched::replay_error()) {
+        (Err(error), Some(replay)) if !error.contains(&replay) => Err(format!(
+            "ClockReplayBoundary (first divergence): {replay}; later failure: {error}"
+        )),
+        (outcome, _) => outcome,
+    };
 fn main() {
     // Supervise normal window launches so UI failures and hard exits still leave
     // an indexed bundle. Headless parity execution keeps its existing path.

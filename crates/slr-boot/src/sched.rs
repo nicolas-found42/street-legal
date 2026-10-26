@@ -580,21 +580,20 @@ pub fn run_callback(
     })();
     let retained = result.is_ok() && !request_return && dispatched == Some(Flow::Stay);
     if retained {
+        // A void callback stays queued even when it finished: the original
+        // clock tape's driver cursor reaches a STOPPED THRD-RUNVMI thread.
+        // The driver marks it dead and its reaper runs the destructor.
         with_threads(|host| {
             host.queues_mut().get_mut(id).flags = thread.flags;
             host.set_current(outer);
         });
-        if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
-            cache_clock_thread(vm, id, &thread);
-            INTERP.with(|threads| {
-                threads.borrow_mut().insert(id, thread);
-            });
-            CURRENT.with(|current| current.set(outer));
-            return Ok(None);
-        }
+        cache_clock_thread(vm, id, &thread);
+        INTERP.with(|threads| {
+            threads.borrow_mut().insert(id, thread);
+        });
+        CURRENT.with(|current| current.set(outer));
+        return Ok(None);
     }
-    // A completed void callback takes the same destructor path as a protected
-    // return callback. Only an actual suspended continuation remains queued.
     if result.is_ok() {
         if let Err(error) = thread.retire() {
             result = Err(error);
@@ -814,9 +813,13 @@ impl Pump {
                     std::mem::swap(host.queues_mut(), queues);
                     script
                 });
-                INTERP.with(|threads| {
-                    threads.borrow_mut().remove(&id);
-                });
+                // The deleting destructor releases the reaped thread's owners.
+                if let Some(mut thread) = INTERP.with(|threads| threads.borrow_mut().remove(&id)) {
+                    if let Err(error) = thread.retire() {
+                        aborted.set(true);
+                        reap_error = Some(format!("Thread destructor retire: {error:?}"));
+                    }
+                }
                 retire_clock_thread(id);
                 if let Some(script) = script {
                     let mut host = vm.borrow_mut();
@@ -1020,8 +1023,8 @@ mod callback_wrapper_tests {
         }
         assert!(events.iter().any(|e| matches!(e.event,
             Event::ThreadRetire { identity: retired, .. } if retired == identity)));
-        // A void method that finishes is not a suspended continuation. Its
-        // queue must disappear immediately, along with its real frame owners.
+        // A finished void callback stays queued STOPPED, as the original
+        // driver cursor shows; its destructor runs only when it is reaped.
         assert!(
             run_callback(&mut vm, "resource", class, 0, "finish", &[], false)
                 .unwrap()
@@ -1040,15 +1043,34 @@ mod callback_wrapper_tests {
                 _ => None,
             })
             .unwrap();
+        assert!(!events.iter().any(|e| matches!(e.event,
+            Event::ThreadRetire { identity, .. } if identity == void_identity)));
+        let queued = with_threads(|host| {
+            assert_eq!(host.current(), Some(outer));
+            let order_now = host.queues().run_order();
+            assert_eq!(order_now.len(), order.len() + 1);
+            let queued = *order_now.last().unwrap();
+            assert_eq!(
+                host.queues().get(queued).name,
+                "THRD-RUNVMI resource.finish"
+            );
+            assert_ne!(
+                host.queues().get(queued).flags & slr_vm::interp::flags::STOPPED,
+                0
+            );
+            host.dispose_scoped(outer);
+            host.set_current(None);
+            queued
+        });
+        assert_eq!(CURRENT.with(|current| current.replace(None)), Some(outer));
+        assert!(INTERP.with(|threads| threads.borrow().contains_key(&queued)));
+        // The driver marks the stopped thread dead and its reaper retires it.
+        Pump::new().tick(&mut vm).map_err(|f| f.error).unwrap();
+        let events = vm.machine_trace().pending(usize::MAX);
         assert!(events.iter().any(|e| matches!(e.event,
             Event::ThreadRetire { identity, .. } if identity == void_identity)));
         assert!(INTERP.with(|threads| threads.borrow().is_empty()));
-        with_threads(|host| {
-            assert_eq!(host.current(), Some(outer));
-            assert_eq!(host.queues().run_order(), order);
-            host.dispose_scoped(outer);
-        });
-        assert_eq!(CURRENT.with(|current| current.replace(None)), Some(outer));
+        assert!(with_threads(|host| host.queues().run_order().is_empty()));
     }
 
     fn stock_vm(leaf: &str) -> VmHost {
