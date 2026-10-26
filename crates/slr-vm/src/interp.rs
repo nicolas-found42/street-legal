@@ -63,11 +63,11 @@ pub mod flags {
 
 /// Identity of a node array (a method body). The port's stand-in for the
 /// exe's raw node pointers; the host maps it to a `&[Node]`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize)]
 pub struct BodyId(pub u32);
 
 /// A program counter: node `idx` of body `body` (`thread+0x24`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub struct Pc {
     /// Which node array.
     pub body: BodyId,
@@ -78,7 +78,7 @@ pub struct Pc {
 /// Handle of a variable slot (an lvalue; locals and `this`). Carries the
 /// slot's generation so a stale handle to a recycled slot is detected
 /// (the exe would silently alias the new occupant).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize)]
 pub struct VarId {
     pool: u64,
     index: u32,
@@ -293,7 +293,7 @@ impl ThreadPools {
 
 /// Address of an authoritative host-owned variable cell. Fetching its
 /// lvalue borrows the cell; dereferencing creates a temporary value copy.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize)]
 pub enum HeapSlot {
     /// An object's instance field (arrays use their own element address).
     Object { word: u32, slot: usize },
@@ -522,8 +522,12 @@ pub enum RefOperator {
 
 /// The object-model side of the interpreter.
 pub trait Host {
-    fn validate_thread(&self, _thread: &Thread) -> Result<(), VmError> {
-        Ok(())
+    fn validate_thread(&self, thread: &Thread) -> Result<(), VmError> {
+        if thread.machine_retired {
+            Err(VmError::MachineContext)
+        } else {
+            Ok(())
+        }
     }
     fn diagnostic_objects_total(&self, thread: &Thread) -> usize {
         self.diagnostic_objects(thread).len()
@@ -610,6 +614,7 @@ pub trait Host {
 #[derive(Debug)]
 pub struct Thread {
     pub machine_identity: u64,
+    machine_retired: bool,
     /// Stable diagnostic identity for clock requests; snapshots retain it.
     pub clock_identity: u64,
     /// Original engine thread role assigned by its real creator.
@@ -670,6 +675,7 @@ impl Thread {
             });
         Self {
             machine_identity,
+            machine_retired: false,
             clock_identity: crate::clock::ephemeral_identity(),
             clock_name: None,
             frames: Vec::new(),
@@ -680,6 +686,36 @@ impl Thread {
             alu: Alu::default(),
             line: 0,
         }
+    }
+
+    /// Original thread destruction is explicit: dropping Rust owners would
+    /// abandon value cells and omit the destructor's ordered frame releases.
+    /// Failed interpreter threads may stay alive for diagnostics until their
+    /// owner invokes this method. Repeated retirement does not replay frees.
+    pub fn retire(&mut self) -> Result<(), VmError> {
+        if self.machine_retired {
+            return if self.frames.is_empty() {
+                Ok(())
+            } else {
+                Err(VmError::MachineContext)
+            };
+        }
+        if self.machine_trace().enabled() && self.frames.iter().any(|frame| !self.owns_frame(frame))
+        {
+            return Err(VmError::MachineContext);
+        }
+        self.flags |= flags::DEAD;
+        self.machine_trace()
+            .note(crate::machine::Event::ThreadRetire {
+                identity: self.machine_identity,
+                flags: self.flags,
+            });
+        while !self.frames.is_empty() {
+            self.pop_frame()?;
+        }
+        self.pc = None;
+        self.machine_retired = true;
+        Ok(())
     }
 
     /// Current metadata is derived from the running port, not a replay tape.
@@ -717,6 +753,9 @@ impl Thread {
         }
     }
 
+    pub(crate) fn is_retired(&self) -> bool {
+        self.machine_retired
+    }
     pub fn machine_trace(&self) -> crate::machine::Trace {
         self.pools.machine_trace()
     }
@@ -758,6 +797,9 @@ impl Thread {
         frame
     }
     pub fn push_frame(&mut self, frame: Frame) -> Result<(), VmError> {
+        if self.machine_retired {
+            return Err(VmError::MachineContext);
+        }
         if self.machine_trace().enabled()
             && frame.machine_identity == 0
             && (!frame.stack.is_empty() || !frame.locals.is_empty())
@@ -1402,7 +1444,7 @@ impl Thread {
                 // boolean and skip the next node on true (`||`) / false
                 // (`&&`).
                 let mut v = self.pop_deref_with(host)?;
-                boolean_convert(&mut v);
+                v.edit(boolean_convert);
                 let truthy = v.payload != 0;
                 self.push(Slot::Value(v))?; // FUN_0041bd90
                 if truthy == (node.opword == 0x0004) {
@@ -1438,7 +1480,7 @@ impl Thread {
             0x002d => {
                 let mut value = self.pop_deref_with(host)?;
                 let lv = self.require_lvalue()?;
-                self.assign(host, lv, &mut value, 0x23)?;
+                value.edit(|value| self.assign(host, lv, value, 0x23))?;
                 self.release(value);
                 Ok(Next::Advance)
             }
@@ -1471,7 +1513,7 @@ impl Thread {
                 if STEP_TRACE.with(std::cell::Cell::get) {
                     eprintln!("  COND value tag={:?} payload={:#x}", c.tag, c.payload);
                 }
-                boolean_convert(&mut c);
+                c.edit(boolean_convert);
                 let is_zero = c.payload == 0;
                 self.release(c);
                 if is_zero == (node.opword == 0x1015) {
@@ -1485,7 +1527,7 @@ impl Thread {
                 // switch value for the next case.
                 let mut case = self.pop_deref_with(host)?;
                 let mut switch = self.pop_deref_with(host)?;
-                self.alu.eq(&mut case, &mut switch);
+                case.edit(|case| switch.edit(|switch| self.alu.eq(case, switch)));
                 if case.payload != 0 {
                     self.release(case);
                     self.release(switch);
@@ -1575,13 +1617,19 @@ impl Thread {
         // trap in the multiplication/division leaves it live.
         let mut current = self.read_lvalue(host, lv)?;
         let mut temporary = matches!(kind, 0x24 | 0x25).then(|| self.allocate_value(current));
-        let destination = temporary.as_deref_mut().unwrap_or(&mut current);
-        if kind == 0x23 {
-            host.store_value(&mut self.alu, destination, value);
+        let mut operation = |destination: &mut Value| {
+            if kind == 0x23 {
+                host.store_value(&mut self.alu, destination, value);
+            } else {
+                self.alu.assign(destination, true, value, kind)?;
+            }
+            Ok::<Value, VmError>(*destination)
+        };
+        let result = if let Some(temporary) = temporary.as_mut() {
+            temporary.edit(operation)?
         } else {
-            self.alu.assign(destination, true, value, kind)?;
-        }
-        let result = *destination;
+            operation(&mut current)?
+        };
         self.write_lvalue(host, lv, result)?;
         if let Some(temporary) = temporary {
             self.release(temporary);
@@ -1608,7 +1656,7 @@ impl Thread {
                 let top = self.pop_deref_with(host)?;
                 let second = self.pop_deref_with(host)?;
                 let mut cond = self.pop_deref_with(host)?;
-                boolean_convert(&mut cond);
+                cond.edit(boolean_convert);
                 let zero = cond.payload == 0;
                 self.release(cond);
                 let (keep, discard_cell) = if zero { (top, second) } else { (second, top) };
@@ -1632,43 +1680,49 @@ impl Thread {
                 let mut second = self.pop_deref_with(host)?;
                 match sub {
                     0xd => {
-                        self.alu.shr(&mut first, &mut second);
+                        first.edit(|first| second.edit(|second| self.alu.shr(first, second)));
                         self.release(first);
                         self.push(Slot::Value(second))?;
                         return Ok(Next::Advance);
                     }
                     0xe => {
-                        self.alu.shl(&mut first, &mut second);
+                        first.edit(|first| second.edit(|second| self.alu.shl(first, second)));
                         self.release(first);
                         self.push(Slot::Value(second))?;
                         return Ok(Next::Advance);
                     }
                     _ => {}
                 }
-                let (left, right) = (&mut second, &mut first);
-                let mut done = false;
-                if matches!(sub, 0xf | 0x10) {
-                    if sub == 0xf {
-                        // `-` negates its right operand, then adds.
-                        self.alu.negate_for_sub(right);
-                    }
-                    if left.tag.is_ref() || right.tag.is_ref() {
-                        if let Some(r) = host.operator_on_refs(RefOperator::Add, left, right) {
-                            r?;
-                            done = true;
-                        } else if let Some(r) = host.concatenate_strings(left, right) {
-                            r?;
-                            done = true;
+                second.edit(|left| {
+                    first.edit(|right| {
+                        let mut done = false;
+                        if matches!(sub, 0xf | 0x10) {
+                            if sub == 0xf {
+                                // `-` negates its right operand, then adds.
+                                self.alu.negate_for_sub(right);
+                            }
+                            if left.tag.is_ref() || right.tag.is_ref() {
+                                if let Some(r) =
+                                    host.operator_on_refs(RefOperator::Add, left, right)
+                                {
+                                    r?;
+                                    done = true;
+                                } else if let Some(r) = host.concatenate_strings(left, right) {
+                                    r?;
+                                    done = true;
+                                }
+                            }
+                            if !done {
+                                self.alu.add(left, right)?;
+                                done = true;
+                            }
                         }
-                    }
-                    if !done {
-                        self.alu.add(left, right)?;
-                        done = true;
-                    }
-                }
-                if !done {
-                    self.binary(sub, left, right)?;
-                }
+                        if !done {
+                            self.binary(sub, left, right)?;
+                        }
+                        Ok::<(), VmError>(())
+                    })
+                })?;
                 self.release(first);
                 self.push(Slot::Value(second))?;
                 Ok(Next::Advance)
@@ -1679,11 +1733,11 @@ impl Thread {
                     self.release(v);
                     return Ok(Next::Advance);
                 }
-                match sub {
-                    0x14 => self.alu.bit_not(&mut v),
-                    0x15 => self.alu.logical_not(&mut v),
-                    _ => self.alu.negate(&mut v),
-                }
+                v.edit(|value| match sub {
+                    0x14 => self.alu.bit_not(value),
+                    0x15 => self.alu.logical_not(value),
+                    _ => self.alu.negate(value),
+                });
                 self.push(Slot::Value(v))?;
                 Ok(Next::Advance)
             }
@@ -1730,7 +1784,7 @@ impl Thread {
                 // [value][lvalue] -> store; 0x1007 pushes the value back.
                 let lv = self.require_lvalue()?;
                 let mut value = self.pop_deref_with(host)?;
-                self.assign(host, lv, &mut value, sub)?;
+                value.edit(|value| self.assign(host, lv, value, sub))?;
                 if discard {
                     self.release(value);
                 } else {

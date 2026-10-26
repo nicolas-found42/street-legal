@@ -145,6 +145,15 @@ impl ConditionCodes {
     }
 }
 
+/// Basic arithmetic operation for an atomic result/exception observation.
+#[derive(Clone, Copy, Debug)]
+pub enum Arithmetic {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
 /// An x87 80-bit extended-precision register value.
 ///
 /// Stored as the raw 10-byte image: 64-bit significand followed by
@@ -321,6 +330,35 @@ impl X87 {
         ffi::set_tininess(SfTiny::Before);
         ffi::clear_flags();
         ffi::ext_to_i64(self.to_ext(), rc.to_sf())
+    }
+
+    /// Return the arithmetic result and SoftFloat exception bits under the
+    /// same lock. Reading `last_flags` in a separate operation can race with
+    /// another thread. These bits remain SoftFloat observations, not x87 SW.
+    pub fn arithmetic_with_exceptions(
+        self,
+        other: Self,
+        operation: Arithmetic,
+        pc: Precision,
+        rc: Rounding,
+    ) -> (Self, u8) {
+        let _g = lock();
+        setup(pc, rc);
+        let result = match operation {
+            Arithmetic::Add => ffi::ext_add(self.to_ext(), other.to_ext()),
+            Arithmetic::Subtract => ffi::ext_sub(self.to_ext(), other.to_ext()),
+            Arithmetic::Multiply => ffi::ext_mul(self.to_ext(), other.to_ext()),
+            Arithmetic::Divide => ffi::ext_div(self.to_ext(), other.to_ext()),
+        };
+        (Self::from_ext(result), ffi::get_flags().0)
+    }
+
+    /// Store conversion and its exception bits observed atomically.
+    pub fn to_f32_with_exceptions(self, pc: Precision, rc: Rounding) -> (f32, u8) {
+        let _g = lock();
+        setup(pc, rc);
+        let result = ffi::ext_to_f32(self.to_ext());
+        (result, ffi::get_flags().0)
     }
 
     // -- basic arithmetic + sqrt: TRUSTED at every (PC, RC) -----------------

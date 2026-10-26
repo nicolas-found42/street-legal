@@ -179,10 +179,21 @@ pub fn retarget_matrix(
     position: [u32; 3],
     matrix: [u32; 9],
 ) -> Result<(), String> {
+    assign_bone_matrix(m, target, position, matrix)?;
+    retarget_owner(m, target, physics_ref, physics_body)
+}
+
+/// Matrix half of48c0f0, before the owner can invoke a resource collaborator.
+pub fn assign_bone_matrix(
+    m: &mut Space,
+    target: RenderBone,
+    position: [u32; 3],
+    matrix: [u32; 9],
+) -> Result<(), String> {
     let RenderBone {
-        resource: render_resource,
         body: render_body,
         bone,
+        ..
     } = target;
     for i in 0..16 {
         let value = if i < 12 {
@@ -224,6 +235,33 @@ pub fn retarget_matrix(
     m.w32(bone + 0x10, previous);
     m.w32(render_body + 0x178, bone);
     m.w32(render_body + 0xbc, m.r32(render_body + 0xbc) | 0x1800);
+    Ok(())
+}
+
+/// Original48be10 owner/controller changes, also used when48c0f0 receives
+/// null transform pointers and must retain the existing bone matrix.
+pub fn retarget_owner(
+    m: &mut Space,
+    target: RenderBone,
+    physics_ref: u32,
+    physics_body: u32,
+) -> Result<(), String> {
+    retarget_owner_with(m, target, physics_ref, |_, _| Ok(physics_body))
+}
+
+/// The live419860 callback occurs after controller destruction and owner
+/// rebinding, as48be10 orders it. Keep that ordering visible to callbacks.
+pub fn retarget_owner_with(
+    m: &mut Space,
+    target: RenderBone,
+    physics_ref: u32,
+    mut physics: impl FnMut(&mut Space, u32) -> Result<u32, String>,
+) -> Result<(), String> {
+    let RenderBone {
+        resource: render_resource,
+        body: render_body,
+        bone,
+    } = target;
     if (physics_ref == 0 && m.r32(bone + 0x4c) != 0)
         || (physics_ref != 0 && m.r32(bone + 0x4c) != m.r32(physics_ref + 8))
     {
@@ -262,8 +300,14 @@ pub fn retarget_matrix(
             m.w32(render_body + 0xf8, m.r32(0x6200a4));
             return Ok(());
         }
+        let physics_resource = m.r32(physics_ref + 0xc);
+        let physics_body = if physics_resource == 0 {
+            0
+        } else {
+            physics(m, physics_resource)?
+        };
         let flags = m.r32(render_resource + 0x54);
-        if flags != 0 && flags & 0x4000 == 0 {
+        if physics_body != 0 && flags != 0 && flags & 0x4000 == 0 {
             let controller = m.alloc(0x1c);
             m.w32(controller, 0x5f355c);
             crate::native_part::bind_reference(m, controller + 0xc, render_resource);

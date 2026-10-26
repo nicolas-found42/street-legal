@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Complete original427980/4a5580 callers through RET, with declared body/entity leaves.
+
+The actual startup creates its JVM and executes its original bootstrap.
+World initialization and54e1d0 identity execute original instructions. Primitive
+body49ab60 and root-entity49b300 returns, resource refresh, Config creation and
+settings remain declared collaborators; their internal implementations are not proved.
+Package lookup/resolution results are declared domain inputs. Allocator/logger/read-only Win32 leaves
+remain collaborators; no VM, metadata, script or native implementation is hooked.
+"""
+from pathlib import Path
+import argparse,json,sys,itertools,random,struct,fnmatch
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import native_vm_class_cache_probe as cache
+base=cache.base
+from oracle import Oracle,HEAP_BASE,STACK_TOP,STACK_SIZE,CW_D3D9
+from unicorn import UC_HOOK_CODE,UC_HOOK_MEM_WRITE,UC_HOOK_MEM_READ,x86_const as X
+ROOT=base.ROOT;REGS=base.REGS;HEAP_BYTES=base.HEAP_BYTES;STACK_LOW=base.STACK_LOW;IMAGE_RANGES=base.IMAGE_RANGES
+CaptureFailure=base.CaptureFailure;blob=base.blob
+def capture(spec, registry=False, catalogs=False):
+ heap_bytes=0x100000
+ endpoint_pc=0x30000028
+ install=cache.install
+ image_ranges=[(0x62d000,0x3000),(0x766000,0x3000),(0x777000,0x8000),(0x61b000,0x1000),(0x636000,0x1000),(0x618000,0x1000),(0x640000,0x1000)]
+ o=Oracle(str(ROOT/'reference/raw/StreetLegal_Redline.bak.exe'));o.write(HEAP_BASE,bytes([spec['fill']])*heap_bytes);o.write(STACK_TOP-STACK_SIZE,bytes([spec['fill']])*STACK_SIZE)
+ o.heap_ptr=HEAP_BASE+spec['gap'];this=0x636338;resources=[o.alloc(0xa0) for _ in range(9)];resource_ids=[0]*9 if spec['fill']==0 else [0x10001,0x20004,0x30003,0x4000c,0x5000b,0x6000c,0x70047,0x80007,0x90008];events=[];stores=[];files=[];phases=[];phase='descriptors';finds={};find_id=0;logging=0;measured=False;endpoint=False;pages={};before=None
+ rng=random.Random(spec['seed']);regs={r:rng.getrandbits(32) for r in REGS[:-1]};regs['ecx']=this
+ def state():return dict(heap=blob(o.read(HEAP_BASE,heap_bytes)),heap_ptr=o.heap_ptr,stack=blob(o.read(STACK_LOW,0x3000)),registers={r:o.reg(r) for r in REGS},fpu_cw=o.uc.reg_read(X.UC_X86_REG_FPCW),fpu_depth=o._fpu_depth(),fpu=dict(control=o.uc.reg_read(X.UC_X86_REG_FPCW),status=o.uc.reg_read(X.UC_X86_REG_FPSW),tags=o.uc.reg_read(X.UC_X86_REG_FPTAG),registers=[list(o.uc.reg_read(X.UC_X86_REG_FP0+i))for i in range(8)]),image=[dict(base=p,data=blob(o.read(p,n))) for p,n in image_ranges])
+ def event(kind,args,result=None):
+  if measured:events.append(dict(kind=kind,args=args,result=result,phase=phase,state=state()))
+ def alloc(oc,args):
+  event('allocate',args);p=oc.alloc(args[0]);assert oc.heap_ptr<=HEAP_BASE+heap_bytes;return p
+ def realloc(oc,args):
+  event('reallocate',args);old,n=args;p=oc.alloc(n);assert oc.heap_ptr<=HEAP_BASE+heap_bytes
+  if old:oc.write(p,oc.read(old,min(n,oc.heap_sizes[old])))
+  return p
+ def free(oc,args):event('free',args);return 0
+ def logger(oc,args):
+  nonlocal logging
+  event('logger',args);logging+=1;return 0xaabb0000+logging
+ def resolve_stock(text):
+  parts=text.replace('\\','/').split('/');p=ROOT/'stock'
+  for part in parts:
+   if not part:continue
+   if part in ('.','..'):raise RuntimeError('unsafe stock path')
+   children=[c for c in p.iterdir() if c.name.lower()==part.lower()]
+   if len(children)!=1:raise RuntimeError(f'ambiguous/missing stock component {text}')
+   p=children[0];assert p.resolve().is_relative_to((ROOT/'stock').resolve())
+  return p
+ def write_find(dest,entry):
+  name,dir_,size=entry;oc=o;data=bytearray(320);data[:4]=(16 if dir_ else 32).to_bytes(4,'little');data[32:36]=size.to_bytes(4,'little');b=name.encode('cp1252');assert len(b)<260;data[44:44+len(b)]=b;oc.write(dest,data)
+ def first(oc,args):
+  nonlocal find_id
+  event('FindFirstFileA',args);pattern=oc.read_cstr(args[0]).decode('cp1252').replace('\\','/');folder,mask=pattern.rsplit('/',1);assert mask in ('*','*.*','*.java','*.class')
+  try:directory=resolve_stock(folder)
+  except RuntimeError:
+   files.append(dict(pattern=pattern,entries=[],missing=True));return 0xffffffff
+  entries=[('.',True,0),('..',True,0)]+[(p.name,p.is_dir(),0 if p.is_dir() else p.stat().st_size) for p in directory.iterdir()]
+  assert len({n.lower() for n,d,s in entries})==len(entries);entries=[e for e in entries if mask in ('*','*.*') or fnmatch.fnmatchcase(e[0].lower(),mask.lower())]
+  if not entries:
+   files.append(dict(pattern=pattern,entries=[]));return 0xffffffff
+  entries.sort(key=lambda e:e[0].lower());files.append(dict(pattern=pattern,entries=entries));find_id+=1;finds[find_id]=entries[1:];write_find(args[1],entries[0]);return find_id
+ def next_(oc,args):
+  event('FindNextFileA',args);rows=finds[args[0]]
+  if not rows:return 0
+  write_find(args[1],rows.pop(0));return 1
+ def close(oc,args):event('FindClose',args);del finds[args[0]];return 1
+ for address,fn,n,conv in [(0x54f560,alloc,1,'cdecl'),(0x54f580,realloc,2,'cdecl'),(0x54f5b0,free,1,'cdecl'),(0x54be80,logger,1,'thiscall')]:o.hook(address,fn,conv,n)
+ for slot,fn,n in [(0x5e7098,first,2),(0x5e709c,next_,2),(0x5e70a0,close,1)]:o.hook(o.read_u32(slot),fn,'stdcall',n)
+ if install is not None:install(o,event)
+ manager=0x300f0000;o.write_u32(0x618d48,manager)
+ for ref in [0x62f260,0x636460,0x6408f8,0x6408c0,0x636328,0x62f250,0x636318,0x636450]:o.write(ref,bytes(16))
+ for resource in resources:o.write_u32(resource+0x48,0)
+ config=resources[8] if spec['fill'] else 0
+ o.write_u32(resources[8]+0x50,0xffff0080)
+ o.write(this+0xf8,bytes(16))
+ if config:
+  old=resources[7];previous=resources[6] if spec['seed']==606 else 0;next_=resources[5] if spec['gap'] else 0
+  o.write_u32(this+0xf8,previous);o.write_u32(this+0xfc,next_);o.write_u32(this+0x100,0xffff0081);o.write_u32(this+0x104,old)
+  if previous:o.write_u32(previous+4,this+0xf8)
+  else:o.write_u32(old+0x48,this+0xf8)
+  if next_:o.write_u32(next_,this+0xf8)
+ def domain(name,result=0):
+  def run(oc,args):event(name,args,result);return result
+  return run
+ bodies=[o.alloc(0xa0),o.alloc(0xa0)];entities=[o.alloc(0x218),o.alloc(0x218)]
+ for body,entity in zip(bodies,entities):o.write_u32(entity+0x5c,body)
+ body_index=0;entity_index=0
+ def body(oc,args):
+  nonlocal body_index
+  assert args==[0]*6 and body_index<2
+  result=bodies[body_index];body_index+=1;event('world-body',args,result);return result
+ def entity(oc,args):
+  nonlocal entity_index
+  assert args[0]==bodies[entity_index] and entity_index<2
+  result=entities[entity_index];entity_index+=1;event('world-entity',args,result);return result
+ o.hook(0x49ab60,body,'thiscall',6)
+ o.hook(0x49b300,entity,'thiscall',3)
+ o.hook(0x544f40,domain('refresh-game-root'),'thiscall',1)
+ o.hook(0x53a5e0,domain('create-config',config),'cdecl',4)
+ o.hook(0x427bf0,domain('apply-settings'),'thiscall',0)
+ def package(oc,args):
+  index=[0x60caec,0x60caf8,0x60cb04,0x60cb10,0x60cb1c,0x60cb28,0x60cb34,0x61757c,0x617588].index(args[0]);result=resource_ids[index] if index<7 else 0;event('package-id',args,result);return result
+ def resolve(oc,args):
+  index=resource_ids.index(args[0]);result=resources[index];event('resolve-resource',args,result);return result
+ o.hook(0x536820,resolve,'thiscall',3)
+ o.hook(0x538440,package,'thiscall',2)
+ o.write_u32(0x7686e0,0)
+ image_initial={p:bytes(o.read(p,4096)) for p in range(0x400000,0x7c0000,4096)}
+ def code(uc,pc,size,unused):
+  nonlocal measured,endpoint,phase,before
+  if pc==0x427980:before=state();measured=True;phases.append(dict(pc=pc,event_count=len(events),store_count=len(stores),state=state()))
+  if pc==0x4279ec:event('constructor-return',[])
+  if pc==0x4279fd:event('bootstrap-return',[])
+  if (registry or catalogs) and pc==0x427a02:event('registry-return',[])
+  if catalogs and pc==0x427a0c:event('secondary-return',[])
+  if pc in request_returns:event('class-return',[request_returns[pc]])
+  if pc in o.import_names and pc not in o.hooks:raise RuntimeError(f'unresolved import {o.import_names[pc]}')
+  if pc in [0x40ff4e,0x40ff84,0x41001d]:
+   phases.append(dict(pc=pc,event_count=len(events),store_count=len(stores),state=state()));phase='namespace'
+  if pc==endpoint_pc:
+   phases.append(dict(pc=pc,event_count=len(events),store_count=len(stores),state=state()));endpoint=True;uc.emu_stop()
+ def read(uc,access,address,size,value,unused):
+  if measured and 0x400000<=address<0x7c0000:
+   p=address&~4095;pages[p]=image_initial[p]
+ def write(uc,access,address,size,value,unused):
+  if not measured:return
+  if HEAP_BASE<=address and address+size<=HEAP_BASE+heap_bytes or any(p<=address and address+size<=p+n for p,n in image_ranges):stores.append([address,size,value]);return
+  if STACK_LOW<=address and address+size<=STACK_TOP:return
+  raise RuntimeError(f'out-of-profile store {address:x}/{size} at {o.reg("eip"):x}')
+ o.uc.hook_add(UC_HOOK_CODE,code);o.uc.hook_add(UC_HOOK_MEM_WRITE,write);o.uc.hook_add(UC_HOOK_MEM_READ,read)
+ code=b''.join(bytes([opcode])+struct.pack('<I',regs[reg])for reg,opcode in [('eax',0xb8),('ebx',0xbb),('ecx',0xb9),('edx',0xba),('esi',0xbe),('edi',0xbf),('ebp',0xbd)])
+ code+=b'\xe8'+struct.pack('<I',(0x427980-0x30000028)&0xffffffff)+b'\xc3'
+ request_returns={};request_inputs=[];registration_inputs=[];o.write(0x30000000,code)
+ try:o.call(0x30000000,[],fpu_cw=CW_D3D9,limit=50000000)
+ except Exception as e:
+  if not endpoint:raise CaptureFailure(e,dict(input=spec,this=this,before=before,events=events,stores=stores,phases=phases,at_failure=state(),error=str(e))) from e
+ if not endpoint and endpoint_pc==0x7fff0000:
+  assert o.reg('eip')==endpoint_pc, 'complete bootstrap must execute its real RET'
+  endpoint=True
+ assert endpoint and not o.import_log and not finds
+ assert o.uc.reg_read(X.UC_X86_REG_FPCW)==CW_D3D9 and o._fpu_depth()==0
+ return dict(input=spec,resource_ids=resource_ids,resources=resources,this=this,register_inputs=regs,before=before,events=events,after=state(),stores=stores,endpoint=endpoint_pc,phases=phases,input_pages=[dict(base=p,data=blob(data)) for p,data in sorted(pages.items())],stock_enumerations=files,requests=request_inputs,registrations=registration_inputs)
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--output',type=Path,default=ROOT/'re/out/boot/native-vm-root-world-original.json');p.add_argument('--first',action='store_true');p.add_argument('--registry',action='store_true');p.add_argument('--catalogs',action='store_true');a=p.parse_args()
+ if a.output.exists() or a.output.with_suffix('.failure.json').exists():p.error('preserve earlier attempts; choose a fresh output path')
+ sources=[Path(__file__),Path(cache.__file__),Path(base.__file__),Path(__file__).with_name('oracle.py')]
+ identity=dict(schema=1,endpoint='30000028',world='636338',resource_profile='fill0 missing packages/null Config; fillA5 seven existing package resources and a supplied Config; source world caller and54e1d0; supplied primitive body/entity nodes; explicit refresh/create/settings caller collaborators',exe_sha256=base.digest(ROOT/'reference/raw/StreetLegal_Redline.bak.exe'),producer_sources={p.name:base.digest(p)for p in sources},unicorn=base.version,cw=CW_D3D9,profile=__doc__)
+ rows=[]
+ try:
+  for spec in(base.inventory()[:1]if a.first else base.inventory()):rows.append(capture(spec,True,True))
+ except CaptureFailure as failure:
+  a.output.with_suffix('.failure.json').write_text(json.dumps(dict(**identity,completed_rows=rows,failure=failure.details),separators=(',',':'))+'\n');raise
+ assert identity['producer_sources']=={p.name:base.digest(p)for p in sources}
+ a.output.write_text(json.dumps(dict(**identity,rows=rows),separators=(',',':'))+'\n');print(json.dumps(dict(output=str(a.output),rows=len(rows))))
+if __name__=='__main__':main()

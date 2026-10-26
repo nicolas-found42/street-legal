@@ -81,6 +81,10 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 fn collect_suites() -> Vec<Suite> {
     vec![
         ("slr-boot", "bin:slr-boot", vec![
+            // Complete caller endpoints with the named domain collaborators.
+            // These do not establish production startup or callback admission.
+            ("native_vm_root::tests::source_root_complete_caller_returns_with_explicit_world_and_config_collaborators", vec!["FUN_00427980"]),
+            ("native_vm_root::tests::source_root_complete_world_caller_returns_with_declared_body_entity_collaborators", vec!["FUN_004a5580"]),
             ("native_query::tests::instance_routing_and_registration_match_original_mutating_graphs", vec!["FUN_00426470"]),
             ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
             ("native_car_update::tests::original_active_update_matches_complete_memory_and_call_order", vec!["FUN_00448430", "FUN_0043c520", "FUN_004707d0", "FUN_004479d0"]),

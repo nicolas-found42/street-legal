@@ -489,8 +489,22 @@ pub fn collect_args_with<H: Host>(
 /// return) and `None` for `void`.
 pub type NativeFn = fn(&mut VmHost, &CallInfo<'_>) -> Option<u32>;
 
-/// Embedding check before a native requires its runtime collaborator.
-pub type NativeBoundary = fn(&CallInfo<'_>) -> Result<(), String>;
+/// Live VM ownership at the native boundary. These are semantic identities and
+/// borrowed owners, not reconstructed executable addresses. The embedding must
+/// establish its raw caller context before admitting native execution.
+pub struct NativeContext<'a> {
+    pub host: &'a VmHost,
+    pub thread: &'a Thread,
+    pub defining_class: crate::vmclass::ClassId,
+    pub method_index: Option<usize>,
+    pub implementation: u32,
+    pub cells: &'a [crate::values::PoolCellView],
+}
+
+/// Embedding check before a native requires its runtime collaborator. It sees
+/// the selected method and actual argument owners, including nested invocations,
+/// before the native thread hook or native implementation can mutate state.
+pub type NativeBoundary = fn(&NativeContext<'_>, &CallInfo<'_>) -> Result<(), String>;
 
 /// Resource table boundary used by literal100e's4122b0 call. A missing backend
 /// is unsupported; the VM never fabricates a global resource identifier.
@@ -784,26 +798,60 @@ impl VmHost {
 
     /// After finalize, the original clears reference payloads in the object.
     pub fn gc_clear_references(&mut self, word: u32) {
-        self.machine_trace()
-            .note(crate::machine::Event::UnresolvedMutation {
-                owner: format!("gc_clear_references:{word:#x}"),
-            });
-        if let Some(index) = word.checked_sub(0x1000) {
-            if let Some(object) = self.objects.get_mut(index as usize) {
-                for value in &mut object.fields {
-                    if matches!(value.tag, TypeTag::Ref(_)) && value.tag.name() != "V" {
-                        value.payload = 0;
+        let trace = self.machine_trace();
+        let record = trace.enabled() || crate::diagnostics::enabled();
+        if let Some(object) = word
+            .checked_sub(0x1000)
+            .and_then(|index| self.objects.get_mut(index as usize))
+        {
+            for (slot, value) in object.fields.iter_mut().enumerate() {
+                if matches!(value.tag, TypeTag::Ref(_)) && value.tag.name() != "V" {
+                    let before = *value;
+                    value.payload = 0;
+                    if record {
+                        let slot = HeapSlot::Object { word, slot };
+                        trace.note(crate::machine::Event::HeapStore {
+                            slot,
+                            before,
+                            after: *value,
+                        });
+                        crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
+                            destination: format!("{slot:?}"),
+                            before: before.into(),
+                            after: (*value).into(),
+                        });
                     }
                 }
             }
         }
         if let Some(values) = self.array_cells.get_mut(&word) {
+            if trace.enabled() {
+                trace.note(crate::machine::Event::ArrayClear {
+                    word,
+                    before: values.clone(),
+                });
+            }
             values.clear();
             if let Some(object) = word
                 .checked_sub(0x1000)
                 .and_then(|index| self.objects.get_mut(index as usize))
             {
+                let before = object.fields[0];
                 object.fields[0].payload = 0;
+                if record {
+                    let slot = HeapSlot::Object { word, slot: 0 };
+                    let after = object.fields[0];
+                    trace.note(crate::machine::Event::HeapStore {
+                        slot,
+                        before,
+                        after,
+                    });
+                    crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
+                        destination: format!("{slot:?}"),
+                        before: before.into(),
+                        after: after.into(),
+                    });
+                }
             }
         }
     }
@@ -988,6 +1036,38 @@ impl VmHost {
                 });
         }
         self.array_cells.get_mut(&word)
+    }
+
+    /// Native payload-only array copy. Retains the destination descriptor and
+    /// the existing native GC policy while recording the exact owned store.
+    pub fn write_array_payload(
+        &mut self,
+        word: u32,
+        index: usize,
+        payload: u32,
+    ) -> Result<(), HostError> {
+        let cell = self
+            .array_cells
+            .get_mut(&word)
+            .and_then(|cells| cells.get_mut(index))
+            .ok_or(HostError::MissingMember)?;
+        let before = *cell;
+        cell.payload = payload;
+        let after = *cell;
+        if self.machine_trace().enabled() || crate::diagnostics::enabled() {
+            let slot = HeapSlot::Array { word, index };
+            self.machine_trace().note(crate::machine::Event::HeapStore {
+                slot,
+                before,
+                after,
+            });
+            crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
+                destination: format!("{slot:?}"),
+                before: before.into(),
+                after: after.into(),
+            });
+        }
+        Ok(())
     }
 
     /// Allocate initialized storage for one typed array. This does not
@@ -1324,15 +1404,27 @@ impl VmHost {
                         .ok_or(HostError::MissingMember)?,
                 );
             }
+            self.machine_trace()
+                .note(crate::machine::Event::ClassDependencies {
+                    identity: context,
+                    base: base_id.map(crate::vmclass::ClassId::get),
+                    interfaces: interface_ids.iter().map(|id| id.get()).collect(),
+                });
             if let Some(base_id) = base_id {
                 self.initialize_class_id(base_id)?;
             }
             for interface_id in interface_ids.clone() {
                 self.initialize_class_id(interface_id)?;
             }
+            self.static_cells.insert(context, Vec::new());
+            self.machine_trace()
+                .note(crate::machine::Event::ClassInstall {
+                    identity: context,
+                    base: base_id.map(crate::vmclass::ClassId::get),
+                    interfaces: interface_ids.iter().map(|id| id.get()).collect(),
+                });
             self.initialized_dependencies
                 .insert(context, (base_id, interface_ids));
-            self.static_cells.insert(context, Vec::new());
             let mut initializer = self.new_initializer_thread(false)?;
             for (static_index, field) in metadata
                 .fields
@@ -1499,9 +1591,11 @@ impl VmHost {
         let mut destination_value = self
             .read_cell(destination)
             .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
-        thread
-            .alu
-            .store_with(&mut destination_value, &mut value, Some(self));
+        value.edit(|source| {
+            thread
+                .alu
+                .store_with(&mut destination_value, source, Some(self));
+        });
         self.write_cell(destination, destination_value)
             .map_err(|_| HostError::MissingMember)?;
         thread.release(value);
@@ -1546,17 +1640,7 @@ impl VmHost {
     }
 
     fn retire_initializer_thread(&self, thread: &mut Thread) -> Result<(), HostError> {
-        thread.flags |= crate::interp::flags::DEAD;
-        thread
-            .machine_trace()
-            .note(crate::machine::Event::ThreadRetire {
-                identity: thread.machine_identity,
-                flags: thread.flags,
-            });
-        while !thread.frames.is_empty() {
-            thread.pop_frame().map_err(|_| HostError::MissingMember)?;
-        }
-        Ok(())
+        thread.retire().map_err(|_| HostError::MissingMember)
     }
 
     /// Read an existing loaded class's own static cell without requesting or
@@ -1808,6 +1892,9 @@ impl VmHost {
 
 impl Host for VmHost {
     fn validate_thread(&self, thread: &Thread) -> Result<(), VmError> {
+        if thread.is_retired() {
+            return Err(VmError::MachineContext);
+        }
         let host = self.machine_trace();
         let owner = thread.machine_trace();
         if (host.enabled() || owner.enabled()) && !host.same_owner(&owner) {
@@ -2904,7 +2991,15 @@ impl VmHost {
         let native_return_emitted = std::cell::Cell::new(false);
         let mut invoke = |host: &mut Self, thread: &mut Thread| {
             if let Some(boundary) = host.native_boundary {
-                if let Err(error) = boundary(&info) {
+                let context = NativeContext {
+                    host,
+                    thread,
+                    defining_class: defining,
+                    method_index,
+                    implementation,
+                    cells: host.native_argument_cells().expect("active native scope"),
+                };
+                if let Err(error) = boundary(&context, &info) {
                     host.native_failure =
                         Some(format!("{}.{}{}: {error}", info.class, info.name, info.sig));
                     return Err(VmError::Unsupported(0x0024));
@@ -3226,10 +3321,13 @@ impl VmHost {
             return Err(HostError::BadCast.into());
         }
         let tag = TypeTag::intern(&target);
-        if crate::values::assign_convert(&mut value, tag).is_err() {
-            crate::values::loader_convert_ref(self, &mut value, &target)
-                .map_err(|_| HostError::BadCast)?;
-        }
+        value.edit(|value| {
+            if crate::values::assign_convert(value, tag).is_err() {
+                crate::values::loader_convert_ref(self, value, &target)
+                    .map_err(|_| HostError::BadCast)?;
+            }
+            Ok::<(), HostError>(())
+        })?;
         thread.push(Slot::Value(value))?;
         Ok(Flow::Advance)
     }

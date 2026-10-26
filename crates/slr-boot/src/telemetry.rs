@@ -54,6 +54,9 @@ pub fn native_snapshot(
     info: &slr_vm::host::CallInfo<'_>,
     phase: slr_vm::host::NativePhase,
 ) {
+    if let Err(error) = crate::machine_recording::drain(vm) {
+        slr_telemetry::detail("machine-recording-failure", vec![("error".into(), error)]);
+    }
     if !matches!(phase, slr_vm::host::NativePhase::Return) {
         return;
     }

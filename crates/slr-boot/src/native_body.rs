@@ -2,7 +2,10 @@
 //! template/runtime layouts; engine containers remain the ownership identity.
 use slr_physics::space::Space;
 use slr_vm::host::VmHost;
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 pub struct NativeBody {
     pub memory: Space,
@@ -100,10 +103,21 @@ struct NativeTemplate {
     bindings: HashMap<u32, crate::factory::CfgBinding>,
 }
 thread_local! {
+    static IMAGE: RefCell<Option<crate::native_image::ImageData>> = const { RefCell::new(None) };
     static BODIES: RefCell<HashMap<u32, NativeBody>> = RefCell::new(HashMap::new());
     static TEMPLATES: RefCell<HashMap<u32, NativeTemplate>> = RefCell::new(HashMap::new());
-    static MEMORY: RefCell<Option<Space>> = RefCell::new(Some(Space::new()));
+    static MEMORY: RefCell<Option<Space>> = RefCell::new(Some(new_world_memory()));
     static RAW_RESOURCES: RefCell<HashMap<u32,u32>> = RefCell::new(HashMap::new());
+    static CONSTRUCTING: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+}
+
+/// Called after the stock checksum gate and before native static constructors.
+pub fn configure_image(path: &std::path::Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("NativeImageBoundary: {e}"))?;
+    let image = crate::native_image::ImageData::parse(&bytes)
+        .map_err(|e| format!("NativeImageBoundary: {e}"))?;
+    IMAGE.with(|slot| *slot.borrow_mut() = Some(image));
+    Ok(())
 }
 
 /// Resource identities use their own compact host arena. Native layouts must
@@ -125,13 +139,22 @@ pub fn raw_resource_named(
     if let Some(raw) = RAW_RESOURCES.with(|map| map.borrow().get(&container).copied()) {
         return Ok(raw);
     }
+    if !CONSTRUCTING.with(|set| set.borrow_mut().insert(container)) {
+        return Err("NativeResourceBoundary: cyclic resource materialization".into());
+    }
+    struct Construction(u32);
+    impl Drop for Construction {
+        fn drop(&mut self) {
+            CONSTRUCTING.with(|set| set.borrow_mut().remove(&self.0));
+        }
+    }
+    let _construction = Construction(container);
     let resource = slr_resource::node::with_res(|host| host.container(container).cloned())
         .ok_or("NativeResourceBoundary: missing live resource identity")?;
     let kind = resource.type_id as u32;
     let size = crate::native_resource_base::size(kind)
         .ok_or_else(|| format!("NativeResourceBoundary: unported container layout type{kind}"))?;
     let raw = memory.alloc(size);
-    RAW_RESOURCES.with(|map| map.borrow_mut().insert(container, raw));
     let (offset, length) = if matches!(kind, 5 | 0xe) && resource.id >> 16 != 0xffff {
         let (_, offset, length) = crate::native_assets::descriptor_location(resource.id)?;
         (offset, length)
@@ -162,6 +185,9 @@ pub fn raw_resource_named(
             crate::native_resource_base::inherit_spatial_root(memory, raw, parent);
         }
     }
+    // Publish only a fully constructed, linked resource. A failed descriptor
+    // access must remain an error when retried, never a cached raw identity.
+    RAW_RESOURCES.with(|map| map.borrow_mut().insert(container, raw));
     Ok(raw)
 }
 fn synchronize_generation(memory: &mut Space) {
@@ -197,6 +223,62 @@ pub fn logical_resource(raw: u32) -> Option<u32> {
             .find_map(|(&logical, &address)| (address == raw).then_some(logical))
     })
 }
+
+/// Publish native parent changes in raw sibling order before the VM observes
+/// them. Unmaterialized host children remain in their existing order.
+pub fn synchronize_topology(memory: &Space) -> Result<(), String> {
+    let resources = RAW_RESOURCES.with(|map| map.borrow().clone());
+    let inverse: HashMap<_, _> = resources
+        .iter()
+        .map(|(&logical, &raw)| (raw, logical))
+        .collect();
+    let mut moved = HashMap::new();
+    slr_resource::node::with_res(|host| {
+        for (&logical, &raw) in &resources {
+            let Some(resource) = host.container(logical) else {
+                continue;
+            };
+            let parent_raw = memory.r32(raw + 0x14);
+            let parent = if parent_raw == 0 {
+                0
+            } else {
+                *inverse
+                    .get(&parent_raw)
+                    .ok_or("native parent lacks host identity")?
+            };
+            if resource.parent != parent {
+                moved.insert(raw, (logical, parent));
+            }
+        }
+        // A resource move appends. Read the final native list to order moves
+        // that happened within the same native graph before any callback.
+        let parents: std::collections::BTreeSet<_> =
+            moved.keys().map(|raw| memory.r32(raw + 0x14)).collect();
+        for parent_raw in parents {
+            if parent_raw == 0 {
+                continue;
+            }
+            let mut child = memory.r32(parent_raw + 0x20);
+            let mut seen = std::collections::HashSet::new();
+            while child != 0 && memory.r32(child + 4) != 0 {
+                if !seen.insert(child) {
+                    return Err("cyclic native resource child list".into());
+                }
+                if let Some((logical, parent)) = moved.remove(&child) {
+                    host.synchronize_parent(logical, parent)?;
+                }
+                child = memory.r32(child + 4);
+            }
+        }
+        for (_, (logical, parent)) in moved {
+            if parent != 0 {
+                return Err("moved native resource absent from parent's list".into());
+            }
+            host.synchronize_parent(logical, parent)?;
+        }
+        Ok(())
+    })
+}
 pub fn with_body<R>(container: u32, f: impl FnOnce(&mut NativeBody) -> R) -> Option<R> {
     BODIES.with(|bodies| {
         let mut bodies = bodies.borrow_mut();
@@ -229,7 +311,7 @@ pub fn clear() {
             crate::factory::release_cfg(binding);
         }
     }
-    MEMORY.with(|memory| *memory.borrow_mut() = Some(Space::new()));
+    MEMORY.with(|memory| *memory.borrow_mut() = Some(new_world_memory()));
     RAW_RESOURCES.with(|map| map.borrow_mut().clear());
 }
 
@@ -243,6 +325,19 @@ pub fn insert(mut body: NativeBody) {
     });
 }
 
+pub fn has_native_body(container: u32) -> bool {
+    BODIES.with(|bodies| bodies.borrow().contains_key(&container))
+}
+
+pub fn body_container(body: u32) -> Option<u32> {
+    BODIES.with(|bodies| {
+        bodies
+            .borrow()
+            .iter()
+            .find_map(|(&container, state)| (state.body == body).then_some(container))
+    })
+}
+
 pub fn has_loaded_template(container: u32) -> bool {
     TEMPLATES.with(|templates| templates.borrow().contains_key(&container))
 }
@@ -251,6 +346,43 @@ pub fn has_loaded_template(container: u32) -> bool {
 /// `prepare_template`. Query routing uses the original template vtable slot.
 pub fn template_payload(container: u32) -> Option<u32> {
     TEMPLATES.with(|templates| templates.borrow().get(&container).map(|t| t.body))
+}
+
+/// Lazy native template loads may acquire references while constructing the
+/// first instance. Their ownership belongs to the template, across instances.
+pub fn retain_template_bindings(
+    container: u32,
+    bindings: HashMap<u32, crate::factory::CfgBinding>,
+) -> Result<(), String> {
+    TEMPLATES.with(|templates| {
+        let mut templates = templates.borrow_mut();
+        let Some(template) = templates.get_mut(&container) else {
+            for (_, binding) in bindings {
+                crate::factory::release_cfg(binding);
+            }
+            return Err("NativeTemplateBoundary: loaded reference owner missing".into());
+        };
+        for (slot, binding) in bindings {
+            if let Some(old) = template.bindings.insert(slot, binding) {
+                crate::factory::release_cfg(old);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Read the current ABI state without taking the shared graph's lease. During
+/// a VM callback that graph is back in MEMORY, including the parent's live
+/// native scratch. A new script-native call needs its own recovered CALL
+/// context; treating it as an independent oracle-driver entry corrupts that
+/// parent or panics inside native_stack::enter.
+pub fn has_active_native_frame() -> bool {
+    MEMORY.with(|memory| {
+        memory
+            .borrow()
+            .as_ref()
+            .is_some_and(crate::native_stack::active)
+    })
 }
 
 pub fn with_world_memory<R>(f: impl FnOnce(&mut Space) -> R) -> Result<R, String> {
@@ -264,8 +396,39 @@ pub fn with_world_memory<R>(f: impl FnOnce(&mut Space) -> R) -> Result<R, String
         .with(|memory| memory.borrow_mut().take())
         .ok_or("NativeBodyBoundary: shared memory is already borrowed")?;
     let mut lease = Lease(Some(memory));
-    synchronize_generation(lease.0.as_mut().expect("active shared memory lease"));
-    Ok(f(lease.0.as_mut().expect("active shared memory lease")))
+    let memory = lease.0.as_mut().expect("active shared memory lease");
+    synchronize_flags(memory, true);
+    synchronize_generation(memory);
+    let result = f(memory);
+    synchronize_flags(memory, false);
+    Ok(result)
+}
+
+/// Return an active native graph's memory to the runtime while a VM callback
+/// executes. A callback can enter another native, construct a resource or
+/// destroy one; all of those operations must see the same live memory. Moving
+/// ownership avoids holding a RefCell borrow or aliasing a mutable Space.
+pub fn during_vm_callback<R>(
+    memory: &mut Space,
+    f: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    if MEMORY.with(|slot| slot.borrow().is_some()) {
+        return Err("NativeBodyBoundary: callback requires an active memory lease".into());
+    }
+    synchronize_topology(memory)?;
+    synchronize_flags(memory, false);
+    MEMORY.with(|slot| *slot.borrow_mut() = Some(std::mem::replace(memory, Space::new())));
+    struct Restore<'a>(&'a mut Space);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            *self.0 = MEMORY
+                .with(|slot| slot.borrow_mut().take())
+                .expect("VM callback returned shared memory");
+            synchronize_flags(self.0, true);
+        }
+    }
+    let _restore = Restore(memory);
+    f()
 }
 
 /// 442500/45dcf0: fresh native template storage and embedded list sentinels.
@@ -513,14 +676,19 @@ impl ConfigHost {
                 Ok(binding.container)
             }
             EXT_EULER_TO_MATRIX => {
-                let matrix = slr_lang::vec::Mat3::from_ypr(slr_lang::vec::Ypr::new(
-                    f32::from_bits(word(0)),
-                    f32::from_bits(word(1)),
-                    f32::from_bits(word(2)),
-                ));
-                for (i, value) in matrix.m.into_iter().enumerate() {
-                    memory.wf(address + (i / 3 * 16 + i % 3 * 4) as u32, value);
+                // The CFG port captures the three words behind the original
+                // angle pointer. Recreate that input in the native scratch
+                // frame; keep the caller's ESP, including on explicit gaps.
+                let saved = crate::native_stack::sp(memory);
+                let angles = crate::native_install::local_reference(memory);
+                for i in 0..3 {
+                    memory.w32(angles + i as u32 * 4, word(i));
                 }
+                let frame = crate::native_stack::sp(memory).wrapping_sub(8);
+                let result =
+                    crate::native_matrix::from_euler_memory(memory, address, angles, frame);
+                crate::native_stack::set_sp(memory, saved);
+                result?;
                 Ok(0)
             }
             EXT_MATRIX_TO_EULER => {
@@ -664,7 +832,7 @@ pub fn prepare_template(
     class: &str,
     path: &str,
 ) -> Result<NativeBody, String> {
-    if !matches!(class, "car" | "part") {
+    if !matches!(class, "car" | "part" | "cursor" | "player") {
         return Err(format!(
             "NativeTemplateBoundary: {class} template construction is not integrated"
         ));
@@ -676,6 +844,47 @@ pub fn prepare_template(
             .map(|template| template.body)
     }) {
         return NativeBody::acquire(container, template);
+    }
+    if class == "player" {
+        let mut state = NativeBody::acquire(container, 0)?;
+        let raw = raw_resource(&mut state.memory, container)?;
+        let mut host = crate::native_player_runtime::Runtime::new(vm, id);
+        state.template = crate::native_player::template(&mut state.memory, 0, raw, &mut host)?;
+        state.memory.w32(raw + 0x8c, state.template);
+        crate::native_resource_load::mark_loaded(&mut state.memory, raw, 1)?;
+        crate::native_assets::synchronize_loaded(&state.memory, raw)?;
+        TEMPLATES.with(|templates| {
+            templates.borrow_mut().insert(
+                container,
+                NativeTemplate {
+                    body: state.template,
+                    bindings: host.take_bindings(),
+                },
+            );
+        });
+        return Ok(state);
+    }
+    if class == "cursor" {
+        let mut state = NativeBody::acquire(container, 0)?;
+        let raw = raw_resource(&mut state.memory, container)?;
+        let mut host = crate::native_cursor_runtime::Runtime {
+            vm,
+            template_id: id,
+        };
+        state.template = crate::native_cursor::template(&mut state.memory, raw, &mut host)?;
+        state.memory.w32(raw + 0x8c, state.template);
+        crate::native_resource_load::mark_loaded(&mut state.memory, raw, 1)?;
+        crate::native_assets::synchronize_loaded(&state.memory, raw)?;
+        TEMPLATES.with(|templates| {
+            templates.borrow_mut().insert(
+                container,
+                NativeTemplate {
+                    body: state.template,
+                    bindings: Default::default(),
+                },
+            );
+        });
+        return Ok(state);
     }
     let bytes = crate::factory::read_cfg_file(path)?;
     let mut state = NativeBody::acquire(container, 0)?;
@@ -767,6 +976,79 @@ pub fn prepare_template(
         )
     });
     Ok(state)
+}
+
+fn new_world_memory() -> Space {
+    let mut m = Space::new();
+    IMAGE.with(|image| {
+        if let Some(image) = image.borrow().as_ref() {
+            image.initialize(&mut m);
+        }
+    });
+    crate::native_notifications::initialize_retired(&mut m);
+    crate::native_callbacks::initialize(&mut m, crate::native_callbacks::CONTEXT);
+    crate::native_message::initialize_release_queue(&mut m);
+    m
+}
+
+/// Original545f70 invalidates the raw weak links before the resource is freed.
+/// This runs inside the factory's host borrow and does not synchronize the host.
+pub fn invalidate_raw_resource(container: u32) -> Result<(), String> {
+    let raw = RAW_RESOURCES.with(|map| map.borrow().get(&container).copied());
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    MEMORY.with(|memory| {
+        let mut slot = memory.borrow_mut();
+        let m = slot
+            .as_mut()
+            .ok_or("raw resource destruction while native memory is leased")?;
+        let mut reference = m.r32(raw + 0x48);
+        while reference != 0 {
+            let next = m.r32(reference + 4);
+            for offset in [0, 4, 8, 12] {
+                m.w32(reference + offset, 0);
+            }
+            reference = next;
+        }
+        m.w32(raw + 0x48, 0);
+        Ok(())
+    })
+}
+
+/// Final5517f0 tree/list unlink, after recursive child destruction. Return
+/// retained host links for release after the factory's host borrow ends.
+pub fn retire_raw_resource(container: u32) -> Result<Vec<crate::factory::CfgBinding>, String> {
+    let raw = RAW_RESOURCES.with(|map| map.borrow().get(&container).copied());
+    if let Some(raw) = raw {
+        MEMORY.with(|memory| {
+            let mut slot = memory.borrow_mut();
+            let m = slot
+                .as_mut()
+                .ok_or("raw resource retirement while native memory is leased")?;
+            for next_offset in [4, 12] {
+                let previous = m.r32(raw + next_offset + 4);
+                let next = m.r32(raw + next_offset);
+                if previous != 0 && next != 0 {
+                    m.w32(next + next_offset + 4, previous);
+                    m.w32(previous + next_offset, next);
+                }
+                m.w32(raw + next_offset, 0);
+                m.w32(raw + next_offset + 4, 0);
+            }
+            m.w32(raw + 0x14, 0);
+            Ok::<_, String>(())
+        })?;
+        RAW_RESOURCES.with(|map| map.borrow_mut().remove(&container));
+    }
+    let mut bindings = vec![];
+    if let Some(mut body) = BODIES.with(|map| map.borrow_mut().remove(&container)) {
+        bindings.extend(body.resource_bindings.drain().map(|(_, binding)| binding));
+    }
+    if let Some(template) = TEMPLATES.with(|map| map.borrow_mut().remove(&container)) {
+        bindings.extend(template.bindings.into_values());
+    }
+    Ok(bindings)
 }
 
 #[cfg(test)]
@@ -890,5 +1172,390 @@ mod tests {
         long.extend_from_slice(b"88\n");
         parse_cfg(&mut memory, k, &mut NoHost, &long);
         assert_eq!(memory.r32(k + 0x114c), 42);
+    }
+}
+
+#[cfg(test)]
+mod live_graph_tests {
+    use super::*;
+    use slr_resource::node::with_res;
+
+    #[test]
+    fn native_reparent_is_visible_to_callbacks_and_preserves_sibling_destruction() {
+        crate::factory::configure(None, None);
+        let root = crate::factory::game_root().unwrap();
+        let make = |parent, name| {
+            crate::factory::create_resource(crate::factory::ResourceDescriptor {
+                kind: 1,
+                flags: 0,
+                parent: Some(parent),
+                template: None,
+                name,
+            })
+            .unwrap()
+        };
+        let old = make(root, "old");
+        let new = make(root, "new");
+        let a = make(old, "a");
+        let b = make(old, "b");
+        let c = make(new, "c");
+        with_world_memory(|m| {
+            let ar = raw_resource(m, a).unwrap();
+            let br = raw_resource(m, b).unwrap();
+            let nr = raw_resource(m, new).unwrap();
+            raw_resource(m, c).unwrap();
+            let body = m.alloc(16);
+            let link = m.alloc(16);
+            crate::native_part::bind_reference(m, body, ar);
+            crate::native_part::bind_reference(m, link, nr);
+            crate::native_render_graph::reparent_body(m, body, link);
+            crate::native_part::bind_reference(m, body, br);
+            crate::native_render_graph::reparent_body(m, body, link);
+            during_vm_callback(m, || {
+                with_res(|host| {
+                    assert_eq!(host.container(a).unwrap().parent, new);
+                    assert_eq!(host.child_containers(old), Vec::<u32>::new());
+                    assert_eq!(host.child_containers(new), vec![c, a, b]);
+                });
+                with_world_memory(|shared| shared.w32(0x3010_0020, 7))?;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(m.r32(0x3010_0020), 7);
+            crate::native_part::bind_reference(m, body, 0);
+            crate::native_part::bind_reference(m, link, 0);
+        })
+        .unwrap();
+        crate::factory::destroy_resource(a).unwrap();
+        with_res(|host| {
+            assert_eq!(host.child_containers(new), vec![c, b]);
+            assert_eq!(host.container(b).unwrap().previous_sibling, c);
+        });
+    }
+
+    #[test]
+    fn native_memory_is_returned_after_nested_callback_error() {
+        clear();
+        with_world_memory(|m| {
+            m.w32(0x3010_0010, 12);
+            let result: Result<(), String> = during_vm_callback(m, || {
+                with_world_memory(|shared| {
+                    assert_eq!(shared.r32(0x3010_0010), 12);
+                    shared.w32(0x3010_0010, 13);
+                    during_vm_callback(shared, || {
+                        with_world_memory(|inner| inner.w32(0x3010_0014, 14))?;
+                        Err::<(), _>("script failure".into())
+                    })
+                })?
+            });
+            assert_eq!(result.unwrap_err(), "script failure");
+            assert_eq!(m.r32(0x3010_0010), 13);
+            assert_eq!(m.r32(0x3010_0014), 14);
+        })
+        .unwrap();
+        assert_eq!(with_world_memory(|m| m.r32(0x3010_0014)).unwrap(), 14);
+    }
+}
+
+#[cfg(test)]
+mod independent_lifecycle_review {
+    use super::*;
+    #[test]
+    fn verifier_deleted_raw_resources_are_not_discoverable() {
+        crate::factory::configure(None, None);
+        let parent = crate::factory::game_root().unwrap();
+        let child = crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind: 1,
+            flags: 0,
+            parent: Some(parent),
+            template: None,
+            name: "review-child",
+        })
+        .unwrap();
+        let (parent_raw, child_raw, id) = with_world_memory(|m| {
+            let raw = raw_resource(m, child).unwrap();
+            let parent_raw = raw_resource(m, parent).unwrap();
+            (parent_raw, raw, m.r32(raw + 0x50))
+        })
+        .unwrap();
+        crate::factory::destroy_resource(child).unwrap();
+        assert!(slr_resource::node::with_res(|host| host
+            .container(child)
+            .is_none()));
+        with_world_memory(|m| {
+            let found = crate::native_resource_index::find(m, parent_raw, id);
+            assert_eq!(
+                found, 0,
+                "destroyed id {id:#x} raw={child_raw:#x} remains in original resource tree"
+            );
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod independent_followup_review {
+    use super::*;
+    fn create(parent: u32, kind: i32, name: &str) -> u32 {
+        crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind,
+            flags: 0,
+            parent: Some(parent),
+            template: None,
+            name,
+        })
+        .unwrap()
+    }
+    #[test]
+    fn verifier_retired_id_reuse_only_finds_new_raw_identity() {
+        crate::factory::configure(None, None);
+        let parent = crate::factory::game_root().unwrap();
+        let victim = create(parent, 1, "victim");
+        let (parent_raw, old_raw, old_id) = with_world_memory(|m| {
+            let raw = raw_resource(m, victim).unwrap();
+            (raw_resource(m, parent).unwrap(), raw, m.r32(raw + 0x50))
+        })
+        .unwrap();
+        crate::factory::destroy_resource(victim).unwrap();
+        assert_eq!(logical_resource(old_raw), None);
+        let replacement = create(parent, 1, "replacement");
+        let new_id = slr_resource::node::with_res(|h| h.container(replacement).unwrap().id);
+        assert_eq!(new_id, old_id, "test requires actual recycled identity");
+        with_world_memory(|m| {
+            let raw = raw_resource(m, replacement).unwrap();
+            assert_ne!(raw, old_raw);
+            assert_eq!(
+                crate::native_resource_index::find(m, parent_raw, new_id),
+                raw
+            );
+        })
+        .unwrap();
+    }
+    #[test]
+    fn verifier_failed_raw_materialization_cannot_become_cached_success() {
+        crate::factory::configure(None, None);
+        crate::RES.with(|r| *r.borrow_mut() = crate::Resources::default());
+        let resource = slr_resource::node::with_res(|h| {
+            h.add_container(slr_resource::node::Container::new(5, 0x90012))
+        });
+        with_world_memory(|m| {
+            let first = raw_resource(m, resource);
+            assert!(first.is_err(), "missing descriptor should fail");
+            let second = raw_resource(m, resource);
+            assert!(
+                second.is_err(),
+                "failed materialization became cached success: {second:?}"
+            );
+        })
+        .unwrap();
+    }
+    #[test]
+    fn verifier_forced_script_unload_cannot_hide_payload_destructor_boundary() {
+        crate::factory::configure(None, None);
+        let root = crate::factory::game_root().unwrap();
+        let parent = create(root, 1, "parent");
+        let texture = create(root, 13, "texture");
+        let asset = create(parent, 14, "loaded-asset");
+        slr_resource::node::with_res(|h| h.container_mut(parent).unwrap().load_state = 1);
+        with_world_memory(|m| {
+            let ar = raw_resource(m, asset).unwrap();
+            let tr = raw_resource(m, texture).unwrap();
+            crate::native_part::bind_reference(m, ar + 0x8c, tr);
+            crate::native_assets::synchronize_bindings(m, ar).unwrap();
+        })
+        .unwrap();
+        assert!(crate::native_assets::owns_payload(asset));
+        let result = crate::factory::unload_resource(parent);
+        assert!(result.is_err(),"forced unload silently retired payload needing original destructor; owns_payload={} host_resource_alive={}", crate::native_assets::owns_payload(asset),slr_resource::node::with_res(|h|h.container(asset).is_some()));
+    }
+}
+
+#[cfg(test)]
+mod independent_flag_projection_review {
+    use super::*;
+    #[test]
+    fn verifier_host_native_flags_reach_next_raw_native_operation() {
+        crate::factory::configure(None, None);
+        let parent = crate::factory::game_root().unwrap();
+        let child = crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind: 1,
+            flags: 0,
+            parent: Some(parent),
+            template: None,
+            name: "flags-child",
+        })
+        .unwrap();
+        let raw = with_world_memory(|m| raw_resource(m, child).unwrap()).unwrap();
+        let flag = slr_resource::node::FLAG_ACTIVE_COLLISION;
+        slr_resource::node::with_res(|h| {
+            let id = h.container(child).unwrap().id;
+            let link = h.add_bound_node(id, child);
+            h.bind_object(0x7777, link);
+            let row = slr_resource::node::GAME_REF_BINDINGS
+                .iter()
+                .find(|r| r.impl_addr == slr_resource::node::SET_FLAGS)
+                .unwrap();
+            h.call(row, &[0x7777, flag]);
+            assert_ne!(h.container(child).unwrap().flags & flag, 0);
+        });
+        with_world_memory(|m| {
+            assert_ne!(
+                m.r32(raw + 0x54) & flag,
+                0,
+                "VM GameRef.setFlags changes never reached shared native memory"
+            )
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod independent_nested_publication_review {
+    use super::*;
+    fn make() -> (u32, u32) {
+        crate::factory::configure(None, None);
+        let parent = crate::factory::game_root().unwrap();
+        let child = crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind: 1,
+            flags: 0,
+            parent: Some(parent),
+            template: None,
+            name: "nested-flags",
+        })
+        .unwrap();
+        let raw = with_world_memory(|m| raw_resource(m, child).unwrap()).unwrap();
+        (child, raw)
+    }
+    fn change_flags(child: u32, operation: u32, bits: u32) {
+        slr_resource::node::with_res(|h| {
+            let id = h.container(child).unwrap().id;
+            let link = h.add_bound_node(id, child);
+            h.bind_object(0x7777, link);
+            let row = slr_resource::node::GAME_REF_BINDINGS
+                .iter()
+                .find(|r| r.impl_addr == operation)
+                .unwrap();
+            h.call(row, &[0x7777, bits]);
+        });
+    }
+    fn host_flags(child: u32) -> u32 {
+        slr_resource::node::with_res(|h| h.container(child).unwrap().flags)
+    }
+    #[test]
+    fn verifier_two_way_flags_survive_nested_callback_error() {
+        let (child, raw) = make();
+        with_world_memory(|m| {
+            m.w32(raw + 0x54, 0x1000);
+            let status = during_vm_callback(m, || {
+                assert_eq!(host_flags(child), 0x1000);
+                change_flags(child, slr_resource::node::SET_FLAGS, 0x2000);
+                with_world_memory(|inner| {
+                    assert_eq!(inner.r32(raw + 0x54), 0x3000);
+                    inner.w32(raw + 0x54, 0x4000);
+                    during_vm_callback(inner, || {
+                        assert_eq!(host_flags(child), 0x4000);
+                        change_flags(child, slr_resource::node::CLEAR_FLAGS, 0x4000);
+                        change_flags(child, slr_resource::node::SET_FLAGS, 0x8000);
+                        Err::<(), String>("expected script stop".into())
+                    })
+                })?
+            });
+            assert_eq!(status.unwrap_err(), "expected script stop");
+            assert_eq!(m.r32(raw + 0x54), 0x8000);
+        })
+        .unwrap();
+        assert_eq!(host_flags(child), 0x8000);
+    }
+    #[test]
+    fn verifier_native_flag_mutation_without_callback_reaches_host() {
+        let (child, raw) = make();
+        with_world_memory(|m| m.w32(raw + 0x54, 0x400000)).unwrap();
+        assert_eq!(host_flags(child), 0x400000);
+        change_flags(child, slr_resource::node::CLEAR_FLAGS, 0x400000);
+        with_world_memory(|m| assert_eq!(m.r32(raw + 0x54), 0)).unwrap();
+    }
+    #[test]
+    fn verifier_callback_destruction_retires_raw_graph_without_host_reborrow() {
+        let (child, raw) = make();
+        with_world_memory(|m| {
+            let link = m.alloc(16);
+            crate::native_part::bind_reference(m, link, raw);
+            during_vm_callback(m, || crate::factory::destroy_resource(child)).unwrap();
+            assert_eq!(m.r32(link + 12), 0);
+            assert_eq!(logical_resource(raw), None);
+        })
+        .unwrap();
+        assert!(slr_resource::node::with_res(|h| h
+            .container(child)
+            .is_none()));
+    }
+
+    #[test]
+    fn raw_callback_weak_refs_do_not_follow_recycled_resource_ids() {
+        let (child, raw) = make();
+        let id = slr_resource::node::with_res(|h| h.container(child).unwrap().id);
+        with_world_memory(|m| {
+            let context = crate::native_callbacks::CONTEXT;
+            crate::native_callbacks::register(m, context, raw, 9);
+            let old = crate::native_install::first(m, context + 0x1c);
+            let replacement = during_vm_callback(m, || {
+                crate::factory::destroy_resource(child)?;
+                let parent = crate::factory::game_root()?;
+                crate::factory::create_resource(crate::factory::ResourceDescriptor {
+                    kind: 1,
+                    flags: 0,
+                    parent: Some(parent),
+                    template: None,
+                    name: "recycled-callback-target",
+                })
+            })
+            .unwrap();
+            assert_eq!(m.r32(old + 20), 0);
+            assert_eq!(m.r32(old + 24), 0);
+            assert_eq!(
+                slr_resource::node::with_res(|h| h.container(replacement).unwrap().id),
+                id
+            );
+            let new_raw = raw_resource(m, replacement).unwrap();
+            assert_ne!(new_raw, raw);
+            crate::native_callbacks::register(m, context, new_raw, 9);
+            let mut observed = vec![];
+            let retired = crate::native_callbacks::walk(m, context, 9, |m, reference| {
+                observed.push(m.r32(reference + 12));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(observed, vec![new_raw]);
+            assert_eq!(retired, vec![old]);
+            assert_eq!(m.r32(context + 0xc8), 1);
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_destructor_boundary_tests {
+    use super::*;
+    #[test]
+    fn configured_runtime_destroy_requires_original_native_destructor_before_retirement() {
+        crate::factory::configure(None, None);
+        let root = crate::factory::game_root().unwrap();
+        let resource = crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind: 1,
+            flags: 0,
+            parent: Some(root),
+            template: None,
+            name: "native-destructor-boundary",
+        })
+        .unwrap();
+        let mut state = NativeBody::acquire(resource, 0).unwrap();
+        state.body = state.memory.alloc(0x11c);
+        insert(state);
+        let result = crate::factory::destroy_resource(resource);
+        assert!(result.unwrap_err().contains("native class destructor"));
+        assert!(has_native_body(resource));
+        assert!(slr_resource::node::with_res(|host| host
+            .container(resource)
+            .is_some()));
     }
 }
