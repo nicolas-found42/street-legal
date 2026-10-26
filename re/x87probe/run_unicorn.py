@@ -46,7 +46,7 @@ from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UC_PROT_ALL
 from unicorn import x86_const as X
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.abspath(os.path.join(HERE, "..", "out", "x87"))
+OUT_DIR = os.path.abspath(os.environ.get("X87_OUT_DIR") or os.path.join(HERE, "..", "out", "x87"))
 CORPUS = os.path.join(OUT_DIR, "corpus.jsonl")
 
 CODE = 0x1000

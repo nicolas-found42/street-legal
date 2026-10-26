@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -154,7 +155,7 @@ def load(path: Path, declared_root: Path | None = None) -> tuple[dict, list[str]
     return data, problems, absent
 
 
-def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None) -> list[dict]:
+def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None, options=None) -> list[dict]:
     """Actual results. Adding a pass requires registering its complete validator.
 
     Do not infer parity from path existence, receipt counters, a test's return
@@ -162,7 +163,7 @@ def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None) -
     (``acceptance/validators/rows``) can promote a result; unsupported
     scenarios remain explicit.
     """
-    return registry.evaluate(rows, boot_bundle=boot_bundle, execute=execute, output_root=output_root)
+    return registry.evaluate(rows, boot_bundle=boot_bundle, execute=execute, output_root=output_root, options=options)
 
 
 def render(results: list[dict]) -> str:
@@ -188,6 +189,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--execute", action="append", choices=registry.executable_ids(), default=[], help="run a live validator; a row's required rows also run live (S10 executes S1); may be repeated")
     parser.add_argument("--output-root", type=Path, default=ROOT / "re/out/acceptance", help="retained isolated validation bundles")
     parser.add_argument("--evidence-root", type=Path, help="main checkout of this repository whose re/out, stock and reference a linked worktree's symlinks may resolve into")
+    parser.add_argument("--bochs", type=Path, default=os.environ.get("SLR_BOCHS"), help="pinned clean Bochs source checkout for G11")
+    parser.add_argument("--intel-observation", type=Path, help="retained native Intel G11 corpus and stream observation")
     args = parser.parse_args(argv)
     try:
         declared_root = evidence_root(args.evidence_root)
@@ -202,7 +205,7 @@ def main(argv: list[str]) -> int:
         else:
             print("acceptance inventory is not trustworthy:\n" + "\n".join(f"  - {error}" for error in errors), file=sys.stderr)
         return 2
-    results = evaluate(data["rows"], args.boot_bundle.resolve() if args.boot_bundle else None, args.execute, args.output_root.resolve())
+    results = evaluate(data["rows"], args.boot_bundle.resolve() if args.boot_bundle else None, args.execute, args.output_root.resolve(), {"bochs": args.bochs, "intel_observation": args.intel_observation})
     accepted = len(results) == 54 and all(row["result"] == "passed" for row in results)
     if args.json:
         print(json.dumps({"schema": 2, "accepted": accepted, "report_only": args.table, "results": results}, indent=2))

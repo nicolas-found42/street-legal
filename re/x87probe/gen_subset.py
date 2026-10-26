@@ -21,8 +21,8 @@ import json
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORPUS = os.path.abspath(os.path.join(HERE, "..", "out", "x87", "corpus.jsonl"))
-OUT = os.path.join(HERE, "rosetta", "vectors.inc")
+CORPUS = os.path.abspath(os.path.join(os.environ.get("X87_OUT_DIR") or os.path.join(HERE, "..", "out", "x87"), "corpus.jsonl"))
+OUT = os.environ.get("X87_VECTORS_INC") or os.path.join(HERE, "rosetta", "vectors.inc")
 
 OPS = ["fadd", "fsub", "fmul", "fdiv", "fsqrt", "fsin", "fcos", "f2xm1",
        "fyl2x", "fpatan", "fprem", "fcom", "fcomp", "fucom", "fucomi",

@@ -449,10 +449,11 @@
       "kind": "gate",
       "title": "Float parity (ADR 0007/0008): bit-exact x87 transcendentals pinned to a documented implementation, no tolerance-based approval",
       "status": "partial",
-      "note": "SoftFloat vendored; Unicorn capture regenerated after the negative-zero encoder fix; Rosetta assessment pending.",
+      "note": "Per-operation trust table is machine-derived by acceptance/g11.py (--execute G11): arithmetic, compares, fistp, fld/fst, fscale and frndint pinned bit-exact; fsin/fcos/fpatan/f2xm1/fyl2x/fptan unpinned (Bochs and Rosetta differ on 5-9% of 80-bit results, no Intel silicon observation), fprem partial reductions, fxam/ftst unprobed. Blocked on a user decision and Intel x87 device access; see docs/research/x87-g11-decision.md.",
       "evidence": [
         "docs/acceptance-inventory.md",
-        "docs/x87.md"
+        "docs/x87.md",
+        "docs/research/x87-g11-decision.md"
       ]
     },
     {
