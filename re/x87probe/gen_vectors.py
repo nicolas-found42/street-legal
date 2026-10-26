@@ -20,7 +20,7 @@ import json
 import math
 import os
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out", "x87")
+OUT_DIR = os.environ.get("X87_OUT_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out", "x87")
 CORPUS_PATH = os.path.join(OUT_DIR, "corpus.jsonl")
 MANIFEST_PATH = os.path.join(OUT_DIR, "manifest.json")
 

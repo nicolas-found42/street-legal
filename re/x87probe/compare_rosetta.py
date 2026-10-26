@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compare as C
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.abspath(os.path.join(HERE, "..", "out", "x87"))
+OUT_DIR = os.path.abspath(os.environ.get("X87_OUT_DIR") or os.path.join(HERE, "..", "out", "x87"))
 ROSETTA_IN = os.path.join(os.path.dirname(OUT_DIR), "wine", "logs", "probe-stdout.log")
 ROSETTA_COPY = os.path.join(OUT_DIR, "rosetta_results.jsonl")
 

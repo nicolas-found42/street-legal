@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
+from g11 import g11_result
 from validators import boot_result, ledger_result, result, retirement_result, run_boot, stock_identity
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,7 +122,7 @@ def load(path: Path) -> tuple[dict, list[str], list[str]]:
     return data, problems, absent
 
 
-def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None) -> list[dict]:
+def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None, bochs=None, hardware=None) -> list[dict]:
     """Actual results. Adding a pass requires implementing its complete validator.
 
     Do not infer parity from path existence, receipt counters, a test's return
@@ -145,6 +147,10 @@ def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None) -
     )
     by_id["S10"].update(retirement_result(output_root, by_id["S1"] if live_boot else None,
         live_execution="S10" in execute))
+    by_id["G11"].update(
+        g11_result(output_root, bochs, hardware) if "G11" in execute else
+        result("not_run", "Run --execute G11 (with --bochs) for the fresh per-operation x87 trust table; receipts cannot assert pass.")
+    )
     if "G1" in execute:
         try:
             stock = stock_identity(ROOT / "stock")
@@ -174,7 +180,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--table", action="store_true", help="report only; cannot establish acceptance")
     parser.add_argument("--json", action="store_true", help="emit computed results, never inventory claims")
     parser.add_argument("--boot-bundle", type=Path, help="recompare a source/input-bound isolated boot bundle")
-    parser.add_argument("--execute", action="append", choices=("S1", "S10", "S11", "G1"), default=[], help="run a live validator; S10 also executes S1; may be repeated")
+    parser.add_argument("--execute", action="append", choices=("S1", "S10", "S11", "G1", "G11"), default=[], help="run a live validator; S10 also executes S1; may be repeated")
+    parser.add_argument("--bochs", type=Path, default=os.environ.get("SLR_BOCHS"), help="clean sparse Bochs checkout at the pinned revision (G11)")
+    parser.add_argument("--intel-observation", type=Path, help="directory with corpus.json, intel.out and intel.stderr from an untranslated Intel x87 run (G11)")
     parser.add_argument("--output-root", type=Path, default=ROOT / "re/out/acceptance", help="retained isolated validation bundles")
     args = parser.parse_args(argv)
     data, problems, absent = load(args.matrix)
@@ -185,7 +193,8 @@ def main(argv: list[str]) -> int:
         else:
             print("acceptance inventory is not trustworthy:\n" + "\n".join(f"  - {error}" for error in errors), file=sys.stderr)
         return 2
-    results = evaluate(data["rows"], args.boot_bundle.resolve() if args.boot_bundle else None, args.execute, args.output_root.resolve())
+    results = evaluate(data["rows"], args.boot_bundle.resolve() if args.boot_bundle else None, args.execute, args.output_root.resolve(),
+        args.bochs.resolve() if args.bochs else None, args.intel_observation.resolve() if args.intel_observation else None)
     accepted = len(results) == 54 and all(row["result"] == "passed" for row in results)
     if args.json:
         print(json.dumps({"schema": 2, "accepted": accepted, "report_only": args.table, "results": results}, indent=2))

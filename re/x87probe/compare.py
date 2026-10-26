@@ -38,7 +38,7 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.abspath(os.path.join(HERE, "..", "out", "x87"))
+OUT_DIR = os.path.abspath(os.environ.get("X87_OUT_DIR") or os.path.join(HERE, "..", "out", "x87"))
 
 BIAS = 16383
 

@@ -48,7 +48,12 @@ use serde::Deserialize;
 use slr_x87::trans::{tolerance, Approx};
 use slr_x87::{Precision, Rounding, X87};
 
-const OUT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../re/out/x87");
+const DEFAULT_OUT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../re/out/x87");
+
+/// The capture directory; `X87_OUT_DIR` points the test at a freshly produced capture.
+fn out_dir() -> String {
+    std::env::var("X87_OUT_DIR").unwrap_or_else(|_| DEFAULT_OUT_DIR.to_string())
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // mirrors the corpus JSONL row; `id` cross-checked via map keys
@@ -412,29 +417,30 @@ fn fprem_partial_contract(a: X87, b: X87, r: X87) -> bool {
 
 #[test]
 fn trusted_probes_match_bit_for_bit() {
+    let out_dir = out_dir();
     // Data-free CI: the oracle corpus is git-ignored and regenerated locally
     // via `re/x87probe/README.md`. Skip (never fail) when it is absent.
     let missing = ["corpus.jsonl", "sf_results.jsonl", "uc_results.jsonl"]
         .iter()
-        .filter(|f| !std::path::Path::new(&format!("{OUT_DIR}/{f}")).exists())
+        .filter(|f| !std::path::Path::new(&format!("{out_dir}/{f}")).exists())
         .count();
     if missing > 0 {
         eprintln!(
-            "SKIP: trusted-probe oracle data missing {missing}/3 under {OUT_DIR} - \
+            "SKIP: trusted-probe oracle data missing {missing}/3 under {out_dir} - \
              regenerate via re/x87probe/README.md (data-free machines skip, CI stays green)"
         );
         return;
     }
-    let corpus: HashMap<u32, Vector> = read_jsonl(&format!("{OUT_DIR}/corpus.jsonl"));
-    let sf: HashMap<u32, SfResult> = read_jsonl(&format!("{OUT_DIR}/sf_results.jsonl"));
-    let uc: HashMap<u32, UcResult> = read_jsonl(&format!("{OUT_DIR}/uc_results.jsonl"));
+    let corpus: HashMap<u32, Vector> = read_jsonl(&format!("{out_dir}/corpus.jsonl"));
+    let sf: HashMap<u32, SfResult> = read_jsonl(&format!("{out_dir}/sf_results.jsonl"));
+    let uc: HashMap<u32, UcResult> = read_jsonl(&format!("{out_dir}/uc_results.jsonl"));
     // Third leg (ADR 0008 triangulation): translated x86_64 execution under
     // Rosetta 2. Optional for a checkout without that capture, but when it is
     // present every arithmetic TRUSTED cell must also match there.
     let rt: Option<HashMap<u32, UcResult>> =
-        std::path::Path::new(&format!("{OUT_DIR}/rosetta_results.jsonl"))
+        std::path::Path::new(&format!("{out_dir}/rosetta_results.jsonl"))
             .exists()
-            .then(|| read_jsonl(&format!("{OUT_DIR}/rosetta_results.jsonl")));
+            .then(|| read_jsonl(&format!("{out_dir}/rosetta_results.jsonl")));
     assert_eq!(
         corpus.len(),
         21702,
