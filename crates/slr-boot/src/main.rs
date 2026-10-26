@@ -21,6 +21,7 @@ mod native_cursor_pick;
 mod native_cursor_runtime;
 mod native_defaults;
 mod native_definition;
+mod native_diagnostics;
 mod native_dynamics;
 mod native_entity;
 mod native_factory;
@@ -520,6 +521,18 @@ pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmEr
 }
 
 fn live_native_boundary(
+/// Bracket one main-loop phase. A phase without its exit failed inside.
+fn frame_phase(frame: u64, phase: &str, edge: &str) {
+    telemetry::detail(
+        "frame-phase",
+        vec![
+            ("frame".into(), frame.to_string()),
+            ("phase".into(), phase.into()),
+            ("edge".into(), edge.into()),
+        ],
+    );
+}
+
     context: &slr_vm::host::NativeContext<'_>,
     info: &CallInfo<'_>,
 ) -> Result<(), String> {
@@ -1190,7 +1203,10 @@ fn run(
             )
         })?;
         sched::advance_ms(1000.0 / 60.0);
+        frame_phase(frame, "engine-step", "enter");
         if sched::replaying() {
+        frame_phase(frame, "engine-step", "exit");
+        frame_phase(frame, "scheduler-tick", "enter");
             engine::sample_replayed_animation_time();
         }
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
@@ -1199,12 +1215,17 @@ fn run(
         //increments the same generation that GfxEngine.flush advances.
         slr_render_natives::with_render(|render| render.advance_frame_generation());
         engine::notify_render_waiters(vm)
+        frame_phase(frame, "scheduler-tick", "exit");
             .map_err(|e| format!("render notify frame {frame}: {e}"))?;
         if let Some(seconds) = sched::replayed_frame_dt(frame + 1)? {
             engine::set_frame_dt(seconds);
         }
+        frame_phase(frame, "animate-pass", "enter");
         telemetry::detail("frame-exit", vec![("frame".into(), frame.to_string())]);
+        frame_phase(frame, "animate-pass", "exit");
+        frame_phase(frame, "resource-cleanup", "enter");
         if std::env::var_os("SLR_SESSION_CAPTURE").is_none() || frame % 60 == 0 {
+        frame_phase(frame, "resource-cleanup", "exit");
             telemetry::snapshot(vm, "frame-end", None)?;
         }
         if frame % 60 == 0 {

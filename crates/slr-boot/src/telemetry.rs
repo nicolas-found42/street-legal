@@ -133,6 +133,7 @@ pub fn snapshot(vm: &VmHost, phase: &str, failure: Option<&str>) -> Result<(), S
     });
     let value = json!({"schema_version":1,"phase":phase,"sequence":sequence,"provenance":slr_telemetry::provenance(),"context":context,"failure":failure,
         "objects":objects,"queues":queues,"native_roots":anchors,"allocation_count":vm.objects.len(),
+        "native_abi":crate::native_diagnostics::state(),
         "resources":crate::factory::diagnostic_state(),
         "threads":crate::sched::diagnostic_threads(vm),
         "diagnostics":diagnostics::stats(),

@@ -39,6 +39,14 @@ pub fn has_pending_call(m: &Space) -> bool {
 pub fn active(m: &Space) -> bool {
     m.r32(DEPTH) != 0
 }
+/// Entered native frames, for diagnostics only.
+pub fn depth(m: &Space) -> u32 {
+    m.r32(DEPTH)
+}
+/// The highest address a native frame can occupy, for diagnostics only.
+pub fn top() -> u32 {
+    STACK_TOP
+}
 pub fn push(m: &mut Space, value: u32) {
     let p = sp(m).wrapping_sub(4);
     set_sp(m, p);

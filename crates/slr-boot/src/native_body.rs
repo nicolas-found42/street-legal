@@ -385,6 +385,12 @@ pub fn has_active_native_frame() -> bool {
     })
 }
 
+/// Read the shared native memory without leasing or synchronizing it.
+/// `None` while another caller holds the lease.
+pub fn inspect_world_memory<R>(f: impl FnOnce(&Space) -> R) -> Option<R> {
+    MEMORY.with(|memory| memory.borrow().as_ref().map(f))
+}
+
 pub fn with_world_memory<R>(f: impl FnOnce(&mut Space) -> R) -> Result<R, String> {
     struct Lease(Option<Space>);
     impl Drop for Lease {

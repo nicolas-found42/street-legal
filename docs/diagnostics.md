@@ -74,6 +74,32 @@ GC phases, resource identity/ownership and successful VM stores. Floating values
 retain their payload words or x87 register bytes. Observers do not sample the
 clock, invoke scripts or change scheduling decisions.
 
+Ordering and the native boundary have their own categories:
+
+* `frame-phase` brackets each main-loop phase (`engine-step`, `scheduler-tick`,
+  `animate-pass`, `resource-cleanup`) with `enter`/`exit`. A phase without its
+  exit failed inside.
+* `scheduler-decision` records each driver step already computed by the driver:
+  `enter` (clock, budget, deadline), `deadline` (clock against deadline),
+  `sleep-probe`, `run` (thread, slice, adjusted deadline) and `exit` with its
+  reason (`deadline`, `idle-pass`, `list-end`, `cancelled`). `queue_index` is the
+  driver's zero-based queue index.
+* `script-callback-enter`/`-return` bracket a script entered from native code,
+  with its kind, envelope, script and method.
+* `native-abi-boundary` records a rejected nested native entry: the enclosing
+  callback scopes and the native stack (depth, pending CALL, ESP, registers and
+  the raw words above ESP; words are not interpreted as return addresses).
+  `failure.json` repeats the last one under `native_abi`.
+* `native-nested-admitted` records a nested native that `native_nested.rs`
+  admitted (validated callback scope, audited implementation). Script callback
+  events carry `validated` for their wrapper CALL.
+* `native-callback-skipped` records a native class callback (control, animate
+  or drive) the port does not run yet, as on main.
+
+A clock-replay divergence latched earlier in a frame now leads the run's
+failure message (`ClockReplayBoundary (first divergence)`), rather than being
+hidden by a later failure in the same frame.
+
 Native call logs and JSON events are written incrementally without a userspace
 history buffer. Each frame synchronizes streams and state; completion synchronizes
 all streams before writing its durable marker. A killed process can leave a
