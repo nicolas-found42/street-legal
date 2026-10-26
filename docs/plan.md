@@ -1,3 +1,4 @@
+<!-- Current continuation is recorded in docs/boot-status.md. -->
 # Plan: full exact Rust replica of Street Legal Racing: Redline (stock v2.2.1, build 606)
 
 Governing decisions: ADR 0004–0009. Vocabulary: `GLOSSARY.md`. Status of each function: the fidelity ledger in
@@ -14,6 +15,86 @@ Ground rules for every issue:
 
 Labels: an issue whose blockers are all closed gets `ready-for-agent`; until then it is `needs-triage`.
 Blockers use GitHub issue dependencies. Sizing: each issue fits one agent session (about one day).
+
+## Active delivery campaign (2026-10-21)
+
+Lead owns production runtime and continuous integration. The latest2026-10-22
+completion mandate authorizes bounded delegation, superseding the earlier solo
+preference; inherited worker changes remain preserved.
+Independent final acceptance remains required before declaring completion.
+No milestone or commit is whole-game acceptance. Current dependencies:
+
+| Milestone | Behavior and acceptance boundary | Depends on | Record |
+|---|---|---|---|
+| C0 — Recover starting state | Preserve all worktree deltas, rebuild and reproduce strict boot failure, audit 54 obligations and locally available oracle provenance | — | #40, #106, #110 |
+| C1 — Native installation graph | Live 426800/4265c0 routes commands through 475ec0/458c00; original slot/owner/render/physics collaborators invoke unchanged scripts at native call sites; complete-graph differential checkpoints and strict integrated replay | C0 | #40, #47, #100 |
+| C2 — Complete boot | Finish production resource/VM/render dependencies exposed by C1; complete filtered AND unfiltered call-log equality with deterministic clocks and endpoint checks | C1, #110 | #40, #75 |
+| C3 — Native simulation and world | All native bodies, world/collision/traffic/pedestrian dependencies, stock parts, every car; per-function comparisons and 24-car drag/braking/collision sessions | C2, M2, x87 trust | #43–#56, #51, #99, #100 |
+| C4 — Native presentation and devices | Actual macOS window/fullscreen, D3D9/DirectSound/DirectInput streams through unchanged scripts; video and named visual/listening review packages | C2, M2; C3 for driving scenes | #57–#70 |
+| C5 — Career and parity | Byte-identical SDAT/config, cross-load both ways, every P01–P30 scenario and required human reviews | C3, C4 | #71–#104 |
+| C6 — Frozen independent acceptance | Fresh rebuild of frozen revision; stock/exe/oracle/policy/source-bound executable results for every one of 54 obligations | C5, all cross-cutting gates | #1 |
+
+C0 observation: branch `exact-port` began at `7e2d2cb`; fourteen tracked
+files and nineteen untracked files contain unfinished runtime/oracle work.
+Five registered worktrees were snapshotted (the other four had clean status)
+under ignored `re/out/checkpoints/20261021-campaign/starting-state-20261022T032015Z/`.
+Inherited changes are assessed in place; none have been discarded.
+
+A current-source build reproduced filtered mismatch 620 / unfiltered 909,
+then clock thread-context failure; bundle
+`re/out/boot/runs/20261022T032015.415079Z-61591a6515d2/`.
+`cargo test -p slr-boot` also reproduced an inherited car-command differential
+harness failure: its caller text allocation shifted constructor heap addresses.
+Acceptance statuses are being regenerated from executable validators; historical
+manual statuses and missing Kuna caches do not establish current parity.
+
+Latest continuation: direct constructor overlap is repaired through actual53a2a0
+and native-only53a5e0 caller kernels, with74+70 complete original caller cases.
+The first new integrated run passed Controller construction and exposed an
+incorrect loaded-state equality in Controller.user_Add, then stopped at the
+separate new-instance caller dependency. That predicate is now regression-tested;
+source-bound integration must be rerun.426470/427210 caller kernels compare680
+original cases; raw VM pool/operand and Thread/frame memory producers have bounded
+evidence but remain unwired pending loader/object/opcode chronology. Native input,
+real display/audio, full boot and final acceptance remain open. The new S10
+validator requires fresh S1 and actual replacement-host boot; it does not pass
+while the approximation remains. Canonical receipts and the exact frontier are
+maintained in `docs/boot-status.md`.
+
+Current dependency checkpoint (2026-10-22): the mandate's starting strict replay
+reached600/889 records then54ecd0 input0x40491687. A bounded memory-consumer
+implementation now passes original complete-buffer/raw-point checks without
+closing scalar G11. Native cursor construction, frame and command paths are
+being integrated; the current candidate passes Config/cursor-mode setup and reaches619/908 native
+records in frame31, then stops at the original nested VM-native ABI context in
+Part.addpart. Do not restore the former proxy or reset parent scratch to hide
+that frontier. Config-anchor publication is corrected. Resource-drive dispatch and
+its72 controlled original cases are integrated; a recovered VM-native ABI
+context is still required for reentrant constructors. The changed acceptance
+fixture selector correctly invalidated the old installation snapshot; actual
+original recapture/replay restored22 passing snapshot checks and the full bin
+suite passes193 tests. Current commands, bundles, independent
+review findings and remaining boundaries are maintained in
+`docs/boot-status.md`. Report G001–G028 and C1–C9 map to canonical obligations
+in `docs/research/external-critique-acceptance-map.md`; no retired-app fix closes
+production acceptance. All feature/gate obligations remain governed by the
+unchanged completion contract.
+
+The current execution independently reproduced619/908 from a private build and
+preserved its starting source under `re/out/checkpoints/mandate-current-20261022T142713Z/`.
+Original callback replay now reaches the first425a90 return, and the final
+native-entry frame kernel has bounded original stack/register/store evidence.
+Explicit VM value-cell ownership now passes13 fresh original identity/lifetime
+cases; raw pool materialization and metadata/opcode stack history remain the
+ABI producer dependency. The blanket guard stays until that context exists.
+Full control/animation kernels have432 controlled original cases and are wired,
+but the latest integrated candidate stops during Controller construction:
+independent execution confirmed an overlapping temporary Ref in the adapter.
+Source53a2a0 caller and composed constructor comparisons are in progress. These
+are active implementation dependencies, not feature acceptance. Callback
+resource eligibility, control's non-type1 selection and cursor picking
+orchestration have production repairs. Canonical evidence and the still-failing
+strict workspace integration remain in `docs/boot-status.md`.
 
 ## Facts this plan rests on (2026-10-17)
 

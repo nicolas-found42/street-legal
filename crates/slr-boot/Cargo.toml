@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 default-run = "slr-boot"
 
+[features]
+# Diagnostic consumer comparisons only; does not change production Euler math.
+experimental-intel-trig = ["slr-x87/experimental-intel-trig"]
+
 [dependencies]
 slr-fmt-scx = { path = "../slr-fmt-scx" }
 slr-vm = { path = "../slr-vm" }

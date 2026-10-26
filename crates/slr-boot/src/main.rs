@@ -2,43 +2,81 @@
 mod engine;
 mod factory;
 mod gc_runtime;
+mod ground_environment;
 mod materialise;
 mod missing_rows;
 mod native_assets;
 mod native_body;
+mod native_callbacks;
 mod native_camera;
 mod native_car;
 mod native_car_command;
+mod native_car_query;
 mod native_car_update;
+mod native_cursor;
+mod native_cursor_pick;
+mod native_cursor_runtime;
 mod native_defaults;
 mod native_definition;
 mod native_dynamics;
 mod native_entity;
 mod native_factory;
 mod native_file;
+mod native_fpu;
+mod native_frame;
 mod native_geometry;
+mod native_image;
+mod native_install;
+mod native_install_runtime;
+mod native_instance;
+mod native_instance_new;
+mod native_instance_runtime;
+mod native_matrix;
+mod native_matrix_interval;
 mod native_mesh_inertia;
 mod native_mesh_resource;
 mod native_message;
+mod native_notifications;
 mod native_part;
+mod native_player;
+mod native_player_command;
+mod native_player_device;
+mod native_player_runtime;
 mod native_postparse;
 mod native_query;
+mod native_query_frame;
+mod native_render_graph;
 mod native_render_lod;
 mod native_render_resource;
 mod native_render_type;
 mod native_resource_base;
+// Raw manager lookup is currently exercised by the snapshot adapter; the
+// production installation host still uses the live typed manager projection.
+#[cfg(test)]
+mod native_resource_index;
 mod native_resource_load;
 mod native_resource_manager;
+mod native_script_access;
 mod native_shape;
 mod native_shape_v4;
 mod native_spatial;
 mod native_spring;
 mod native_stack;
+mod native_keyboard;
+mod native_vm_abi;
+mod native_vm_metadata;
+mod native_vm_jvm;
+mod native_vm_bootstrap;
+mod native_vm_namespace;
+mod native_vm_pool;
+mod native_vm_runtime;
 mod native_world;
 mod part_render;
 mod parts;
 mod resource_identity;
 mod sched;
+#[cfg(test)]
+mod snapshot_harness;
 mod telemetry;
 mod video;
 mod viewport;
@@ -410,6 +448,9 @@ pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmEr
 }
 
 fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
+    if native_body::has_active_native_frame() {
+        return Err("NativeAbiBoundary: nested VM native entry requires the original callback/interpreter/wrapper CALL context".into());
+    }
     if info.class == "java.lang.GameType"
         && !matches!(
             info.name,
@@ -428,6 +469,40 @@ fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
         return Err("GameType engine collaborator is not installed".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod native_abi_guard_tests {
+    use super::*;
+
+    #[test]
+    fn nested_vm_native_boundary_preserves_parent_scratch_and_returns_an_error() {
+        native_body::clear();
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            args: &[],
+            class: "java.util.resource.GameRef",
+            name: "create",
+            sig: "()Ljava.lang.GameType;",
+        };
+        assert!(native_boundary(&info).is_ok());
+        native_body::with_world_memory(|m| {
+            crate::native_stack::function(m, &[0x12345678], None, |m| {
+                let parent_sp = crate::native_stack::sp(m);
+                m.w32(parent_sp.wrapping_sub(0x40), 0x5a123456);
+                let error =
+                    native_body::during_vm_callback(m, || native_boundary(&info)).unwrap_err();
+                assert!(error.contains("NativeAbiBoundary"));
+                assert!(crate::native_stack::active(m));
+                assert_eq!(crate::native_stack::sp(m), parent_sp);
+                assert_eq!(m.r32(parent_sp.wrapping_sub(0x40)), 0x5a123456);
+            });
+            assert!(!crate::native_stack::active(m));
+        })
+        .unwrap();
+        assert!(native_boundary(&info).is_ok());
+    }
 }
 
 fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
@@ -628,6 +703,7 @@ fn install(vm: &mut VmHost) {
     slr_io::findfile::install(vm);
     slr_io::resid::install(vm);
     slr_resource::node::install(vm);
+    ground_environment::install(vm);
     slr_render_natives::install_headless(vm);
     slr_input::install_headless(vm);
     slr_sound::install_headless(vm);
@@ -705,7 +781,7 @@ fn probe_osd_levels(vm: &mut VmHost) {
         });
         let registered = crate::engine::registered_animate(container.unwrap_or(0));
         println!(
-            "OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?} ptr={ptr:?} container={container:?} animates={registered}"
+            "OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?} ptr={ptr:?} container={container:?} animates={registered:?}"
         );
     }
 }
@@ -842,6 +918,7 @@ fn run(
     factory::attach_created(link, config)
         .map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
     println!("BOOT Config native link {link:?}");
+    gc_runtime::configure_config(object)?;
     sched::run_created(
         vm,
         "THRD-CREATE",
@@ -1168,6 +1245,7 @@ fn execute() -> Result<(), String> {
     project_stock(&root, &files).map_err(|e| format!("ProjectionBoundary: {e}"))?;
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
+    native_body::configure_image(&root.join("StreetLegal_Redline.exe"))?;
     factory::configure(config_instance_id, game_init_instance_id);
     sched::configure_clock(clock_step);
     if let Some(path) = clock_replay {

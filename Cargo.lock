@@ -880,6 +880,7 @@ dependencies = [
  "slr-fmt-cfg",
  "slr-fmt-rpak",
  "slr-fmt-tufa",
+ "slr-physics",
  "slr-vm",
  "slr-x87",
 ]
@@ -912,6 +913,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "slr-fmt-tufa",
  "slr-x87",
 ]

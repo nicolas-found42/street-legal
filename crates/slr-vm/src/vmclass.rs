@@ -301,6 +301,7 @@ pub enum LoadError {
 /// exe: FUN_0040fe70 (boot) + FUN_00411b20 (chunk loop)
 #[derive(Clone, Debug, Default)]
 pub struct Loader {
+    machine: crate::machine::Trace,
     records: Vec<ClassRecord>,
     /// Original class cache (403a90/411610): 512 buckets of stable record
     /// IDs. A later slice enables the production duplicate path through
@@ -535,6 +536,15 @@ impl ClassCache {
 }
 
 impl Loader {
+    pub(crate) fn attach_machine_trace(&mut self, trace: crate::machine::Trace) {
+        self.machine = trace;
+    }
+    pub fn retained_method_index(&self, owner: ClassId, method: &Method) -> Option<usize> {
+        self.find_by_id(owner)?
+            .methods
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, method))
+    }
     /// Boundary selection (`FUN_00411610` hit path): resolve a dotted name
     /// to its selected record identity through the original 512-bucket
     /// cache. The winning entry is the first chain node whose stored full
@@ -1669,7 +1679,12 @@ impl Loader {
         module: &Module,
         data: &[u8],
     ) -> Result<(ClassId, String), LoadError> {
-        let (id, name) = self.register_module(module, data)?;
+        let file = self.machine.identity();
+        self.machine.note(crate::machine::Event::FileRead {
+            identity: file,
+            bytes: data.to_vec(),
+        });
+        let (id, name) = self.register_module(module, data, file)?;
         Ok((id, name))
     }
 
@@ -1678,7 +1693,7 @@ impl Loader {
     ///
     /// exe: FUN_00411b20
     pub fn load_module_named(&mut self, module: &Module, data: &[u8]) -> Result<String, LoadError> {
-        Ok(self.register_module(module, data)?.1)
+        Ok(self.load_module(module, data)?.1)
     }
 
     /// Register one parsed module as its own arena record.
@@ -1686,7 +1701,19 @@ impl Loader {
         &mut self,
         module: &Module,
         data: &[u8],
+        file: u64,
     ) -> Result<(ClassId, String), LoadError> {
+        let module_identity = self.machine.identity();
+        self.machine.note(crate::machine::Event::ModuleRead {
+            identity: module_identity,
+            file,
+            version: module.version,
+            chunks: module
+                .chunks
+                .iter()
+                .map(|c| (c.tag, c.offset, c.size))
+                .collect(),
+        });
         let pool = module
             .pool(data)
             .map_err(|e| LoadError::Malformed(e.to_string()))?;
@@ -1751,6 +1778,10 @@ impl Loader {
         // the older definition until the insert flips selection. The
         // duplicate-cache topology of step 6 plugs in here.
         let id = self.install_record(linked, class_cache_hash(&name), pool, initializers);
+        self.machine.note(crate::machine::Event::ClassRegister {
+            identity: id.get(),
+            module: Some(module_identity),
+        });
         Ok((id, name))
     }
 
@@ -1800,7 +1831,12 @@ impl Loader {
                 return existing;
             }
         }
-        self.install_record(class, hash, Vec::new(), Vec::new())
+        let id = self.install_record(class, hash, Vec::new(), Vec::new());
+        self.machine.note(crate::machine::Event::ClassRegister {
+            identity: id.get(),
+            module: None,
+        });
+        id
     }
 
     /// Load every module of one `.class` file (`FUN_00410430` over the
@@ -1810,10 +1846,15 @@ impl Loader {
     ///
     /// exe: FUN_00410430
     pub fn load_file(&mut self, data: &[u8]) -> Result<Vec<(ClassId, String)>, LoadError> {
+        let file = self.machine.identity();
+        self.machine.note(crate::machine::Event::FileRead {
+            identity: file,
+            bytes: data.to_vec(),
+        });
         let modules = slr_fmt_tufa::parse(data).map_err(|e| LoadError::Malformed(e.to_string()))?;
         modules
             .iter()
-            .map(|m| self.register_module(m, data))
+            .map(|m| self.register_module(m, data, file))
             .collect()
     }
 

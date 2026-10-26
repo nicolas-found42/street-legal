@@ -34,7 +34,14 @@ use slr_x87::{Precision, Rounding, X87};
 
 use crate::clock::{read as read_clock, ClockSite};
 use crate::ops::{Alu, OpError};
-use crate::values::{boolean_convert, TypeTag, Value};
+use crate::values::{
+    boolean_convert, AllocOrigin, OwnedCell, PoolCellView, PoolEvent, PoolKind, PoolTrace,
+    SharedValuePool, TypeTag, Value,
+};
+use std::{
+    cell::{Cell, RefCell, RefMut},
+    rc::Rc,
+};
 
 /// Thread flag bits (`thread+0x2c`, docs: "Thread flags").
 pub mod flags {
@@ -73,6 +80,7 @@ pub struct Pc {
 /// (the exe would silently alias the new occupant).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct VarId {
+    pool: u64,
     index: u32,
     generation: u32,
 }
@@ -87,78 +95,199 @@ pub struct Var {
     pub name: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct VarEntry {
     generation: u32,
     var: Option<Var>,
 }
-
-/// Arena of variable slots (the exe's variable pool `DAT_0062f134`): freed
-/// slots go on a free list and are reused, like the exe's pool freelist.
-#[derive(Clone, Debug, Default)]
-pub struct Vars {
+#[derive(Debug)]
+struct VarPool {
+    id: u64,
     slots: Vec<VarEntry>,
     free: Vec<u32>,
+    live: i32,
+    trace: PoolTrace,
 }
-
+/// Explicit alias of the global variable pool. Frame locals own their IDs;
+/// operand-stack Var IDs borrow them. Copies of Var are immutable views.
+#[derive(Clone, Debug)]
+pub struct Vars(Rc<RefCell<VarPool>>);
+impl Default for Vars {
+    fn default() -> Self {
+        Self::with_trace(PoolTrace::default())
+    }
+}
 impl Vars {
-    /// Allocate a slot, reusing a freed one when available.
+    fn with_trace(trace: PoolTrace) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(Rc::new(RefCell::new(VarPool {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            slots: vec![],
+            free: vec![],
+            live: 0,
+            trace,
+        })))
+    }
+}
+impl VarId {
+    pub fn slot(self) -> u32 {
+        self.index
+    }
+    pub fn generation(self) -> u32 {
+        self.generation
+    }
+    pub fn pool(self) -> u64 {
+        self.pool
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariablePoolSnapshot {
+    pub handed: u32,
+    pub capacity: u32,
+    pub free: Vec<u32>,
+    pub live: i32,
+}
+impl Vars {
     pub fn alloc(&mut self, value: Value, name: u32) -> VarId {
-        let var = Some(Var { value, name });
-        if let Some(index) = self.free.pop() {
-            let e = &mut self.slots[index as usize];
-            e.var = var;
-            return VarId {
-                index,
-                generation: e.generation,
-            };
-        }
-        self.slots.push(VarEntry { generation: 0, var });
-        VarId {
-            index: self.slots.len() as u32 - 1,
-            generation: 0,
-        }
-    }
-
-    /// Number of slots ever created (live + free); the arena's footprint.
-    #[must_use]
-    pub fn slot_count(&self) -> usize {
-        self.slots.len()
-    }
-
-    /// Read a slot, `None` if it was released (stale handle).
-    #[must_use]
-    pub fn try_get(&self, id: VarId) -> Option<&Var> {
-        let e = self.slots.get(id.index as usize)?;
-        if e.generation == id.generation {
-            e.var.as_ref()
+        let mut pool = self.0.borrow_mut();
+        let (index, origin) = if let Some(index) = pool.free.pop() {
+            (index, AllocOrigin::Freelist)
         } else {
-            None
-        }
+            let index = pool.slots.len() as u32;
+            pool.slots.push(VarEntry {
+                generation: 0,
+                var: None,
+            });
+            (index, AllocOrigin::Pooled)
+        };
+        let id = VarId {
+            pool: pool.id,
+            index,
+            generation: pool.slots[index as usize].generation,
+        };
+        pool.slots[index as usize].var = Some(Var { value, name });
+        pool.live += 1;
+        pool.trace.note(PoolEvent::Allocate {
+            kind: PoolKind::Variable,
+            slot: index,
+            origin,
+            cell: PoolCellView {
+                kind: PoolKind::Variable,
+                pool: id.pool,
+                slot: index,
+                generation: id.generation,
+                value,
+                name: Some(name),
+            },
+        });
+        id
     }
-
-    /// Read a slot. Panics on a released slot (a dangling lvalue; undefined
-    /// behaviour in the exe).
-    #[must_use]
-    pub fn get(&self, id: VarId) -> &Var {
+    pub fn slot_count(&self) -> usize {
+        self.0.borrow().slots.len()
+    }
+    pub fn live(&self) -> i32 {
+        self.0.borrow().live
+    }
+    pub fn try_get(&self, id: VarId) -> Option<Var> {
+        let pool = self.0.borrow();
+        if id.pool != pool.id {
+            return None;
+        }
+        let entry = pool.slots.get(id.index as usize)?;
+        (entry.generation == id.generation)
+            .then_some(entry.var)
+            .flatten()
+    }
+    pub fn view(&self, id: VarId) -> Option<PoolCellView> {
+        self.try_get(id).map(|var| PoolCellView {
+            kind: PoolKind::Variable,
+            pool: id.pool,
+            slot: id.index,
+            generation: id.generation,
+            value: var.value,
+            name: Some(var.name),
+        })
+    }
+    pub fn get(&self, id: VarId) -> Var {
         self.try_get(id).expect("dangling variable slot")
     }
-
-    fn checked(&mut self, id: VarId) -> Result<&mut Var, VmError> {
-        self.slots
-            .get_mut(id.index as usize)
-            .filter(|e| e.generation == id.generation)
-            .and_then(|e| e.var.as_mut())
-            .ok_or(VmError::DanglingVar)
-    }
-
-    fn free(&mut self, id: VarId) {
-        if let Some(e) = self.slots.get_mut(id.index as usize) {
-            if e.generation == id.generation && e.var.take().is_some() {
-                e.generation = e.generation.wrapping_add(1);
-                self.free.push(id.index);
-            }
+    fn checked(&mut self, id: VarId) -> Result<RefMut<'_, Var>, VmError> {
+        let pool = self.0.borrow_mut();
+        if pool.id != id.pool
+            || pool
+                .slots
+                .get(id.index as usize)
+                .is_none_or(|entry| entry.generation != id.generation || entry.var.is_none())
+        {
+            return Err(VmError::DanglingVar);
         }
+        Ok(RefMut::map(pool, |pool| {
+            pool.slots[id.index as usize].var.as_mut().unwrap()
+        }))
+    }
+    fn free(&mut self, id: VarId) {
+        let mut pool = self.0.borrow_mut();
+        assert_eq!(id.pool, pool.id, "variable release into a different pool");
+        let entry = &mut pool.slots[id.index as usize];
+        assert_eq!(entry.generation, id.generation, "stale variable release");
+        let var = entry.var.take().expect("duplicated variable release");
+        entry.generation = entry.generation.wrapping_add(1);
+        pool.free.push(id.index);
+        pool.live -= 1;
+        pool.trace.note(PoolEvent::Release {
+            kind: PoolKind::Variable,
+            slot: id.index,
+            cell: PoolCellView {
+                kind: PoolKind::Variable,
+                pool: id.pool,
+                slot: id.index,
+                generation: id.generation,
+                value: var.value,
+                name: Some(var.name),
+            },
+        });
+    }
+    pub fn snapshot(&self) -> VariablePoolSnapshot {
+        let pool = self.0.borrow();
+        let handed = pool.slots.len() as u32;
+        VariablePoolSnapshot {
+            handed,
+            capacity: handed.div_ceil(84000) * 84000,
+            free: pool.free.iter().rev().copied().collect(),
+            live: pool.live,
+        }
+    }
+}
+/// Shared pools are passed explicitly by the VM that creates runtime threads.
+/// Cloning a pool handle never clones a value owner or an activation frame.
+#[derive(Clone, Debug)]
+pub struct ThreadPools {
+    pub values: SharedValuePool,
+    pub vars: Vars,
+    baseline: Rc<Cell<i32>>,
+    trace: PoolTrace,
+}
+impl Default for ThreadPools {
+    fn default() -> Self {
+        let trace = PoolTrace::default();
+        Self {
+            values: SharedValuePool::with_trace(trace.clone()),
+            vars: Vars::with_trace(trace.clone()),
+            baseline: Rc::new(Cell::new(0)),
+            trace,
+        }
+    }
+}
+impl ThreadPools {
+    pub fn machine_trace(&self) -> crate::machine::Trace {
+        self.trace.machine()
+    }
+    pub fn observe(&self, enabled: bool) {
+        self.trace.observe(enabled);
+    }
+    pub fn events(&self) -> Vec<PoolEvent> {
+        self.trace.events()
     }
 }
 
@@ -181,12 +310,12 @@ enum Lvalue {
 }
 
 /// An operand-stack word.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum Slot {
     /// Null pointer (underflow pop, out-of-range local push).
     Null,
     /// A plain value cell (vtable `0x5e734c`).
-    Value(Value),
+    Value(OwnedCell),
     /// A pointer to a variable slot (vtable `0x5e7344`): an lvalue.
     Var(VarId),
     /// Borrowed variable cell owned by the object model.
@@ -194,8 +323,10 @@ pub enum Slot {
 }
 
 /// One activation frame (exe: the `FUN_00407b10` object).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Frame {
+    machine_identity: u64,
+    machine_owner: Option<(crate::machine::Trace, u64)>,
     /// `frame+0x2c`: where execution resumes (entry node for a fresh
     /// frame, the call node for a suspended caller). `None` is a null pc.
     pub saved_pc: Option<Pc>,
@@ -212,10 +343,15 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn machine_identity(&self) -> u64 {
+        self.machine_identity
+    }
     /// A fresh frame (exe: `FUN_00407b10`).
     #[must_use]
     pub fn new(saved_pc: Option<Pc>, receiver: u32) -> Self {
         Self {
+            machine_identity: 0,
+            machine_owner: None,
             saved_pc,
             receiver,
             class_ctx: 0,
@@ -238,6 +374,8 @@ pub enum ArrayError {
 /// Why the thread stopped abnormally.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VmError {
+    /// Recording cannot combine owners from distinct VM histories.
+    MachineContext,
     /// A diagnosed original array-access error, before operand release.
     ArrayAccess(ArrayError),
     /// `FUN_004190d0` reached: explicit fatal opwords (`0x0000`, `0x0013`,
@@ -384,6 +522,9 @@ pub enum RefOperator {
 
 /// The object-model side of the interpreter.
 pub trait Host {
+    fn validate_thread(&self, _thread: &Thread) -> Result<(), VmError> {
+        Ok(())
+    }
     fn diagnostic_objects_total(&self, thread: &Thread) -> usize {
         self.diagnostic_objects(thread).len()
     }
@@ -466,8 +607,9 @@ pub trait Host {
 }
 
 /// A thread: frames, pc, flags and the cell accounting.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Thread {
+    pub machine_identity: u64,
     /// Stable diagnostic identity for clock requests; snapshots retain it.
     pub clock_identity: u64,
     /// Original engine thread role assigned by its real creator.
@@ -481,7 +623,7 @@ pub struct Thread {
     /// Variable slots.
     pub vars: Vars,
     /// Live-cell counter `DAT_0062f138`.
-    pub live: i32,
+    pools: ThreadPools,
     /// Operator state (x87 precision, diagnostics).
     pub alu: Alu,
     /// Line number of the node being executed (`jvm+0x70`, error reports).
@@ -516,14 +658,25 @@ impl Thread {
     /// An empty thread (no frames). Add frames with `frames.push`.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_pools(ThreadPools::default())
+    }
+
+    pub fn with_pools(pools: ThreadPools) -> Self {
+        let machine_identity = pools.machine_trace().identity();
+        pools
+            .machine_trace()
+            .note(crate::machine::Event::ThreadCreate {
+                identity: machine_identity,
+            });
         Self {
+            machine_identity,
             clock_identity: crate::clock::ephemeral_identity(),
             clock_name: None,
             frames: Vec::new(),
             pc: None,
             flags: 0,
-            vars: Vars::default(),
-            live: 0,
+            vars: pools.vars.clone(),
+            pools,
             alu: Alu::default(),
             line: 0,
         }
@@ -564,6 +717,96 @@ impl Thread {
         }
     }
 
+    pub fn machine_trace(&self) -> crate::machine::Trace {
+        self.pools.machine_trace()
+    }
+    pub fn record_origin(&self, priority: u32, flags: u32, name: &str) {
+        self.machine_trace()
+            .note(crate::machine::Event::ThreadOrigin {
+                identity: self.machine_identity,
+                priority,
+                flags,
+                name: name.into(),
+            });
+    }
+    fn frame_view(frame: &Frame) -> crate::machine::FrameView {
+        crate::machine::FrameView {
+            identity: frame.machine_identity,
+            receiver: frame.receiver,
+            context: frame.class_ctx,
+            signature: frame.signature,
+            saved_pc: frame.saved_pc,
+        }
+    }
+    fn note_frame(&self, frame: &Frame, phase: crate::machine::FramePhase) {
+        self.machine_trace().note(crate::machine::Event::Frame {
+            thread: self.machine_identity,
+            phase,
+            frame: Self::frame_view(frame),
+            caller: self
+                .frames
+                .iter()
+                .rev()
+                .find(|f| f.machine_identity != frame.machine_identity)
+                .map(|f| f.machine_identity),
+        });
+    }
+    fn create_frame(&self, mut frame: Frame) -> Frame {
+        frame.machine_identity = self.machine_trace().identity();
+        frame.machine_owner = Some((self.machine_trace(), self.machine_identity));
+        self.note_frame(&frame, crate::machine::FramePhase::Create);
+        frame
+    }
+    pub fn push_frame(&mut self, frame: Frame) -> Result<(), VmError> {
+        if frame.machine_identity != 0 && !self.owns_frame(&frame) {
+            return Err(VmError::MachineContext);
+        }
+        let frame = if frame.machine_identity == 0 {
+            self.create_frame(frame)
+        } else {
+            frame
+        };
+        self.note_frame(&frame, crate::machine::FramePhase::Enter);
+        self.frames.push(frame);
+        Ok(())
+    }
+    fn owns_frame(&self, frame: &Frame) -> bool {
+        frame.machine_owner.as_ref().is_some_and(|(trace, thread)| {
+            *thread == self.machine_identity && trace.same_owner(&self.machine_trace())
+        })
+    }
+    fn select_frame(&self, identity: u64) {
+        self.machine_trace()
+            .note(crate::machine::Event::CurrentFrame {
+                thread: self.machine_identity,
+                frame: identity,
+            });
+    }
+    fn note_local(&self, frame: u64, append: bool, index: usize, variable: VarId) {
+        self.machine_trace().note(crate::machine::Event::Local {
+            thread: self.machine_identity,
+            frame,
+            append,
+            index,
+            variable,
+        });
+    }
+    pub fn append_local(&mut self, variable: VarId) -> Result<(), VmError> {
+        let frame = self.frame()?;
+        let identity = frame.machine_identity;
+        let index = frame.locals.len();
+        frame.locals.push(variable);
+        self.note_local(identity, true, index, variable);
+        Ok(())
+    }
+    fn operand(slot: &Slot) -> crate::machine::Operand {
+        match slot {
+            Slot::Null => crate::machine::Operand::Null,
+            Slot::Value(cell) => crate::machine::Operand::Value(cell.id()),
+            Slot::Var(id) => crate::machine::Operand::Variable(*id),
+            Slot::Heap(slot) => crate::machine::Operand::Heap(*slot),
+        }
+    }
     // ---- operand stack primitives -------------------------------------
 
     fn frame(&mut self) -> Result<&mut Frame, VmError> {
@@ -572,63 +815,91 @@ impl Thread {
 
     /// Push a word on the current frame's stack (`FUN_00423ba0`).
     pub fn push(&mut self, slot: Slot) -> Result<(), VmError> {
-        self.frame()?.stack.push(slot);
+        if let Slot::Value(cell) = &slot {
+            assert!(
+                self.pools.values.owns(cell),
+                "push from a different value pool"
+            );
+        }
+        let frame = self.frame()?;
+        let identity = frame.machine_identity;
+        let operand = Self::operand(&slot);
+        frame.stack.push(slot);
+        self.machine_trace().note(crate::machine::Event::Operand {
+            thread: self.machine_identity,
+            frame: identity,
+            action: crate::machine::OperandAction::Push,
+            slot: operand,
+        });
         Ok(())
     }
 
-    /// Push a freshly created value cell (`+1` live).
-    pub fn push_new(&mut self, v: Value) -> Result<(), VmError> {
-        self.live += 1;
-        self.push(Slot::Value(v))
+    /// Allocate a fresh value owner (+1 global live count).
+    pub fn allocate_value(&self, value: Value) -> OwnedCell {
+        self.pools.values.allocate(value)
     }
-
-    /// Raw pop (`FUN_00423d40`): no dereference, underflow yields null.
+    pub fn pools(&self) -> ThreadPools {
+        self.pools.clone()
+    }
+    pub fn live(&self) -> i32 {
+        self.pools.values.live() + self.vars.live() + self.pools.baseline.get()
+    }
+    /// Explicit counter seed for bounded original fixtures/resumed contexts.
+    /// Allocation identities and ownership are unchanged by this counter seed.
+    pub fn set_live_counter(&self, live: i32) {
+        self.pools
+            .baseline
+            .set(live - self.pools.values.live() - self.vars.live());
+    }
+    pub fn push_new(&mut self, value: Value) -> Result<(), VmError> {
+        let cell = self.allocate_value(value);
+        self.push_owned(cell)
+    }
+    pub fn push_owned(&mut self, cell: OwnedCell) -> Result<(), VmError> {
+        self.push(Slot::Value(cell))
+    }
+    /// Raw pop moves value ownership; Var/Heap slots remain borrowed lvalues.
     pub fn pop_raw(&mut self) -> Result<Slot, VmError> {
-        Ok(self.frame()?.stack.pop().unwrap_or(Slot::Null))
+        let frame = self.frame()?;
+        let identity = frame.machine_identity;
+        let slot = frame.stack.pop().unwrap_or(Slot::Null);
+        self.machine_trace().note(crate::machine::Event::Operand {
+            thread: self.machine_identity,
+            frame: identity,
+            action: crate::machine::OperandAction::Pop,
+            slot: Self::operand(&slot),
+        });
+        Ok(slot)
     }
-
-    /// Dereferencing pop (`FUN_0041f7d0`): a variable slot yields a fresh
-    /// copy of its value (`+1` live); a plain value comes back as is.
-    pub fn pop_deref(&mut self) -> Result<Value, VmError> {
+    pub fn pop_deref(&mut self) -> Result<OwnedCell, VmError> {
         let slot = self.pop_raw()?;
         self.deref_local(slot)
     }
-
-    /// Dereference either a local or host-owned lvalue, copying the value
-    /// exactly once (the original variable remains owned by its container).
-    pub fn pop_deref_with<H: Host>(&mut self, host: &mut H) -> Result<Value, VmError> {
+    pub fn pop_deref_with<H: Host>(&mut self, host: &mut H) -> Result<OwnedCell, VmError> {
         match self.pop_raw()? {
             Slot::Heap(slot) => {
                 let value = host.read_cell(slot)?;
-                self.live += 1;
-                Ok(value)
+                Ok(self.allocate_value(value))
             }
             slot => self.deref_local(slot),
         }
     }
-
-    fn deref_local(&mut self, slot: Slot) -> Result<Value, VmError> {
+    fn deref_local(&mut self, slot: Slot) -> Result<OwnedCell, VmError> {
         match slot {
             Slot::Null => Err(VmError::NullSlot),
             Slot::Heap(_) => Err(VmError::Unsupported(0x401c)),
-            Slot::Value(v) => Ok(v),
+            Slot::Value(cell) => Ok(cell),
             Slot::Var(id) => {
-                let v = self.vars.checked(id)?.value;
-                self.live += 1;
-                Ok(v)
+                let value = self.vars.checked(id)?.value;
+                Ok(self.allocate_value(value))
             }
         }
     }
-
-    /// Release one value cell (vtable slot 1: `-1` live).
-    pub fn release(&mut self) {
-        self.live -= 1;
+    /// Release the selected owner; equal semantic Values are never matched.
+    pub fn release(&mut self, cell: OwnedCell) {
+        self.pools.values.release(cell);
     }
-
-    /// Create a variable slot (`+1` live) and return its handle; the caller
-    /// links it into a frame's locals.
     pub fn new_var(&mut self, value: Value, name: u32) -> VarId {
-        self.live += 1;
         self.vars.alloc(value, name)
     }
 
@@ -656,9 +927,16 @@ impl Thread {
     ) -> Result<(), VmError> {
         match lv {
             Lvalue::Local(id) => {
-                let destination = self.vars.checked(id)?;
+                let mut destination = self.vars.checked(id)?;
                 let before = destination.value;
                 destination.value = value;
+                drop(destination);
+                self.machine_trace()
+                    .note(crate::machine::Event::VariableStore {
+                        identity: id,
+                        before,
+                        after: value,
+                    });
                 if crate::diagnostics::enabled() {
                     crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
                         destination: format!("local:{id:?}"),
@@ -682,15 +960,29 @@ impl Thread {
     /// exe: FUN_00407ba0
     pub fn pop_frame(&mut self) -> Result<(), VmError> {
         let f = self.frames.pop().ok_or(VmError::NoFrame)?;
-        for s in f.stack.iter().rev() {
-            if let Slot::Value(_) = s {
-                self.live -= 1;
+        self.note_frame(&f, crate::machine::FramePhase::Return);
+        let view = Self::frame_view(&f);
+        for slot in f.stack.into_iter().rev() {
+            self.machine_trace().note(crate::machine::Event::Operand {
+                thread: self.machine_identity,
+                frame: view.identity,
+                action: crate::machine::OperandAction::Drop,
+                slot: Self::operand(&slot),
+            });
+            if let Slot::Value(cell) = slot {
+                self.release(cell);
             }
         }
-        for id in f.locals {
-            self.live -= 1;
+        for (index, id) in f.locals.into_iter().enumerate() {
+            self.note_local(view.identity, false, index, id);
             self.vars.free(id);
         }
+        self.machine_trace().note(crate::machine::Event::Frame {
+            thread: self.machine_identity,
+            phase: crate::machine::FramePhase::Destroy,
+            frame: view,
+            caller: self.frames.last().map(|f| f.machine_identity),
+        });
         Ok(())
     }
 
@@ -742,6 +1034,10 @@ impl Thread {
         };
         let pc = self.pc;
         self.frame()?.saved_pc = pc;
+        self.note_frame(
+            self.frames.last().ok_or(VmError::NoFrame)?,
+            crate::machine::FramePhase::SavePc,
+        );
         let mut callee = Frame::new(
             Some(Pc {
                 body: m.body,
@@ -751,26 +1047,67 @@ impl Thread {
         );
         callee.class_ctx = m.class_ctx;
         callee.signature = m.signature;
+        let mut callee = self.create_frame(callee);
         if let Some(value) = this {
-            let this = self.new_var(value, 0);
+            self.select_frame(callee.machine_identity);
+            let zero = Value {
+                tag: value.tag,
+                payload: 0,
+            };
+            let this = self.new_var(zero, 0);
+            self.note_local(callee.machine_identity, true, callee.locals.len(), this);
             callee.locals.push(this);
+            self.vars.checked(this)?.value = value;
+            self.machine_trace()
+                .note(crate::machine::Event::VariableStore {
+                    identity: this,
+                    before: zero,
+                    after: value,
+                });
         }
         for ty in m.params.iter().rev() {
+            self.select_frame(self.frames.last().ok_or(VmError::NoFrame)?.machine_identity);
             let mut arg = self.pop_deref_with(host)?;
+            self.select_frame(callee.machine_identity);
             let mut slot = Value {
                 tag: *ty,
                 payload: 0,
             };
-            host.store_value(&mut self.alu, &mut slot, &mut arg);
             let id = self.new_var(slot, 0);
+            self.note_local(callee.machine_identity, true, callee.locals.len(), id);
             callee.locals.push(id);
-            self.release();
+            arg.edit(|source| host.store_value(&mut self.alu, &mut slot, source));
+            self.vars.checked(id)?.value = slot;
+            self.machine_trace()
+                .note(crate::machine::Event::VariableStore {
+                    identity: id,
+                    before: Value {
+                        tag: *ty,
+                        payload: 0,
+                    },
+                    after: slot,
+                });
+            self.release(arg);
         }
+        self.select_frame(callee.machine_identity);
         self.pc = callee.saved_pc;
-        self.frames.push(callee);
+        self.push_frame(callee)?;
         Ok(())
     }
 
+    fn note_opcode(&self, pc: Pc, node: Node, enter: bool, error: Option<String>) {
+        self.machine_trace().note(crate::machine::Event::Opcode {
+            thread: self.machine_identity,
+            enter,
+            pc,
+            opcode: node.opword,
+            operand: node.operand,
+            immediate: node.imm,
+            next_pc: self.pc,
+            flags: self.flags,
+            error,
+        });
+    }
     // ---- the loop -----------------------------------------------------
 
     /// Run the thread until it stops, blocks, or `budget` runs out
@@ -799,6 +1136,36 @@ impl Thread {
     ///
     /// exe: FUN_00420ff0
     pub fn run<H: Host>(
+        &mut self,
+        host: &mut H,
+        budget: f32,
+        clock: &mut dyn FnMut() -> X87,
+    ) -> Result<X87, VmError> {
+        host.validate_thread(self)?;
+        if self.machine_trace().enabled() && self.frames.iter().any(|frame| !self.owns_frame(frame))
+        {
+            return Err(VmError::MachineContext);
+        }
+        self.machine_trace().note(crate::machine::Event::Run {
+            thread: self.machine_identity,
+            enter: true,
+            budget_bits: budget.to_bits(),
+            pc: self.pc,
+            flags: self.flags,
+            error: None,
+        });
+        let result = self.run_inner(host, budget, clock);
+        self.machine_trace().note(crate::machine::Event::Run {
+            thread: self.machine_identity,
+            enter: false,
+            budget_bits: budget.to_bits(),
+            pc: self.pc,
+            flags: self.flags,
+            error: result.as_ref().err().map(|e| format!("{e:?}")),
+        });
+        result
+    }
+    fn run_inner<H: Host>(
         &mut self,
         host: &mut H,
         budget: f32,
@@ -878,6 +1245,7 @@ impl Thread {
                     node.operand
                 );
             }
+            self.note_opcode(pc, node, true, None);
             let next = match crate::clock::with_interpreter_context(
                 self.clock_context(host),
                 self.alu.precision,
@@ -908,11 +1276,15 @@ impl Thread {
                     // Stopped by a script error: leave the running state so
                     // the caller can inspect (and not re-run) the thread.
                     self.flags &= !flags::RUNNING;
+                    self.note_opcode(pc, node, false, Some(format!("{e:?}")));
                     return Err(e);
                 }
             };
             match next {
-                Next::Exit => break,
+                Next::Exit => {
+                    self.note_opcode(pc, node, false, None);
+                    break;
+                }
                 Next::Advance => {
                     if let Some(p) = self.pc.as_mut() {
                         p.idx += 1;
@@ -920,6 +1292,7 @@ impl Thread {
                 }
                 Next::Stay => {}
             }
+            self.note_opcode(pc, node, false, None);
             // Loop tail (`LAB_004238f1`): time slice every 256 steps, then
             // the status flags and the scheduler check.
             if timed {
@@ -955,6 +1328,9 @@ impl Thread {
         let pc = self.pc;
         if let Some(f) = self.frames.last_mut() {
             f.saved_pc = pc;
+        }
+        if let Some(f) = self.frames.last() {
+            self.note_frame(f, crate::machine::FramePhase::SavePc);
         }
         let t_end = crate::clock::with_interpreter_context(
             self.clock_context(host),
@@ -1020,8 +1396,8 @@ impl Thread {
                 // (`&&`).
                 let mut v = self.pop_deref_with(host)?;
                 boolean_convert(&mut v);
-                self.push(Slot::Value(v))?;
-                let truthy = v.payload != 0; // FUN_0041bd90
+                let truthy = v.payload != 0;
+                self.push(Slot::Value(v))?; // FUN_0041bd90
                 if truthy == (node.opword == 0x0004) {
                     if let Some(p) = self.pc.as_mut() {
                         p.idx += 1;
@@ -1031,8 +1407,8 @@ impl Thread {
             }
             0x0010 => Ok(self.stop()),
             0x0018 => {
-                self.pop_deref_with(host)?;
-                self.release();
+                let cell = self.pop_deref_with(host)?;
+                self.release(cell);
                 Ok(Next::Advance)
             }
             0x001d => self.ext(host, ExternKind::FieldByName, pc, node, false),
@@ -1056,7 +1432,7 @@ impl Thread {
                 let mut value = self.pop_deref_with(host)?;
                 let lv = self.require_lvalue()?;
                 self.assign(host, lv, &mut value, 0x23)?;
-                self.release();
+                self.release(value);
                 Ok(Next::Advance)
             }
             0x1001 => {
@@ -1070,8 +1446,11 @@ impl Thread {
             }
             0x1002 => self.ext(host, ExternKind::Declare, pc, node, false),
             0x1003 => {
-                if let Some(id) = self.frame()?.locals.pop() {
-                    self.live -= 1;
+                let frame = self.frame()?;
+                let identity = frame.machine_identity;
+                let index = frame.locals.len().saturating_sub(1);
+                if let Some(id) = frame.locals.pop() {
+                    self.note_local(identity, false, index, id);
                     self.vars.free(id);
                 }
                 Ok(Next::Advance)
@@ -1086,8 +1465,9 @@ impl Thread {
                     eprintln!("  COND value tag={:?} payload={:#x}", c.tag, c.payload);
                 }
                 boolean_convert(&mut c);
-                self.release();
-                if (c.payload == 0) == (node.opword == 0x1015) {
+                let is_zero = c.payload == 0;
+                self.release(c);
+                if is_zero == (node.opword == 0x1015) {
                     self.jump(pc, node.imm)
                 } else {
                     Ok(Next::Advance)
@@ -1100,11 +1480,11 @@ impl Thread {
                 let mut switch = self.pop_deref_with(host)?;
                 self.alu.eq(&mut case, &mut switch);
                 if case.payload != 0 {
-                    self.release();
-                    self.release();
+                    self.release(case);
+                    self.release(switch);
                     self.jump(pc, node.imm)
                 } else {
-                    self.release();
+                    self.release(case);
                     self.push(Slot::Value(switch))?;
                     Ok(Next::Advance)
                 }
@@ -1186,19 +1566,18 @@ impl Thread {
         // `*=` and `/=` work on a temporary copy of the variable
         // (`FUN_00423e30`, +1 live) that is released after the store; a
         // trap in the multiplication/division leaves it live.
-        let temp = matches!(kind, 0x24 | 0x25);
-        if temp {
-            self.live += 1;
-        }
         let mut current = self.read_lvalue(host, lv)?;
+        let mut temporary = matches!(kind, 0x24 | 0x25).then(|| self.allocate_value(current));
+        let destination = temporary.as_deref_mut().unwrap_or(&mut current);
         if kind == 0x23 {
-            host.store_value(&mut self.alu, &mut current, value);
+            host.store_value(&mut self.alu, destination, value);
         } else {
-            self.alu.assign(&mut current, true, value, kind)?;
+            self.alu.assign(destination, true, value, kind)?;
         }
-        self.write_lvalue(host, lv, current)?;
-        if temp {
-            self.live -= 1;
+        let result = *destination;
+        self.write_lvalue(host, lv, result)?;
+        if let Some(temporary) = temporary {
+            self.release(temporary);
         }
         for v in self.alu.ref_stores.drain(..) {
             host.on_reference_store(v);
@@ -1223,11 +1602,12 @@ impl Thread {
                 let second = self.pop_deref_with(host)?;
                 let mut cond = self.pop_deref_with(host)?;
                 boolean_convert(&mut cond);
-                self.release();
-                let keep = if cond.payload == 0 { top } else { second };
-                self.release();
+                let zero = cond.payload == 0;
+                self.release(cond);
+                let (keep, discard_cell) = if zero { (top, second) } else { (second, top) };
+                self.release(discard_cell);
                 if discard {
-                    self.release();
+                    self.release(keep);
                 } else {
                     self.push(Slot::Value(keep))?;
                 }
@@ -1236,8 +1616,8 @@ impl Thread {
             0x1..=0xb | 0xd..=0x13 => {
                 if discard {
                     for _ in 0..2 {
-                        self.pop_deref_with(host)?;
-                        self.release();
+                        let cell = self.pop_deref_with(host)?;
+                        self.release(cell);
                     }
                     return Ok(Next::Advance);
                 }
@@ -1246,13 +1626,13 @@ impl Thread {
                 match sub {
                     0xd => {
                         self.alu.shr(&mut first, &mut second);
-                        self.release();
+                        self.release(first);
                         self.push(Slot::Value(second))?;
                         return Ok(Next::Advance);
                     }
                     0xe => {
                         self.alu.shl(&mut first, &mut second);
-                        self.release();
+                        self.release(first);
                         self.push(Slot::Value(second))?;
                         return Ok(Next::Advance);
                     }
@@ -1282,14 +1662,14 @@ impl Thread {
                 if !done {
                     self.binary(sub, left, right)?;
                 }
-                self.release();
+                self.release(first);
                 self.push(Slot::Value(second))?;
                 Ok(Next::Advance)
             }
             0x14..=0x16 => {
                 let mut v = self.pop_deref_with(host)?;
                 if discard {
-                    self.release();
+                    self.release(v);
                     return Ok(Next::Advance);
                 }
                 match sub {
@@ -1333,8 +1713,8 @@ impl Thread {
                 if let Some(p) = self.pc.as_mut() {
                     p.idx += 1;
                 }
-                self.pop_deref_with(host)?;
-                self.release();
+                let cell = self.pop_deref_with(host)?;
+                self.release(cell);
                 Ok(Next::Advance)
             }
             0x20 => self.ext(host, ExternKind::InstanceOf, pc, node, false),
@@ -1345,7 +1725,7 @@ impl Thread {
                 let mut value = self.pop_deref_with(host)?;
                 self.assign(host, lv, &mut value, sub)?;
                 if discard {
-                    self.release();
+                    self.release(value);
                 } else {
                     self.push(Slot::Value(value))?;
                 }
@@ -1354,8 +1734,8 @@ impl Thread {
             // 0xc (`>>>`), 0x1b, 0x1d, 0x22 and everything else: no case.
             _ => {
                 if discard && sub == 0x1b {
-                    self.pop_deref_with(host)?;
-                    self.release();
+                    let cell = self.pop_deref_with(host)?;
+                    self.release(cell);
                 }
                 Ok(Next::Advance)
             }

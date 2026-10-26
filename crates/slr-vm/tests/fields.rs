@@ -80,7 +80,8 @@ fn implicit_named_field_is_a_persistent_typed_lvalue() {
     );
     assert!(thread.frames[0].stack.is_empty());
     assert_eq!(
-        thread.live, 0,
+        thread.live(),
+        0,
         "one literal created/released; borrowed field owns no temporary"
     );
 }
@@ -155,7 +156,8 @@ fn explicit_member_prefers_class_static_cell_and_keeps_aliases_live() {
     assert_eq!(value, Value::float(1.));
     assert_eq!(vm.objects[0].fields, vec![Value::int(0x222)]);
     assert_eq!(
-        thread.live, 2,
+        thread.live(),
+        2,
         "receiver variable plus last dereferenced result; field lvalues do not allocate"
     );
 }
@@ -205,7 +207,7 @@ fn pool_field_reference_resolves_the_declaring_hierarchy_and_keeps_receiver_impl
         vm.objects[0].fields,
         vec![Value::int(0), Value::float(9.), Value::int(0)]
     );
-    assert_eq!(thread.live, 1);
+    assert_eq!(thread.live(), 1);
 }
 
 fn stock_vm(test: &str, classes: &[&str]) -> Option<VmHost> {
@@ -338,7 +340,7 @@ fn stock_method_replay(group: &str, name: &str, sig: &str, test: &str, count: us
         thread.pc = pc;
         thread.push_new(argument).unwrap();
         thread.call_script_method(&method, word).unwrap();
-        thread.live = 0; // Original fixture starts its already-allocated-cell counter at zero.
+        thread.set_live_counter(0); // Original fixture starts its already-allocated-cell counter at zero.
         thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
         let values: Vec<_> = vm.objects[0]
             .fields
@@ -353,7 +355,7 @@ fn stock_method_replay(group: &str, name: &str, sig: &str, test: &str, count: us
         let Some(Slot::Value(result)) = thread.frames[0].stack.last() else {
             panic!("original returned a value cell")
         };
-        let mut actual = serde_json::json!({"values":values,"types":types,"returned_receiver":result.payload==word,"return_type":result.tag.name(),"return_kind":"value","live":thread.live,"nodes":vm.body(method.body).len()});
+        let mut actual = serde_json::json!({"values":values,"types":types,"returned_receiver":result.payload==word,"return_type":result.tag.name(),"return_kind":"value","live":thread.live(),"nodes":vm.body(method.body).len()});
         if row["input"]["other"].is_array() {
             actual["other_values"] = serde_json::json!(vm.objects
                 [(argument.payload - 0x1000) as usize]
@@ -440,7 +442,7 @@ fn inline_field_chain_resolves_a_local_object_then_its_field_as_one_lvalue() {
     thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
     assert_eq!(vm.objects[0].fields[1], Value::float(8.));
     assert_eq!(vm.objects[1].fields[1], Value::float(7.));
-    assert_eq!(thread.live, 2);
+    assert_eq!(thread.live(), 2);
 }
 
 #[test]
@@ -482,12 +484,14 @@ fn array_elements_are_typed_persistent_lvalues() {
     thread.frames.push(frame);
     thread.pc = pc;
     thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
-    assert_eq!(thread.frames[0].stack, vec![Slot::Value(Value::float(5.))]);
+    assert!(
+        matches!(&thread.frames[0].stack[..], [Slot::Value(cell)] if cell.value() == Value::float(5.))
+    );
     assert_eq!(
         [0, 1, 2].map(|index| vm.read_cell(HeapSlot::Array { word, index }).unwrap()),
         [Value::float(3.), Value::float(5.), Value::float(9.)]
     );
-    assert_eq!(thread.live, 2);
+    assert_eq!(thread.live(), 2);
 }
 
 #[test]
@@ -520,7 +524,7 @@ fn declared_local_type_comes_from_the_following_pool_node() {
     let local = thread.vars.get(thread.frames[0].locals[0]);
     assert_eq!(local.value, Value::float(9.));
     assert_eq!(vm.variable_name(local.name), Some("named"));
-    assert_eq!(thread.live, 2);
+    assert_eq!(thread.live(), 2);
 }
 
 #[test]
@@ -546,16 +550,15 @@ fn reference_field_assignment_preserves_the_target_descriptor_and_casts_the_sour
     thread.frames.push(Frame::new(pc, holder));
     thread.pc = pc;
     thread
-        .push(Slot::Value(Value::reference_named(child, "LChild;")))
+        .push_new(Value::reference_named(child, "LChild;"))
         .unwrap();
     thread.run(&mut vm, 0., &mut || X87::from_f64(0.)).unwrap();
     assert_eq!(
         vm.objects[0].fields[0],
         Value::reference_named(child, "LBase;")
     );
-    assert_eq!(
-        thread.frames[0].stack,
-        vec![Slot::Value(Value::reference_named(child, "LBase;"))]
+    assert!(
+        matches!(&thread.frames[0].stack[..], [Slot::Value(cell)] if cell.value() == Value::reference_named(child, "LBase;"))
     );
     assert!(thread.alu.diagnostics.is_empty());
 }

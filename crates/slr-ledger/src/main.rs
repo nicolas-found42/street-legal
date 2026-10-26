@@ -80,7 +80,25 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-boot", "lib", vec![
+            ("native_event_route::tests::original4265c0_all_routes_and_live_callback_mutations", vec!["FUN_004265c0"]),
+        ]),
+        ("slr-resource", "environment_oracle", vec![
+            ("ground_environment_natives_match_original_vectors", vec!["LAB_004866c0", "LAB_004867b0", "LAB_00486920", "LAB_00486a20", "FUN_0049b440", "FUN_0049b530"]),
+        ]),
         ("slr-boot", "bin:slr-boot", vec![
+            ("native_frame::tests::original_drive_dispatch_matches_complete_heaps_and_callback_states", vec!["FUN_00426e10"]),
+            ("native_frame::tests::original_control_animation_passes_match_complete_heaps_events_and_abi", vec!["FUN_00426c90", "FUN_00426fd0"]),
+            // These are deliberately partial kernels. Preserve observations
+            // without promoting all of4255e0/41fbc0 to verified functions.
+            ("native_script_access::tests::original_script_access_prefix_matches_complete_heaps_and_live_target", vec![]),
+            ("native_vm_abi::tests::prepared_entry_kernel_matches_original_controls_and_genuine_stock_graph", vec![]),
+            ("native_cursor::tests::constructors_match_original_complete_heap_and_calls", vec!["FUN_0045fd00", "FUN_0045fdf0"]),
+            ("native_cursor::tests::frame_transitions_match_original_complete_heap_and_ordered_calls", vec!["FUN_00461c20", "FUN_00461c40", "FUN_00460140"]),
+            ("native_cursor::tests::command_sequences_match_original_complete_heap_and_calls", vec!["FUN_00461d20"]),
+            ("native_cursor::tests::system_cursor_wrappers_match_original_global_writes_and_api_order", vec!["FUN_004b7bd0", "FUN_004b7c50", "FUN_004b7c90", "FUN_004b7cb0", "FUN_004b7cc0"]),
+            ("native_callbacks::tests::original_registration_retirement_and_drive_traversal_match_complete_heap", vec!["FUN_00427370", "FUN_004274e0", "FUN_00426f60"]),
+            ("native_notifications::tests::original_notification_lists_and_destructors_match_complete_memory", vec!["FUN_0048b500", "FUN_0048b670", "FUN_0048f290"]),
             ("native_query::tests::instance_routing_and_registration_match_original_mutating_graphs", vec!["FUN_00426470"]),
             ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
             ("native_car_update::tests::original_active_update_matches_complete_memory_and_call_order", vec!["FUN_00448430", "FUN_0043c520", "FUN_004707d0", "FUN_004479d0"]),
@@ -944,22 +962,18 @@ fn collect(root: &std::path::Path) {
     });
     let mut results: Vec<slr_ledger::TestResult> = Vec::new();
     for (package, target, tests) in collect_suites() {
-        let (target_flag, target_name) = target
-            .strip_prefix("bin:")
-            .map_or(("--test", target), |name| ("--bin", name));
-        let output = std::process::Command::new("cargo")
-            // `--nocapture`: a skipped oracle prints its note and returns, and
-            // libtest hides captured output for a passing test, so without this
-            // the guard below cannot see the skip.
-            .args([
-                "test",
-                "-p",
-                package,
-                target_flag,
-                target_name,
-                "--",
-                "--nocapture",
-            ])
+        let mut command = std::process::Command::new("cargo");
+        command.args(["test", "-p", package]);
+        if target == "lib" {
+            command.arg("--lib");
+        } else if let Some(name) = target.strip_prefix("bin:") {
+            command.args(["--bin", name]);
+        } else {
+            command.args(["--test", target]);
+        }
+        // Keep skipped-oracle markers visible even when libtest reports ok.
+        let output = command
+            .args(["--", "--nocapture"])
             .env("SLR_STOCK", &stock)
             .env("SLR_REFERENCE", &reference)
             .current_dir(root)
@@ -999,6 +1013,18 @@ fn collect(root: &std::path::Path) {
                 || target == "bin:slr-boot" && name.starts_with("native_query::")
             {
                 "unicorn controlled resource/script/native collaborators"
+            } else if target == "bin:slr-boot" && name.starts_with("native_frame::") {
+                "unicorn controlled access/native/script collaborators; complete heaps and callback states; native ABI reentry remains open"
+            } else if target == "bin:slr-boot" && name.starts_with("native_script_access::") {
+                "unicorn4255e0 resource-eligibility prefix only; complete caller heaps and live target; VM/native stack unclaimed"
+            } else if target == "bin:slr-boot" && name.starts_with("native_vm_abi::") {
+                "unicorn420025 native-entry kernel only; complete stack/register/store observations; earlier interpreter/conversion history and native return unclaimed"
+            } else if target == "bin:slr-boot" && name.contains("system_cursor_wrappers") {
+                "unicorn controlled device APIs; complete heaps/globals and call order; no physical device observation"
+            } else if target == "bin:slr-boot" && name.starts_with("native_cursor::") {
+                "unicorn controlled resource/input/picking/render collaborators; complete heaps, globals and ordered events; bounded native cursor states"
+            } else if target == "bin:slr-boot" && name.starts_with("native_callbacks::") {
+                "unicorn controlled allocator/frame collaborator; complete caller heap"
             } else if target == "bin:slr-boot" {
                 "unicorn controlled collaborators; finite dyadic arithmetic"
             } else if target == "particle_exceptions" {

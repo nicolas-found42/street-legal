@@ -268,7 +268,9 @@ mod tests {
         };
         let mut thread = Thread::new();
         let identity = thread.clock_identity;
-        assert_eq!(thread.clone().clock_identity, identity);
+        // A diagnostic identity is copied without cloning live cell owners.
+        let snapshot_identity = thread.clock_identity;
+        assert_eq!(snapshot_identity, identity);
         assert_ne!(Thread::new().clock_identity, identity);
         thread.clock_name = Some("honest thread".into());
         let pc = Some(Pc {

@@ -412,21 +412,22 @@ pub fn return_type(sig: &str) -> Option<TypeTag> {
 fn collect_args_using(
     thread: &mut Thread,
     sig: &str,
-    mut pop: impl FnMut(&mut Thread) -> Result<Value, VmError>,
+    mut pop: impl FnMut(&mut Thread) -> Result<crate::values::OwnedCell, VmError>,
 ) -> Result<Vec<Value>, VmError> {
     let params = parameter_slots(sig).ok_or(VmError::Unsupported(0x4012))?;
     let mut args = Vec::with_capacity(params + 1);
     for _ in 0..params {
         let value = pop(thread)?;
-        args.push(value);
-        thread.release();
+        args.push(value.value());
+        thread.release(value);
     }
     // A static call recorded no receiver; the exe's container still holds
     // the slot (`count` includes it), so supply a null one.
     let receiver = match pop(thread) {
         Ok(value) => {
-            thread.release();
-            value
+            let result = value.value();
+            thread.release(value);
+            result
         }
         Err(VmError::NullSlot) => Value::int(0),
         Err(error) => return Err(error),
@@ -532,6 +533,8 @@ pub enum NativePhase {
 pub struct VmHost {
     /// Loaded classes and packages.
     pub loader: Loader,
+    thread_pools: crate::interp::ThreadPools,
+    native_cells: Vec<Vec<crate::values::PoolCellView>>,
     /// Native registry.
     pub natives: Natives,
     /// Interned strings (pool + literals).
@@ -601,6 +604,24 @@ pub struct VmHost {
 }
 
 impl VmHost {
+    pub fn machine_trace(&self) -> crate::machine::Trace {
+        self.thread_pools.machine_trace()
+    }
+    pub fn start_machine_recording(&self) -> Result<(), &'static str> {
+        if !self.objects.is_empty() || !self.static_cells.is_empty() {
+            return Err("machine recording cannot reconstruct an existing heap");
+        }
+        self.machine_trace().start()
+    }
+    /// Immutable views of the actual owners held for the current native call.
+    /// Nested native calls have separate scopes. Values are observations;
+    /// they cannot release, clone or mutate an owner.
+    pub fn native_argument_cells(&self) -> Option<&[crate::values::PoolCellView]> {
+        self.native_cells.last().map(Vec::as_slice)
+    }
+    pub fn new_thread(&self) -> Thread {
+        Thread::with_pools(self.thread_pools.clone())
+    }
     fn diagnostic_reference_words(&self, thread: &Thread) -> std::collections::BTreeSet<u32> {
         let mut words = std::collections::BTreeSet::new();
         for frame in thread.frames.iter().rev().take(16) {
@@ -616,7 +637,7 @@ impl VmHost {
             }
             for slot in frame.stack.iter().rev().take(64) {
                 let value = match slot {
-                    Slot::Value(v) => Some(*v),
+                    Slot::Value(v) => Some(v.value()),
                     Slot::Var(id) => thread.vars.try_get(*id).map(|v| v.value),
                     Slot::Heap(slot) => self.diagnostic_cell(*slot),
                     _ => None,
@@ -737,7 +758,7 @@ impl VmHost {
         let mut roots = Vec::new();
         for frame in thread.frames.iter().rev() {
             for slot in frame.stack.iter().rev() {
-                let value = self.borrow_slot(thread, *slot)?;
+                let value = self.borrow_slot(thread, slot)?;
                 if value.tag.is_ref() && value.tag.name() != "V" && value.payload != 0 {
                     roots.push(value.payload);
                 }
@@ -763,6 +784,10 @@ impl VmHost {
 
     /// After finalize, the original clears reference payloads in the object.
     pub fn gc_clear_references(&mut self, word: u32) {
+        self.machine_trace()
+            .note(crate::machine::Event::UnresolvedMutation {
+                owner: format!("gc_clear_references:{word:#x}"),
+            });
         if let Some(index) = word.checked_sub(0x1000) {
             if let Some(object) = self.objects.get_mut(index as usize) {
                 for value in &mut object.fields {
@@ -825,7 +850,8 @@ impl VmHost {
         }
         let word = self.alloc_object_id(string_id)?;
         let buffer = self.strings.intern(bytes).word;
-        self.objects[(word - 0x1000) as usize].fields[slot] = Value::int(buffer as i32);
+        self.write_cell(HeapSlot::Object { word, slot }, Value::int(buffer as i32))
+            .map_err(|_| HostError::MissingMember)?;
         self.strings.bind_object(bytes, word);
         Ok(word)
     }
@@ -855,8 +881,13 @@ impl VmHost {
     /// An empty host (boot with [`VmHost::boot`]).
     #[must_use]
     pub fn new() -> Self {
+        let thread_pools = crate::interp::ThreadPools::default();
+        let mut loader = Loader::new();
+        loader.attach_machine_trace(thread_pools.machine_trace());
         Self {
-            loader: Loader::new(),
+            loader,
+            thread_pools,
+            native_cells: Vec::new(),
             natives: Natives::new(),
             strings: Strings::new(),
             objects: Vec::new(),
@@ -916,8 +947,9 @@ impl VmHost {
         name: &str,
         args: &[Value],
     ) -> Result<Flow, VmError> {
+        self.validate_thread(thread)?;
         if thread.frames.is_empty() {
-            thread.frames.push(crate::interp::Frame::new(None, 0));
+            thread.push_frame(crate::interp::Frame::new(None, 0))?;
         }
         for &arg in args {
             thread.push_new(arg)?;
@@ -944,6 +976,12 @@ impl VmHost {
 
     /// The element cells of an array object, for natives that copy payloads.
     pub fn array_cells_mut(&mut self, word: u32) -> Option<&mut Vec<Value>> {
+        if self.array_cells.contains_key(&word) {
+            self.machine_trace()
+                .note(crate::machine::Event::UnresolvedMutation {
+                    owner: format!("array_cells_mut:{word:#x}"),
+                });
+        }
         self.array_cells.get_mut(&word)
     }
 
@@ -968,6 +1006,13 @@ impl VmHost {
             class: crate::vmclass::ClassRef::Array(array),
             fields: vec![Value::int(length as i32)],
         });
+        self.machine_trace()
+            .note(crate::machine::Event::ObjectAllocate {
+                word,
+                class_context: 0,
+                array_descriptor: Some(format!("[{element}")),
+                array_length: Some(length),
+            });
         self.gc.allocated(word);
         self.array_cells.insert(
             word,
@@ -1283,16 +1328,26 @@ impl VmHost {
             self.initialized_dependencies
                 .insert(context, (base_id, interface_ids));
             self.static_cells.insert(context, Vec::new());
+            let mut initializer = self.new_initializer_thread(false)?;
             for (static_index, field) in metadata
                 .fields
                 .iter()
                 .filter(|field| field.is_static)
                 .enumerate()
             {
-                self.static_cells.get_mut(&context).unwrap().push(Value {
+                let zero = Value {
                     tag: TypeTag::intern(&field.ty),
                     payload: 0,
-                });
+                };
+                self.static_cells.get_mut(&context).unwrap().push(zero);
+                self.machine_trace()
+                    .note(crate::machine::Event::HeapConstruct {
+                        slot: HeapSlot::Static {
+                            context,
+                            slot: static_index,
+                        },
+                        value: zero,
+                    });
                 // Original compares canonical descriptor pointers. The loader's
                 // current single-version class boundary and TypeTag interning
                 // provide that identity here; versioned class identity is open.
@@ -1311,23 +1366,25 @@ impl VmHost {
                     })
                     .and_then(|index| self.loader.field_initializer_of(class, index));
                 if let Some(body) = declared {
-                    let value = self
-                        .initialize_field(
-                            body,
+                    self.initialize_field(
+                        &mut initializer,
+                        body,
+                        context,
+                        0,
+                        HeapSlot::Static {
                             context,
-                            0,
-                            self.static_cells[&context][static_index],
-                        )
-                        .map_err(|error| {
-                            HostError::UnsupportedInitializer(format!(
-                                "{}.{}: {error:?}",
-                                metadata.name, field.name
-                            ))
-                        })?;
-                    self.static_cells.get_mut(&context).unwrap()[static_index] = value;
-                    self.gc_mark_reference(value);
+                            slot: static_index,
+                        },
+                    )
+                    .map_err(|error| {
+                        HostError::UnsupportedInitializer(format!(
+                            "{}.{}: {error:?}",
+                            metadata.name, field.name
+                        ))
+                    })?;
                 }
             }
+            self.retire_initializer_thread(&mut initializer)?;
             Ok(())
         })();
         self.initializing_classes.remove(&context);
@@ -1361,10 +1418,11 @@ impl VmHost {
 
     fn initialize_field(
         &mut self,
+        thread: &mut Thread,
         body: BodyId,
         context: u32,
         receiver: u32,
-        destination: Value,
+        destination: HeapSlot,
     ) -> Result<Value, HostError> {
         if self.initializer_depth >= self.initializer_depth_limit {
             return Err(HostError::UnsupportedInitializer(
@@ -1372,33 +1430,32 @@ impl VmHost {
             ));
         }
         self.initializer_depth += 1;
-        let result = self.run_initializer_field(body, context, receiver, destination);
+        let result = self.run_initializer_field(thread, body, context, receiver, destination);
         self.initializer_depth -= 1;
         result
     }
 
     fn run_initializer_field(
         &mut self,
+        thread: &mut Thread,
         body: BodyId,
         context: u32,
         receiver: u32,
-        mut destination: Value,
+        destination: HeapSlot,
     ) -> Result<Value, HostError> {
-        let mut thread = Thread::new();
-        thread.alu.precision = self.runtime_precision;
-        thread.clock_name = Some(
-            if receiver == 0 {
-                "THRD-CLASSVAR-INI"
-            } else {
-                "THRD-INSTVAR-INI"
-            }
-            .into(),
-        );
         let pc = Some(crate::interp::Pc { body, idx: 0 });
         let mut frame = crate::interp::Frame::new(pc, receiver);
         frame.class_ctx = context;
-        thread.frames.push(frame);
+        thread
+            .push_frame(frame)
+            .map_err(|_| HostError::MissingMember)?;
         thread.pc = pc;
+        // Both source drivers set their reused temporary Thread.flags to1
+        // immediately before each run; previous STOPPED bits do not survive.
+        thread.flags = 1;
+        thread
+            .push(crate::interp::Slot::Heap(destination))
+            .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
         let source = self.runtime_clock;
         let outcome = thread.run(self, 0.0, &mut || {
             source.map_or_else(|| slr_x87::X87::from_f64(0.0), |clock| clock())
@@ -1414,7 +1471,7 @@ impl VmHost {
         if thread
             .frames
             .last()
-            .is_none_or(|frame| frame.stack.len() != 1)
+            .is_none_or(|frame| frame.stack.len() != 2)
         {
             return Err(HostError::UnsupportedInitializer(
                 "invalid initializer result stack".into(),
@@ -1423,9 +1480,26 @@ impl VmHost {
         let mut value = thread
             .pop_deref_with(self)
             .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
+        match thread
+            .pop_raw()
+            .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?
+        {
+            crate::interp::Slot::Heap(slot) if slot == destination => {}
+            _ => {
+                return Err(HostError::UnsupportedInitializer(
+                    "initializer destination variable changed".into(),
+                ))
+            }
+        }
+        let mut destination_value = self
+            .read_cell(destination)
+            .map_err(|error| HostError::UnsupportedInitializer(format!("{error:?}")))?;
         thread
             .alu
-            .store_with(&mut destination, &mut value, Some(self));
+            .store_with(&mut destination_value, &mut value, Some(self));
+        self.write_cell(destination, destination_value)
+            .map_err(|_| HostError::MissingMember)?;
+        thread.release(value);
         self.initialization_diagnostics.extend(
             thread
                 .alu
@@ -1433,7 +1507,51 @@ impl VmHost {
                 .drain(..)
                 .map(InitializationDiagnostic::Body),
         );
-        Ok(destination)
+        //403e80 destroys its field frame immediately.407da0 retains every
+        // field frame until its single temporary Thread destructor.
+        if receiver == 0 {
+            thread.pop_frame().map_err(|_| HostError::MissingMember)?;
+            if let Some(frame) = thread.frames.last() {
+                thread
+                    .machine_trace()
+                    .note(crate::machine::Event::CurrentFrame {
+                        thread: thread.machine_identity,
+                        frame: frame.machine_identity(),
+                    });
+            }
+        }
+        Ok(destination_value)
+    }
+
+    fn new_initializer_thread(&self, instance: bool) -> Result<Thread, HostError> {
+        let mut thread = self.new_thread();
+        let name = if instance {
+            "THRD-INSTVAR-INI"
+        } else {
+            "THRD-CLASSVAR-INI"
+        };
+        thread.record_origin(10, 1, name);
+        thread.clock_name = Some(name.into());
+        thread.flags = 1;
+        thread.alu.precision = self.runtime_precision;
+        thread
+            .push_frame(crate::interp::Frame::new(None, 0))
+            .map_err(|_| HostError::MissingMember)?;
+        Ok(thread)
+    }
+
+    fn retire_initializer_thread(&self, thread: &mut Thread) -> Result<(), HostError> {
+        thread.flags |= crate::interp::flags::DEAD;
+        thread
+            .machine_trace()
+            .note(crate::machine::Event::ThreadRetire {
+                identity: thread.machine_identity,
+                flags: thread.flags,
+            });
+        while !thread.frames.is_empty() {
+            thread.pop_frame().map_err(|_| HostError::MissingMember)?;
+        }
+        Ok(())
     }
 
     /// Read an existing loaded class's own static cell without requesting or
@@ -1549,12 +1667,26 @@ impl VmHost {
             class: crate::vmclass::ClassRef::Loaded(class),
             fields,
         });
+        self.machine_trace()
+            .note(crate::machine::Event::ObjectAllocate {
+                word,
+                class_context: class.get(),
+                array_descriptor: None,
+                array_length: None,
+            });
         self.gc.allocated(word);
+        let mut initializer = self.new_initializer_thread(true)?;
         for (index, field) in metadata.iter().enumerate() {
-            self.objects[(word - 0x1000) as usize].fields.push(Value {
+            let zero = Value {
                 tag: TypeTag::intern(&field.ty),
                 payload: 0,
-            });
+            };
+            self.objects[(word - 0x1000) as usize].fields.push(zero);
+            self.machine_trace()
+                .note(crate::machine::Event::HeapConstruct {
+                    slot: HeapSlot::Object { word, slot: index },
+                    value: zero,
+                });
             let body = declaring[index].and_then(|owner| {
                 let record = self.loader.find_by_id(owner)?;
                 let declared = record.fields.iter().position(|candidate| {
@@ -1568,16 +1700,16 @@ impl VmHost {
                 let context = declaring[index]
                     .map(|owner| owner.get())
                     .ok_or(HostError::BadCast)?;
-                let value = self.initialize_field(
+                self.initialize_field(
+                    &mut initializer,
                     body,
                     context,
                     word,
-                    self.objects[(word - 0x1000) as usize].fields[index],
+                    HeapSlot::Object { word, slot: index },
                 )?;
-                self.objects[(word - 0x1000) as usize].fields[index] = value;
-                self.gc_mark_reference(value);
             }
         }
+        self.retire_initializer_thread(&mut initializer)?;
         Ok(word)
     }
 }
@@ -1670,6 +1802,14 @@ impl VmHost {
 }
 
 impl Host for VmHost {
+    fn validate_thread(&self, thread: &Thread) -> Result<(), VmError> {
+        let host = self.machine_trace();
+        let owner = thread.machine_trace();
+        if (host.enabled() || owner.enabled()) && !host.same_owner(&owner) {
+            return Err(VmError::MachineContext);
+        }
+        Ok(())
+    }
     fn diagnostic_cell(&self, slot: HeapSlot) -> Option<Value> {
         match slot {
             HeapSlot::Object { word, slot } => self
@@ -1756,7 +1896,7 @@ impl Host for VmHost {
     }
 
     fn write_cell(&mut self, slot: HeapSlot, value: Value) -> Result<(), VmError> {
-        let before = if crate::diagnostics::enabled() {
+        let before = if crate::diagnostics::enabled() || self.machine_trace().enabled() {
             self.read_cell(slot).ok()
         } else {
             None
@@ -1790,6 +1930,11 @@ impl Host for VmHost {
         };
         if result.is_ok() {
             if let Some(before) = before {
+                self.machine_trace().note(crate::machine::Event::HeapStore {
+                    slot,
+                    before,
+                    after: value,
+                });
                 crate::diagnostics::emit(crate::diagnostics::EventKind::Store {
                     destination: format!("{slot:?}"),
                     before: before.into(),
@@ -1955,12 +2100,7 @@ impl VmHost {
             },
             name,
         );
-        thread
-            .frames
-            .last_mut()
-            .ok_or(VmError::NoFrame)?
-            .locals
-            .push(variable);
+        thread.append_local(variable)?;
         if push_lvalue {
             index += 1;
             let slot = thread
@@ -2092,7 +2232,7 @@ impl VmHost {
                     current = Some(Slot::Var(variable));
                 }
                 0x101b => {
-                    let receiver = if let Some(slot) = current {
+                    let receiver = if let Some(slot) = &current {
                         self.borrow_slot(thread, slot)?.payload
                     } else if qualified.is_some() {
                         0
@@ -2111,7 +2251,7 @@ impl VmHost {
                     qualified = None;
                 }
                 0x101a | 0x001d if current.is_some() => {
-                    let receiver = self.borrow_slot(thread, current.unwrap())?.payload;
+                    let receiver = self.borrow_slot(thread, current.as_ref().unwrap())?.payload;
                     let name = self
                         .loader
                         .pool_text_of(owner, component.imm)
@@ -2130,15 +2270,15 @@ impl VmHost {
         Ok(Flow::Advance)
     }
 
-    fn borrow_slot(&mut self, thread: &Thread, slot: Slot) -> Result<Value, VmError> {
+    fn borrow_slot(&mut self, thread: &Thread, slot: &Slot) -> Result<Value, VmError> {
         match slot {
             Slot::Var(id) => thread
                 .vars
-                .try_get(id)
+                .try_get(*id)
                 .map(|var| var.value)
                 .ok_or(VmError::DanglingVar),
-            Slot::Heap(slot) => <Self as Host>::read_cell(self, slot),
-            Slot::Value(value) => Ok(value),
+            Slot::Heap(slot) => <Self as Host>::read_cell(self, *slot),
+            Slot::Value(value) => Ok(value.value()),
             Slot::Null => Err(VmError::NullSlot),
         }
     }
@@ -2171,21 +2311,21 @@ impl VmHost {
                 .and_then(|object| object.fields.first())
                 .ok_or(HostError::MissingMember)?
                 .as_i32();
-            let index = index.as_i32() as usize;
+            let index_word = index.as_i32() as usize;
             let elements = self
                 .array_cells
                 .get(&array.payload)
                 .ok_or(HostError::MissingMember)?;
-            let slot = if index < length.max(0) as usize && index < elements.len() {
+            let slot = if index_word < length.max(0) as usize && index_word < elements.len() {
                 Slot::Heap(HeapSlot::Array {
                     word: array.payload,
-                    index,
+                    index: index_word,
                 })
             } else {
                 Slot::Null
             };
-            thread.release();
-            thread.release();
+            thread.release(index);
+            thread.release(array);
             thread.push(slot)?;
             return Ok(Flow::Advance);
         }
@@ -2216,8 +2356,13 @@ impl VmHost {
             _ => return Err(HostError::MissingMember.into()),
         };
         let explicit = op.kind == ExternKind::MemberAccess;
-        let word = if explicit {
-            thread.pop_deref_with(self)?.payload
+        let receiver_cell = if explicit {
+            Some(thread.pop_deref_with(self)?)
+        } else {
+            None
+        };
+        let word = if let Some(receiver) = &receiver_cell {
+            receiver.payload
         } else {
             thread.frames.last().ok_or(VmError::NoFrame)?.receiver
         };
@@ -2246,8 +2391,8 @@ impl VmHost {
             self.member_slot(word, &name)?
         };
         thread.push(Slot::Heap(slot))?;
-        if explicit {
-            thread.release();
+        if let Some(receiver) = receiver_cell {
+            thread.release(receiver);
         }
         Ok(Flow::Advance)
     }
@@ -2259,10 +2404,11 @@ impl VmHost {
         }
         let mut items = Vec::with_capacity(op.node.imm as usize);
         for _ in 0..op.node.imm {
-            items.push(thread.pop_deref_with(self)?);
-            thread.release();
+            let value = thread.pop_deref_with(self)?;
+            items.push(value.value());
+            thread.release(value);
         }
-        let target = *thread
+        let target = thread
             .frames
             .last()
             .ok_or(VmError::NoFrame)?
@@ -2315,8 +2461,9 @@ impl VmHost {
             .map_err(|_| HostError::MissingMethod)?
             .to_owned();
         let (class, receiver) = if op.kind == ExternKind::CallInstance {
-            let receiver = thread.pop_deref_with(self)?.payload;
-            thread.release();
+            let cell = thread.pop_deref_with(self)?;
+            let receiver = cell.payload;
+            thread.release(cell);
             (
                 self.reference_class_id(Value::reference(receiver))
                     .ok_or_else(|| {
@@ -2351,14 +2498,14 @@ impl VmHost {
     fn call_constructor(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let frame = thread.frames.last().ok_or(VmError::NoFrame)?;
         let (class, receiver) = if op.kind == ExternKind::CallInit {
-            let count_slot = *frame.stack.last().ok_or(VmError::NullSlot)?;
+            let count_slot = frame.stack.last().ok_or(VmError::NullSlot)?;
             let count = self.borrow_slot(thread, count_slot)?.payload as usize;
             let stack = &thread.frames.last().ok_or(VmError::NoFrame)?.stack;
             let index = stack
                 .len()
                 .checked_sub(count.checked_add(2).ok_or(VmError::NullSlot)?)
                 .ok_or(VmError::NullSlot)?;
-            let receiver = self.borrow_slot(thread, stack[index])?.payload;
+            let receiver = self.borrow_slot(thread, &stack[index])?.payload;
             (
                 self.reference_class_id(Value::reference(receiver))
                     .ok_or(HostError::BadCast)?,
@@ -2463,7 +2610,7 @@ impl VmHost {
                         if qualified.is_some() { 0 } else { receiver },
                         qualified,
                     )?;
-                    receiver = self.borrow_slot(thread, Slot::Heap(slot))?.payload;
+                    receiver = self.borrow_slot(thread, &Slot::Heap(slot))?.payload;
                     if receiver != 0 {
                         class = self
                             .reference_class_id(Value::reference(receiver))
@@ -2473,8 +2620,8 @@ impl VmHost {
                 0x101a if offset + 1 == components.len() => {
                     // The argument-count temporary is consumed by evalName before
                     // decoding the cached method reference (4208e0).
-                    thread.pop_deref_with(self)?;
-                    thread.release();
+                    let cell = thread.pop_deref_with(self)?;
+                    thread.release(cell);
                     let (class_name, name, sig) = self
                         .loader
                         .field_reference_of(owner, component.imm)
@@ -2491,12 +2638,22 @@ impl VmHost {
                         .loader
                         .resolve_method_id(class, &name, &sig)
                         .ok_or(HostError::MissingMethod)?;
+                    let method_index = self
+                        .loader
+                        .retained_method_index(defining, method)
+                        .ok_or(HostError::MissingMethod)?;
                     let method = method.clone();
                     thread.pc = Some(crate::interp::Pc {
                         body: op.pc.body,
                         idx: cursor + offset,
                     });
-                    return self.dispatch_method_id(thread, &method, defining, receiver);
+                    return self.dispatch_method_id(
+                        thread,
+                        &method,
+                        defining,
+                        method_index,
+                        receiver,
+                    );
                 }
                 0x4012 if offset + 1 == components.len() => {
                     let name = self
@@ -2524,12 +2681,22 @@ impl VmHost {
         thread: &mut Thread,
         method: &crate::vmclass::Method,
         defining: crate::vmclass::ClassId,
+        method_index: usize,
         receiver: u32,
     ) -> Result<Flow, VmError> {
         let receiver = if method.flags & 8 != 0 { 0 } else { receiver };
         if method.flags & 8 == 0 && receiver == 0 {
             return Err(VmError::InstanceMethodWithoutReceiver);
         }
+        self.machine_trace()
+            .note(crate::machine::Event::MethodSelect {
+                thread: thread.machine_identity,
+                frame: thread.frames.last().map(|f| f.machine_identity()),
+                pc: thread.pc,
+                defining_class: defining.get(),
+                method_index,
+                receiver,
+            });
         if self.call_trace {
             eprintln!(
                 "CALL {}.{}{} receiver={receiver:#x}",
@@ -2537,7 +2704,7 @@ impl VmHost {
             );
         }
         if method.is_native {
-            return self.invoke_method_native_id(thread, method, defining, receiver);
+            return self.invoke_native_at(thread, method, defining, Some(method_index), receiver);
         }
         if method.is_abstract {
             return Err(HostError::NoBody.into());
@@ -2550,8 +2717,8 @@ impl VmHost {
         // path: consume arguments without installing a script frame.
         if self.loader.body(body).is_some_and(<[Node]>::is_empty) {
             for _ in parameter_types(&method.sig)? {
-                thread.pop_deref_with(self)?;
-                thread.release();
+                let cell = thread.pop_deref_with(self)?;
+                thread.release(cell);
             }
             if return_type(&method.sig).is_some() {
                 thread.push_new(Value::int(0))?;
@@ -2582,13 +2749,13 @@ impl VmHost {
         self.loader
             .find_by_id(class)
             .ok_or(HostError::MissingMethod)?;
-        let count = thread.pop_deref_with(self)?.payload as usize;
-        thread.release();
+        let cell = thread.pop_deref_with(self)?;
+        let count = cell.payload as usize;
+        thread.release(cell);
         let stack = &thread.frames.last().ok_or(VmError::NoFrame)?.stack;
         let arguments = stack
             .get(stack.len().checked_sub(count).ok_or(VmError::NullSlot)?..)
-            .ok_or(VmError::NullSlot)?
-            .to_vec();
+            .ok_or(VmError::NullSlot)?;
         let mut types = Vec::with_capacity(count);
         let mut argument_values = Vec::with_capacity(count);
         for slot in arguments {
@@ -2605,6 +2772,10 @@ impl VmHost {
             .loader
             .resolve_overload_id(class, name, &types)
             .map_err(|_| HostError::MissingMethod)?
+            .ok_or(HostError::MissingMethod)?;
+        let method_index = self
+            .loader
+            .retained_method_index(selected.defining, selected.method)
             .ok_or(HostError::MissingMethod)?;
         let (method, defining) = (selected.method.clone(), selected.defining);
         if selected.ambiguous {
@@ -2626,7 +2797,7 @@ impl VmHost {
             });
         }
         let constructor_index = (name == "<init>").then(|| self.constructor_calls.len() - 1);
-        let result = self.dispatch_method_id(thread, &method, defining, receiver);
+        let result = self.dispatch_method_id(thread, &method, defining, method_index, receiver);
         if let Some(index) = constructor_index {
             self.constructor_calls[index].entered_script_frame =
                 result.as_ref().ok().map(|flow| *flow == Flow::Stay);
@@ -2637,13 +2808,15 @@ impl VmHost {
     /// ID-carrying native invocation: the receiver tag is resolved from the
     /// retained defining record, never re-looked-up by spelling.
     /// exe: FUN_0041fbc0
-    fn invoke_method_native_id(
+    fn invoke_native_at(
         &mut self,
         thread: &mut Thread,
         method: &crate::vmclass::Method,
         defining: crate::vmclass::ClassId,
+        method_index: Option<usize>,
         receiver: u32,
     ) -> Result<Flow, VmError> {
+        self.validate_thread(thread)?;
         if method.flags & 8 == 0 && receiver == 0 {
             return Err(VmError::InstanceMethodWithoutReceiver);
         }
@@ -2670,13 +2843,18 @@ impl VmHost {
             Some(return_type(&method.sig).ok_or(HostError::MissingMethod)?)
         };
         let parameters = parameter_types(&method.sig)?;
-        let mut args = Vec::with_capacity(parameters.len() + 1);
+        let mut owned_args = Vec::with_capacity(parameters.len() + 1);
         for tag in parameters.into_iter().rev() {
             let mut source = thread.pop_deref_with(self)?;
-            let mut value = Value { tag, payload: 0 };
-            self.store_value(&mut thread.alu, &mut value, &mut source);
-            args.push(value);
-            thread.release();
+            if source.tag == tag {
+                owned_args.push(source);
+            } else {
+                let mut converted = thread.allocate_value(Value { tag, payload: 0 });
+                source
+                    .edit(|src| converted.edit(|dst| self.store_value(&mut thread.alu, dst, src)));
+                thread.release(source);
+                owned_args.push(converted);
+            }
         }
         let receiver_tag = {
             let name = self
@@ -2687,10 +2865,16 @@ impl VmHost {
                 .clone();
             TypeTag::intern(&format!("L{name};"))
         };
-        args.push(Value {
+        owned_args.push(thread.allocate_value(Value {
             tag: receiver_tag,
             payload: receiver,
-        });
+        }));
+        self.native_cells
+            .push(owned_args.iter().map(|cell| cell.view()).collect());
+        let args = owned_args
+            .iter()
+            .map(|cell| cell.value())
+            .collect::<Vec<_>>();
         let info = CallInfo {
             jvm: 0,
             thread: 0,
@@ -2699,8 +2883,21 @@ impl VmHost {
             name: &method.name,
             sig: &method.sig,
         };
+        self.machine_trace()
+            .note(crate::machine::Event::NativeEnter {
+                thread: thread.machine_identity,
+                frame: thread.frames.last().map(|f| f.machine_identity()),
+                pc: thread.pc,
+                defining_class: defining.get(),
+                method_index,
+                implementation,
+                descriptor: method.sig.clone(),
+                receiver,
+                cells: self.native_argument_cells().unwrap().to_vec(),
+            });
+        let machine_return_emitted = std::cell::Cell::new(false);
         let native_return_emitted = std::cell::Cell::new(false);
-        let invoke = |host: &mut Self, thread: &mut Thread| {
+        let mut invoke = |host: &mut Self, thread: &mut Thread| {
             if let Some(boundary) = host.native_boundary {
                 if let Err(error) = boundary(&info) {
                     host.native_failure =
@@ -2716,6 +2913,15 @@ impl VmHost {
                 observe(host, thread, &info, NativePhase::Enter);
             }
             let result = native(host, &info);
+            host.machine_trace()
+                .note(crate::machine::Event::NativeReturn {
+                    thread: thread.machine_identity,
+                    implementation,
+                    executed: true,
+                    result,
+                    error: host.native_failure.clone(),
+                });
+            machine_return_emitted.set(true);
             if let Some(hook) = host.native_thread_hook {
                 hook(thread, false);
             }
@@ -2731,6 +2937,9 @@ impl VmHost {
             }
             if let Some(observe) = host.native_observer {
                 observe(&info, result);
+            }
+            for cell in owned_args.drain(..) {
+                thread.release(cell);
             }
             let payload = result.unwrap_or(0);
             if let Some(tag) = return_tag {
@@ -2750,7 +2959,7 @@ impl VmHost {
         let clock_context = thread.clock_context(self);
         let precision = thread.alu.precision;
         let diagnostic_context = crate::diagnostics::thread_context(thread, self);
-        crate::clock::with_interpreter_context(clock_context, precision, || {
+        let outcome = crate::clock::with_interpreter_context(clock_context, precision, || {
             crate::diagnostics::with_context(diagnostic_context, || {
                 if crate::diagnostics::enabled() {
                     let identity = crate::diagnostics::NativeIdentity {
@@ -2802,9 +3011,36 @@ impl VmHost {
                     invoke(self, thread)
                 }
             })
-        })
+        });
+        if !machine_return_emitted.get() {
+            self.machine_trace()
+                .note(crate::machine::Event::NativeReturn {
+                    thread: thread.machine_identity,
+                    implementation,
+                    executed: false,
+                    result: None,
+                    error: self
+                        .native_failure
+                        .clone()
+                        .or_else(|| outcome.as_ref().err().map(|e| format!("{e:?}"))),
+                });
+        }
+        self.native_cells
+            .pop()
+            .expect("native cell observation scope");
+        outcome
     }
 
+    #[cfg(test)]
+    fn invoke_method_native_id(
+        &mut self,
+        thread: &mut Thread,
+        method: &crate::vmclass::Method,
+        defining: crate::vmclass::ClassId,
+        receiver: u32,
+    ) -> Result<Flow, VmError> {
+        self.invoke_native_at(thread, method, defining, None, receiver)
+    }
     fn new_object(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
         let token = *self
             .body(op.pc.body)
@@ -2867,8 +3103,9 @@ impl VmHost {
         if parameter_types(&format!("({element})"))?.len() != 1 {
             return Err(HostError::BadCast.into());
         }
-        let size = thread.pop_deref_with(self)?;
-        thread.release();
+        let cell = thread.pop_deref_with(self)?;
+        let size = cell.value();
+        thread.release(cell);
         if size.as_i32() < 0 {
             return Err(HostError::BadCast.into());
         }
@@ -2885,8 +3122,9 @@ impl VmHost {
     }
 
     fn instance_of(&mut self, thread: &mut Thread, op: ExternOp) -> Result<Flow, VmError> {
-        let value = thread.pop_deref_with(self)?;
-        thread.release();
+        let cell = thread.pop_deref_with(self)?;
+        let value = cell.value();
+        thread.release(cell);
         let token = *self
             .body(op.pc.body)
             .get(op.pc.idx + 1)

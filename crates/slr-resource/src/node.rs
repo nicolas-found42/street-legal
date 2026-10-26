@@ -836,6 +836,69 @@ impl ResHost {
         Ok(())
     }
 
+    /// Reflect an already executed native resource-tree move into host handles.
+    /// The raw graph owns the decision and insertion order; this only updates
+    /// the typed projection used by resource natives and resource destruction.
+    pub fn synchronize_parent(&mut self, child: u32, parent: u32) -> Result<(), String> {
+        let current = self
+            .containers
+            .get(&child)
+            .ok_or("child container missing")?
+            .clone();
+        if current.parent == parent {
+            return Ok(());
+        }
+        if parent == child || parent != 0 && !self.containers.contains_key(&parent) {
+            return Err("native parent has no distinct host identity".into());
+        }
+        if current.parent != 0 {
+            let old = self
+                .containers
+                .get(&current.parent)
+                .ok_or("old parent missing")?
+                .clone();
+            let previous = current.previous_sibling;
+            let next = current.next_sibling;
+            if previous == current.parent {
+                self.containers
+                    .get_mut(&current.parent)
+                    .unwrap()
+                    .first_child = if next == old.children_sentinel {
+                    0
+                } else {
+                    next
+                };
+            } else if previous != 0 {
+                self.containers
+                    .get_mut(&previous)
+                    .ok_or("old sibling missing")?
+                    .next_sibling = next;
+            }
+            if next != 0 {
+                self.containers
+                    .get_mut(&next)
+                    .ok_or("next sibling missing")?
+                    .previous_sibling = previous;
+            }
+            if old.last_child == child {
+                self.containers.get_mut(&current.parent).unwrap().last_child =
+                    if previous == current.parent {
+                        0
+                    } else {
+                        previous
+                    };
+            }
+        }
+        let c = self.containers.get_mut(&child).unwrap();
+        c.parent = 0;
+        c.previous_sibling = 0;
+        c.next_sibling = 0;
+        if parent != 0 {
+            self.append_child(parent, child)?;
+        }
+        Ok(())
+    }
+
     /// Original545f70: invalidate every retained four-word reference, while
     /// leaving its owning Native.ptr cell and allocation in place.
     pub fn invalidate_container_references(&mut self, container: u32) -> Result<(), String> {
@@ -942,14 +1005,15 @@ impl ResHost {
         self.nodes.get(&word)
     }
 
-    /// The node behind a word, mutably.
     /// Every direct child container, in link order. The walk stops after
-    /// `limit` entries so a damaged sibling chain cannot loop forever.
+    /// 1024 entries so a damaged sibling chain cannot loop forever. Typed
+    /// terminal sentinels are list storage, not resource children.
     #[must_use]
     pub fn child_containers(&self, container: u32) -> Vec<u32> {
         let mut out = Vec::new();
         let mut cursor = self.container(container).map_or(0, |c| c.first_child);
-        while cursor != 0 && out.len() < 1024 {
+        let sentinel = self.container(container).map_or(0, |c| c.children_sentinel);
+        while cursor != 0 && cursor != sentinel && out.len() < 1024 {
             let Some(child) = self.container(cursor) else {
                 break;
             };

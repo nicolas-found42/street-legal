@@ -451,7 +451,7 @@ pub fn thread_start(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         ));
         return None;
     };
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     let name = with_threads(|h| h.queues().get(id).name.clone());
     assign_clock_metadata(&mut thread, id, &name);
@@ -485,7 +485,8 @@ pub fn run_created(
     args: &[Value],
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|h| h.queues_mut().spawn(10, 0, name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, 0, name);
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, name);
     let flow = match vm.enter_method(&mut thread, class, receiver, method, args) {
@@ -537,7 +538,8 @@ pub fn run_callback(
     name.truncate(end);
     let flags = u32::from(request_return);
     let id = with_threads(|host| host.queues_mut().spawn(10, flags, &name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, flags, &name);
     thread.alu.precision = vm.runtime_precision;
     thread.flags = flags;
     assign_clock_metadata(&mut thread, id, &name);
@@ -551,34 +553,48 @@ pub fn run_callback(
             thread.run(vm, 0.0, &mut clock_ms)?;
         }
         if request_return || flow == Flow::Advance {
-            let value = thread.pop_deref_with(vm)?;
-            thread.release();
+            let cell = thread.pop_deref_with(vm)?;
+            let value = cell.value();
+            thread.release(cell);
             Ok(Some(value))
         } else {
             Ok(None)
         }
     })();
-    let retained = result.is_ok() && !request_return && dispatched == Some(Flow::Stay);
-    if retained {
-        with_threads(|host| {
-            host.queues_mut().get_mut(id).flags = thread.flags;
-            host.set_current(outer);
-        });
-        if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
-            cache_clock_thread(vm, id, &thread);
-            INTERP.with(|threads| {
-                threads.borrow_mut().insert(id, thread.clone());
-            });
-        }
-    } else {
-        with_threads(|host| {
-            host.dispose_scoped(id);
-            host.set_current(outer);
-        });
-        retire_clock_thread(id);
-    }
     CURRENT.with(|current| current.set(outer));
-    result.map_err(|error| (thread, error))
+    match result {
+        Ok(value) => {
+            if !request_return && dispatched == Some(Flow::Stay) {
+                with_threads(|host| {
+                    host.queues_mut().get_mut(id).flags = thread.flags;
+                    host.set_current(outer);
+                });
+                if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD)
+                    == 0
+                {
+                    cache_clock_thread(vm, id, &thread);
+                    INTERP.with(|threads| {
+                        threads.borrow_mut().insert(id, thread);
+                    });
+                }
+            } else {
+                with_threads(|host| {
+                    host.dispose_scoped(id);
+                    host.set_current(outer);
+                });
+                retire_clock_thread(id);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            with_threads(|host| {
+                host.dispose_scoped(id);
+                host.set_current(outer);
+            });
+            retire_clock_thread(id);
+            Err((thread, error))
+        }
+    }
 }
 
 /// Original408560's scoped priority10,flags1 THRD-FIN. Its immediate
@@ -589,7 +605,8 @@ pub fn run_finalizer(
     receiver: u32,
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|host| host.queues_mut().spawn(10, 1, "THRD-FIN"));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, 1, "THRD-FIN");
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, "THRD-FIN");
     thread.flags = 1;
@@ -856,6 +873,7 @@ mod callback_wrapper_tests {
 
     fn stock_vm(leaf: &str) -> VmHost {
         let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
         for file in [
             "system/Scripts/lang/Object.class",
@@ -876,6 +894,7 @@ mod callback_wrapper_tests {
         configure_clock(0.0);
         slr_vm::diagnostics::configure("callback-scalar".into(), 128, None);
         let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
         vm.loader
             .load_file_named(&std::fs::read(root.join("system/Scripts/lang/Object.class")).unwrap())
@@ -895,6 +914,14 @@ mod callback_wrapper_tests {
         .unwrap()
         .unwrap();
         assert_eq!(result.tag.name(), "I");
+        let machine = vm.machine_trace().pending(usize::MAX);
+        let origin = machine.iter().find(|entry| matches!(&entry.event,
+            slr_vm::machine::Event::ThreadOrigin { priority: 10, flags: 1, name, .. }
+            if name == "THRD-RUNVMI Config.equals")).unwrap();
+        let slr_vm::machine::Event::ThreadOrigin { identity, .. } = origin.event else { unreachable!() };
+        let first_frame = machine.iter().find(|entry| matches!(entry.event,
+            slr_vm::machine::Event::Frame { thread, .. } if thread == identity)).unwrap();
+        assert!(origin.sequence < first_frame.sequence);
         with_threads(|host| {
             assert_eq!(host.queues().run_order(), original);
             assert!(host.queues().notify_order().is_empty());
@@ -930,6 +957,10 @@ mod callback_wrapper_tests {
                 .unwrap()
                 .is_none()
         );
+        let machine = vm.machine_trace().pending(usize::MAX);
+        assert!(machine.iter().any(|entry| matches!(&entry.event,
+            slr_vm::machine::Event::ThreadOrigin { priority: 10, flags: 0, name, .. }
+            if name == "THRD-RUNVMI file.finalize")));
         let id = with_threads(|host| {
             let ids = host.queues().notify_order();
             assert_eq!(ids.len(), 1);

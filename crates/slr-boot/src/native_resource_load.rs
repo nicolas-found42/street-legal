@@ -243,10 +243,13 @@ pub fn initialize_buckets(m: &mut Space, manager: u32) {
 /// The pointer occupies the original global618d48, used by544b90's two calls.
 pub fn initialize_projection(m: &mut Space) -> u32 {
     let existing = m.r32(0x618d48);
-    if existing != 0 {
-        return existing;
-    }
-    let manager = m.alloc(0x106ee8);
+    // The stock image supplies a pointer to static BSS. A nonzero pointer
+    // does not mean535a70 has constructed its lists yet.
+    let manager = if existing != 0 {
+        existing
+    } else {
+        m.alloc(0x106ee8)
+    };
     initialize_buckets(m, manager);
     crate::native_spatial::initialize_request_pool(m, manager);
     m.w32(0x618d48, manager);

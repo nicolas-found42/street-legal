@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Investigation only: no production operation is trusted by enabling this.
+experimental-intel-trig = []
+
+[[example]]
+name = "intel_trig_candidate"
+required-features = ["experimental-intel-trig"]
+
 [build-dependencies]
 cc = "1"
 

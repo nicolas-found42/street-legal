@@ -130,18 +130,27 @@ pub fn function<R>(
     result
 }
 
+/// A cdecl function leaves its incoming argument words for its caller. The
+/// argument words still determine a direct oracle driver's entry alignment.
+pub fn function_cdecl<R>(m: &mut Space, args: &[u32], f: impl FnOnce(&mut Space) -> R) -> R {
+    let mut frame = enter(m, args, None);
+    frame.arguments = 0;
+    let result = f(m);
+    leave(m, frame);
+    result
+}
+
 /// Execute an actual CALL after the caller has formed its argument values.
 /// The source-derived return PC is the address following that instruction.
 /// Caller cleanup is reflected by restoring its pre-argument ESP after return.
-pub fn call<R>(
-    m: &mut Space,
-    return_pc: u32,
-    args: &[u32],
-    this: Option<u32>,
-    f: impl FnOnce(&mut Space) -> R,
-) -> R {
+///
+/// Begin only the CALL instruction when a source continuation must retain a
+/// suspended callee. The next `enter` consumes its pending frame. The caller
+/// keeps the returned `Frame` and performs its eventual real return/cleanup;
+/// this primitive neither enters a function nor unwinds one.
+pub fn begin_call(m: &mut Space, return_pc: u32, args: &[u32], this: Option<u32>) {
     assert!(active(m), "native CALL requires an entered caller frame");
-    let caller = sp(m);
+    assert_eq!(m.r32(PENDING), 0, "previous native CALL was not entered");
     for value in args.iter().rev() {
         push(m, *value);
     }
@@ -150,10 +159,63 @@ pub fn call<R>(
         set_reg(m, Reg::Ecx, this);
     }
     m.w32(PENDING, 1);
+}
+
+pub fn call<R>(
+    m: &mut Space,
+    return_pc: u32,
+    args: &[u32],
+    this: Option<u32>,
+    f: impl FnOnce(&mut Space) -> R,
+) -> R {
+    let caller = sp(m);
+    begin_call(m, return_pc, args, this);
     let result = f(m);
     m.w32(PENDING, 0);
     set_sp(m, caller);
     result
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    #[test]
+    fn suspended_calls_keep_their_live_frames_and_return_only_when_left() {
+        let mut m = Space::new();
+        let parent = enter(&mut m, &[], None);
+        let caller = sp(&m);
+        set_reg(&mut m, Reg::Ebx, 0x12345678);
+        push(&mut m, 0x11); // actual already-pushed source argument
+        begin_call(&mut m, 0x410022, &[], Some(0x20000100));
+        let entry = sp(&m);
+        assert_eq!(entry, caller - 8);
+        assert_eq!(m.r32(entry), 0x410022);
+        assert_eq!(argument(&m, 0), 0x11);
+        let callee = enter(&mut m, &[0x11], Some(0x20000100));
+        assert_eq!(sp(&m), entry);
+        assert_eq!(reg(&m, Reg::Ebx), 0x12345678);
+        alloc(&mut m, 0x20);
+        push_reg(&mut m, Reg::Ebx);
+        let retained = sp(&m);
+        begin_call(&mut m, 0x41015c, &[7, 8], Some(0x20000200));
+        let child = enter(&mut m, &[7, 8], Some(0x20000200));
+        assert_eq!([argument(&m, 0), argument(&m, 1)], [7, 8]);
+        set_reg(&mut m, Reg::Ebx, 0xa5a5a5a5);
+        set_reg(&mut m, Reg::Eax, 0xcafebabe);
+        leave(&mut m, child);
+        assert_eq!(sp(&m), retained);
+        assert_eq!(reg(&m, Reg::Eax), 0xcafebabe);
+        assert_eq!(reg(&m, Reg::Ebx), 0x12345678);
+        assert_eq!(m.r32(retained - 12), 0x41015c);
+        assert_eq!(m.r32(retained - 8), 7);
+        assert_eq!(m.r32(retained - 4), 8);
+        leave(&mut m, callee);
+        assert_eq!(sp(&m), caller);
+        assert!(active(&m));
+        assert_eq!(m.r32(retained), 0x12345678);
+        leave(&mut m, parent);
+        assert!(!active(&m));
+    }
 }
 /// A controlled external collaborator still consumes its actual CALL frame.
 /// Its body is outside the port's modeled boundary, like the allocator oracle.
