@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "source_worktree": "/Users/nicolas/.codex/worktrees/native-abi-continuation/street-legal",
+  "source_head": "7e2d2cb56b7e4976b15ee45ffd48c635d061ce30",
+  "dirty_source": true,
+  "inventory": "re/out/triage-20261025/overlap.json",
+  "preserved_sha256": {
+    "crates/slr-x87/src/intel_trig.rs": "e1d6c82386bc5db8579002409e21bd20818309c62b72c3f18e2b4686b913594e",
+    "crates/slr-x87/src/ffi.rs": "a5b4bbb49711a33f3ea4f16e856fe93477ca77b5ace789eb76c2192b574cc537",
+    "crates/slr-x87/examples/intel_trig_candidate.rs": "f47778183a7b44df3882778818e831961a2e5e207c12afbdc9c17e646092d3da",
+    "re/x87probe/compare_intel_trig.py": "056ca44bc190782e4c6b9dce9423bce599417553dfe0113d2eb6eb6f3d5605dd",
+    "re/x87probe/prove_model_error.py": "39859f82de1c306a8b1b74ad513399837092c653b1029a1101ab76726296e2b4",
+    "re/x87probe/rosetta/trig_stream.c": "8b9b60a5c4219a996ac4681a418a0f01e744442c2f74e58e6a3545fcbcb241eb"
+  },
+  "production_provider": false,
+  "base_main": "edaabaf9694c5110319eedcc41793205a077057a",
+  "adaptations": [
+    "Unchanged intel_trig.rs and derivative notice; source-hash proof remains pinned.",
+    "Minimal standalone carrier/FFI and shared SoftFloat build, separate lockfile, no production dependency.",
+    "Explicit current stock executable and output paths; capture separate Rosetta status words and translation identity.",
+    "Receipt validation rejects changed candidate source and modified model outputs."
+  ]
+}
