@@ -1198,10 +1198,20 @@ impl crate::native_frame::Host for Drive<'_> {
         _body: u32,
         _dt: u32,
     ) -> Result<(), String> {
-        Err(format!(
-            "NativeFrameBoundary: original native drive virtual {:#010x} at class {class:#010x}",
-            m.r32(m.r32(class) + 0x30)
-        ))
+        // Main performs no native drive callback; the drive virtuals (car
+        // 454500 among them) are not ported yet (#110). Record each skip.
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "native-callback-skipped".into(),
+            fields: vec![
+                ("class".into(), format!("{class:#010x}")),
+                ("kind".into(), "Drive".into()),
+                (
+                    "virtual".into(),
+                    format!("{:#010x}", m.r32(m.r32(class) + 0x30)),
+                ),
+            ],
+        });
+        Ok(())
     }
     fn script_drive(
         &mut self,
@@ -1226,6 +1236,19 @@ impl crate::native_frame::Host for Drive<'_> {
         })
     }
 }
+/// Record a native class callback the port does not run yet. Main's animate
+/// pass only animated the native player and script-backed containers; other
+/// native bodies were skipped there too. The event keeps each skip visible.
+fn skip_native_callback(class: u32, kind: crate::native_frame::Callback) -> Result<(), String> {
+    slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+        category: "native-callback-skipped".into(),
+        fields: vec![
+            ("class".into(), format!("{class:#010x}")),
+            ("kind".into(), format!("{kind:?}")),
+        ],
+    });
+    Ok(())
+}
 impl crate::native_frame::CallbackHost for Drive<'_> {
     fn native_callback(
         &mut self,
@@ -1237,14 +1260,11 @@ impl crate::native_frame::CallbackHost for Drive<'_> {
     ) -> Result<(), String> {
         use crate::native_frame::Callback;
         match m.r32(class) {
-            0x5f11e4 => crate::native_cursor_runtime::frame(
-                m,
-                self.vm,
-                class,
-                body,
-                dt,
-                kind == Callback::Animate,
-            ),
+            // The raw cursor animate (461d20 picking through 4fdc40/516c20)
+            // needs the original renderer/camera lists, which headless boot
+            // does not construct yet (#110); it falls through to the skip below.
+            0x5f11e4 if kind == Callback::Animate => skip_native_callback(class, kind),
+            0x5f11e4 => crate::native_cursor_runtime::frame(m, self.vm, class, body, dt, false),
             crate::native_player::VTABLE => {
                 let container = crate::native_body::body_container(body)
                     .ok_or("NativePlayerBoundary: callback body has no live owner")?;
@@ -1277,9 +1297,9 @@ impl crate::native_frame::CallbackHost for Drive<'_> {
                 );
                 result
             }
-            vtable => Err(format!(
-                "NativeFrameBoundary: unported {kind:?} class vtable{vtable:#x}"
-            )),
+            // Classes without a ported native callback keep main's behaviour:
+            // main's animate pass never ran a native body's virtual (#110).
+            _ => skip_native_callback(class, kind),
         }
     }
     fn script_callback(
