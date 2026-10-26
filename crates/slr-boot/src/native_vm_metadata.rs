@@ -13,6 +13,9 @@ pub mod loader;
 pub mod names;
 #[path = "native_vm_registration.rs"]
 pub mod registration;
+// Unwired raw-runtime variable pool (#110): oracle-tested, not yet called by
+// production. Remove the allow when the raw Runtime is wired.
+#[cfg_attr(not(test), allow(dead_code))]
 #[path = "native_vm_variables.rs"]
 pub mod variables;
 

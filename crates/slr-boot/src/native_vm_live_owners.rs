@@ -143,6 +143,19 @@ enum Receipt {
         destination_after: ValueSnapshot,
         stage: u8,
     },
+    /// Stage 0 awaits the source cell conversion, stage 1 the destination
+    /// local store; both must match the source snapshots.
+    Parameter {
+        thread: u64,
+        frame: u64,
+        source: u64,
+        destination: u64,
+        source_before: ValueSnapshot,
+        source_after: ValueSnapshot,
+        destination_before: ValueSnapshot,
+        destination_after: ValueSnapshot,
+        stage: u8,
+    },
     ScriptRetire {
         frame: Frame,
         caller: Frame,
@@ -375,6 +388,8 @@ impl Owners {
     /// The source entry is executable only after the corresponding semantic
     /// NativeEnter has acknowledged these exact argument generations. Entry
     /// validation alone proves its raw CALL, not the live semantic ownership.
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn validate_native_entry(
         &self,
         m: &Space,
@@ -477,6 +492,8 @@ impl Owners {
     pub fn object(&self, m: &Space, word: u32) -> Result<u32, String> {
         self.objects.object(m, word)
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn semantic_object(&self, m: &Space, address: u32) -> Result<u32, String> {
         self.objects.semantic(m, address)
     }
@@ -1190,6 +1207,58 @@ impl Owners {
                     },
                 });
             }
+            Observation::ParameterAssignment {
+                thread,
+                frame,
+                source,
+                destination,
+                source_before,
+                source_after,
+                destination_before,
+                destination_after,
+            } => {
+                let owner = self
+                    .physical_threads
+                    .get(&thread)
+                    .ok_or("NativeVmLive: parameter assignment thread absent")?;
+                let activation = self
+                    .physical_frames
+                    .get(&frame)
+                    .ok_or("NativeVmLive: parameter assignment frame absent")?;
+                let vector = m.r32(frame + 0x18);
+                let count = m.r32(vector + 8);
+                let current_source = ValueSnapshot::read(m, source)?;
+                let current_destination = ValueSnapshot::read(m, destination)?;
+                if owner.destroyed
+                    || !owner.committed
+                    || activation.released
+                    || activation.thread != owner.token
+                    || count == 0
+                    || m.r32(m.r32(vector + 4) + (count - 1) * 4) != destination
+                    || m.r32(source) != 0x5e734c
+                    || m.r32(destination) != 0x5e7344
+                    || source_before.descriptor == 0
+                    || destination_before.descriptor != destination_after.descriptor
+                    || destination_before.name != destination_after.name
+                    || current_source.descriptor != source_after.descriptor
+                    || current_source.payload != source_after.payload
+                    || current_destination.descriptor != destination_after.descriptor
+                    || current_destination.payload != destination_after.payload
+                {
+                    return Err("NativeVmLive: parameter assignment source owners differ".into());
+                }
+                self.issued.push_back(Receipt::Parameter {
+                    thread: owner.token,
+                    frame: activation.token,
+                    source: self.values.token(source)?,
+                    destination: self.variables.token(destination)?,
+                    source_before,
+                    source_after,
+                    destination_before,
+                    destination_after,
+                    stage: 0,
+                });
+            }
             Observation::InitializerAssignment {
                 thread,
                 frame,
@@ -1802,9 +1871,6 @@ impl Owners {
                         != match action {
                             slr_vm::machine::OperandAction::Push => *index,
                             slr_vm::machine::OperandAction::Pop | slr_vm::machine::OperandAction::Drop => *index + 1,
-                            _ => {
-                                return Err("NativeVmLive: unsupported operand removal phase".into())
-                            }
                         }
                     || address != *cell
                     || token != *value_token
@@ -1817,7 +1883,6 @@ impl Owners {
                         .checked_add(1)
                         .ok_or("NativeVmLive: operand depth overflow")?,
                     slr_vm::machine::OperandAction::Pop | slr_vm::machine::OperandAction::Drop => *index,
-                    _ => unreachable!(),
                 };
                 self.frames.get_mut(frame).unwrap().depth = depth;
                 true
@@ -1862,6 +1927,83 @@ impl Owners {
                 }
                 *stage = 1;
                 false
+            }
+            (
+                Event::CellStore {
+                    identity,
+                    before,
+                    after,
+                },
+                Some(Receipt::Parameter {
+                    thread,
+                    frame,
+                    source,
+                    source_before,
+                    source_after,
+                    stage,
+                    ..
+                }),
+            ) if *stage == 0 => {
+                let (address, token) = self.values.historical(*identity)?;
+                let active = self
+                    .threads
+                    .values()
+                    .find(|owner| owner.token == *thread)
+                    .ok_or("NativeVmLive: parameter thread binding absent")?;
+                let activation = active
+                    .current
+                    .and_then(|id| self.frames.get(&id))
+                    .ok_or("NativeVmLive: parameter frame binding absent")?;
+                if active.retired
+                    || activation.token != *frame
+                    || activation.phase != FramePhase::Create
+                    || token != *source
+                    || address == 0
+                    || !snapshot_matches(source_before, *before, |v| self.objects.object(m, v))?
+                    || !snapshot_matches(source_after, *after, |v| self.objects.object(m, v))?
+                {
+                    return Err("NativeVmLive: parameter source conversion differs".into());
+                }
+                *stage = 1;
+                false
+            }
+            (
+                Event::VariableStore {
+                    identity,
+                    before,
+                    after,
+                },
+                Some(Receipt::Parameter {
+                    thread,
+                    frame,
+                    destination,
+                    destination_before,
+                    destination_after,
+                    stage,
+                    ..
+                }),
+            ) if *stage == 1 => {
+                let active = self
+                    .threads
+                    .values()
+                    .find(|owner| owner.token == *thread)
+                    .ok_or("NativeVmLive: parameter thread binding absent")?;
+                let activation = active
+                    .current
+                    .and_then(|id| self.frames.get(&id))
+                    .ok_or("NativeVmLive: parameter frame binding absent")?;
+                if active.retired
+                    || activation.token != *frame
+                    || activation.locals.last() != Some(&Some(*identity))
+                    || self.variables.historical(*identity)?.1 != *destination
+                    || !snapshot_matches(destination_before, *before, |v| {
+                        self.objects.object(m, v)
+                    })?
+                    || !snapshot_matches(destination_after, *after, |v| self.objects.object(m, v))?
+                {
+                    return Err("NativeVmLive: parameter destination store differs".into());
+                }
+                true
             }
             (
                 Event::HeapStore {
@@ -2482,7 +2624,7 @@ impl Owners {
                     entry.sequence, entry.event,
                     match self.issued.front() {
                         Some(Receipt::Operand { .. }) => "operand", Some(Receipt::Opcode { .. }) => "opcode",
-                        Some(Receipt::Value(_)) => "value", Some(Receipt::Assignment { .. }) => "assignment",
+                        Some(Receipt::Value(_)) => "value", Some(Receipt::Assignment { .. }) => "assignment", Some(Receipt::Parameter { .. }) => "parameter",
                         Some(Receipt::ScriptRetire { .. }) => "script release", Some(_) => "owner", None => "none",
                     },
                     self.threads.iter().filter_map(|(id, thread)| thread.opcode.map(|opcode| (*id, opcode))).collect::<Vec<_>>()

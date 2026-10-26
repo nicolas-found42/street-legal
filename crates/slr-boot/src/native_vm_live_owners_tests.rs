@@ -171,35 +171,107 @@ fn array_support_rejects_a_changed_actual_caller_before_consuming_receipts() {
     }
 }
 
-fn native_scope(thread:u64, generation:u64, implementation:u32, result_descriptor:&[u8]) -> BoundNative {
-    let source=support_thread(generation,b"callback");
-    BoundNative {thread,source:Native {
-        thread:source.token,frame:source.frame.unwrap(),pc:0,class:0,method:0,
-        descriptor:result_descriptor.to_vec(),receiver:0,implementation,info:0,cells:vec![],reference_result:false,
-    }}
+fn native_scope(
+    thread: u64,
+    generation: u64,
+    implementation: u32,
+    result_descriptor: &[u8],
+) -> BoundNative {
+    let source = support_thread(generation, b"callback");
+    BoundNative {
+        thread,
+        source: Native {
+            thread: source.token,
+            frame: source.frame.unwrap(),
+            pc: 0,
+            class: 0,
+            method: 0,
+            descriptor: result_descriptor.to_vec(),
+            receiver: 0,
+            implementation,
+            info: 0,
+            cells: vec![],
+            reference_result: false,
+        },
+    }
 }
 #[test]
 fn nested_native_return_rejects_wrong_owner_and_payload_without_consuming_scope() {
-    let mut m=Space::new();
-    let jvm=m.alloc(0x80); m.w32(jvm+8,jvm); m.w32(jvm+0x68,jvm);
-    let mut metadata=Metadata::new(&m,jvm).unwrap();
-    let mut owners=Owners::default();
-    owners.natives.push(native_scope(10,1,0x47cc10,b"()I"));
-    owners.natives.push(native_scope(20,3,0x47bfe0,b"()F"));
-    owners.issued.push_back(Receipt::NativeReturn {thread:3,implementation:0x47bfe0,result:Some(0x42f60000)});
-    for (thread,implementation,result,executed,error) in [
-        (10,0x47cc10,Some(0x42f60000),true,None),
-        (20,0x47bfe0,Some(0x42f60001),true,None),
-        (20,0x47bfe0,Some(0x42f60000),false,None),
-        (20,0x47bfe0,Some(0x42f60000),true,Some("failed".into())),
+    let mut m = Space::new();
+    let jvm = m.alloc(0x80);
+    m.w32(jvm + 8, jvm);
+    m.w32(jvm + 0x68, jvm);
+    let mut metadata = Metadata::new(&m, jvm).unwrap();
+    let mut owners = Owners::default();
+    owners.natives.push(native_scope(10, 1, 0x47cc10, b"()I"));
+    owners.natives.push(native_scope(20, 3, 0x47bfe0, b"()F"));
+    owners.issued.push_back(Receipt::NativeReturn {
+        thread: 3,
+        implementation: 0x47bfe0,
+        result: Some(0x42f60000),
+    });
+    for (thread, implementation, result, executed, error) in [
+        (10, 0x47cc10, Some(0x42f60000), true, None),
+        (20, 0x47bfe0, Some(0x42f60001), true, None),
+        (20, 0x47bfe0, Some(0x42f60000), false, None),
+        (20, 0x47bfe0, Some(0x42f60000), true, Some("failed".into())),
     ] {
-        let event=Entry {sequence:0,event:Event::NativeReturn {thread,implementation,executed,result,error}};
-        assert!(owners.apply(&m,&event,&mut metadata).is_err());
-        assert_eq!(metadata.sequence,0); assert_eq!(owners.natives.len(),2); assert_eq!(owners.issued.len(),1);
+        let event = Entry {
+            sequence: 0,
+            event: Event::NativeReturn {
+                thread,
+                implementation,
+                executed,
+                result,
+                error,
+            },
+        };
+        assert!(owners.apply(&m, &event, &mut metadata).is_err());
+        assert_eq!(metadata.sequence, 0);
+        assert_eq!(owners.natives.len(), 2);
+        assert_eq!(owners.issued.len(), 1);
     }
-    owners.apply(&m,&Entry {sequence:0,event:Event::NativeReturn {thread:20,implementation:0x47bfe0,executed:true,result:Some(0x42f60000),error:None}},&mut metadata).unwrap();
-    assert_eq!(metadata.sequence,1); assert_eq!(owners.natives.len(),1); assert!(owners.issued.is_empty());
-    owners.issued.push_back(Receipt::NativeReturn {thread:1,implementation:0x47cc10,result:Some(7)});
-    owners.apply(&m,&Entry {sequence:1,event:Event::NativeReturn {thread:10,implementation:0x47cc10,executed:true,result:Some(7),error:None}},&mut metadata).unwrap();
-    assert_eq!(metadata.sequence,2); assert!(owners.natives.is_empty()); assert!(owners.issued.is_empty());
+    owners
+        .apply(
+            &m,
+            &Entry {
+                sequence: 0,
+                event: Event::NativeReturn {
+                    thread: 20,
+                    implementation: 0x47bfe0,
+                    executed: true,
+                    result: Some(0x42f60000),
+                    error: None,
+                },
+            },
+            &mut metadata,
+        )
+        .unwrap();
+    assert_eq!(metadata.sequence, 1);
+    assert_eq!(owners.natives.len(), 1);
+    assert!(owners.issued.is_empty());
+    owners.issued.push_back(Receipt::NativeReturn {
+        thread: 1,
+        implementation: 0x47cc10,
+        result: Some(7),
+    });
+    owners
+        .apply(
+            &m,
+            &Entry {
+                sequence: 1,
+                event: Event::NativeReturn {
+                    thread: 10,
+                    implementation: 0x47cc10,
+                    executed: true,
+                    result: Some(7),
+                    error: None,
+                },
+            },
+            &mut metadata,
+        )
+        .unwrap();
+    assert_eq!(metadata.sequence, 2);
+    assert!(owners.natives.is_empty());
+    assert!(owners.issued.is_empty());
 }

@@ -4,6 +4,9 @@
 use crate::native_vm_pool::Allocator;
 use slr_physics::space::Space;
 
+// Unwired raw-runtime registry callers (#110): oracle-tested, not yet called
+// by production. Remove the allow when the raw startup is wired.
+#[cfg_attr(not(test), allow(dead_code))]
 #[path = "native_vm_registration_context.rs"]
 mod context;
 pub use context::{begin_catalog, register, resources, secondary_catalog, RegistryBootstrap};

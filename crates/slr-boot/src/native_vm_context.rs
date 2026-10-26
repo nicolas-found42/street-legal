@@ -36,7 +36,18 @@ impl ValueSnapshot {
 }
 #[derive(Clone, Debug)]
 pub enum Observation {
-    ParameterAssignment {source:u32, destination:u32, source_before:ValueSnapshot, source_after:ValueSnapshot, destination_before:ValueSnapshot, destination_after:ValueSnapshot},
+    /// A method parameter transfer: the caller's operand cell converts into the
+    /// callee's freshly appended typed local.
+    ParameterAssignment {
+        thread: u32,
+        frame: u32,
+        source: u32,
+        destination: u32,
+        source_before: ValueSnapshot,
+        source_after: ValueSnapshot,
+        destination_before: ValueSnapshot,
+        destination_after: ValueSnapshot,
+    },
     FrameRetiring {
         address: u32,
     },

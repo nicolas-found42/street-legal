@@ -1079,12 +1079,26 @@ fn finish_script_inner(
                 .ok_or("NativeVmDispatch: script scalar parameter context unavailable")?;
             s(m, Reg::Eax, pending.thread);
             m.w32(pending.thread + 0x20, caller);
-            a.observe_context(m,crate::native_vm_context::Observation::CurrentFrame {thread:pending.thread,frame:caller})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::CurrentFrame {
+                    thread: pending.thread,
+                    frame: caller,
+                },
+            )?;
             let vector = m.r32(caller + 0x28);
             let mut source = stack::call(m, 0x420333, &[], Some(vector), |m| {
                 crate::native_vm_thread_run::pop_operand(m, vector)
             })?;
-            a.observe_context(m,crate::native_vm_context::Observation::OperandPop {thread:pending.thread,frame:caller,index:m.r32(vector+8) as usize,cell:source})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::OperandPop {
+                    thread: pending.thread,
+                    frame: caller,
+                    index: m.r32(vector + 8) as usize,
+                    cell: source,
+                },
+            )?;
             s(m, Reg::Ebp, source);
             s(m, Reg::Edx, m.r32(source));
             stack::store(m, 0x18, source);
@@ -1152,11 +1166,21 @@ fn finish_script_inner(
                 if cell == 0 {
                     return Err("NativeVmDispatch: null argument copy allocation".into());
                 }
-                a.observe_value(m,crate::native_vm_values::Observation::Allocated {address:cell,pool,freelist:free != 0})?;
+                a.observe_value(
+                    m,
+                    crate::native_vm_values::Observation::Allocated {
+                        address: cell,
+                        pool,
+                        freelist: free != 0,
+                    },
+                )?;
                 source = stack::call(m, 0x4203d6, &[source], Some(cell), |m| {
                     crate::native_vm_thread_run::copy_value(m, cell, source)
                 });
-                a.observe_value(m,crate::native_vm_values::Observation::Constructed {address:source})?;
+                a.observe_value(
+                    m,
+                    crate::native_vm_values::Observation::Constructed { address: source },
+                )?;
                 stack::store(m, 0x18, source);
             }
             s(m, Reg::Eax, index);
@@ -1164,7 +1188,13 @@ fn finish_script_inner(
             s(m, Reg::Edi, pending.thread);
             s(m, Reg::Ecx, signature);
             m.w32(pending.thread + 0x20, frame);
-            a.observe_context(m,crate::native_vm_context::Observation::CurrentFrame {thread:pending.thread,frame})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::CurrentFrame {
+                    thread: pending.thread,
+                    frame,
+                },
+            )?;
             s(m, Reg::Ebp, 0);
             let ty = stack::call(m, 0x4203f9, &[index], Some(signature), |m| {
                 stack::function(m, &[index], Some(signature), |m| {
@@ -1244,7 +1274,14 @@ fn finish_script_inner(
                 s(m, Reg::Eax, block + remainder * 16);
                 r(m, Reg::Eax)
             };
-            a.observe_context(m,crate::native_vm_context::Observation::VariableAllocated {address:variable,pool,freelist:free != 0})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::VariableAllocated {
+                    address: variable,
+                    pool,
+                    freelist: free != 0,
+                },
+            )?;
             m.w32(variable, 0x5e734c);
             s(m, Reg::Ecx, m.r32(ty));
             m.w32(variable + 4, r(m, Reg::Ecx));
@@ -1252,7 +1289,10 @@ fn finish_script_inner(
             m.w32(0x62f138, m.r32(0x62f138).wrapping_add(1));
             m.w32(variable + 0xc, 0);
             m.w32(variable, 0x5e7344);
-            a.observe_context(m,crate::native_vm_context::Observation::VariableConstructed {address:variable})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::VariableConstructed { address: variable },
+            )?;
             s(m, Reg::Ebp, variable);
             s(m, Reg::Edx, frame);
             let locals = m.r32(frame + 0x18);
@@ -1270,15 +1310,36 @@ fn finish_script_inner(
             s(m, Reg::Ecx, m.r32(locals + 4));
             m.w32(r(m, Reg::Ecx) + count * 4, variable);
             m.w32(locals + 8, count + 1);
-            a.observe_context(m,crate::native_vm_context::Observation::Local {thread:pending.thread,frame,append:true,index:count as usize,variable})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::Local {
+                    thread: pending.thread,
+                    frame,
+                    append: true,
+                    index: count as usize,
+                    variable,
+                },
+            )?;
             s(m, Reg::Esi, source);
             let converter = m.r32(pending.thread + 0x14);
-            let source_before=crate::native_vm_context::ValueSnapshot::read(m,source)?;
-            let destination_before=crate::native_vm_context::ValueSnapshot::read(m,variable)?;
+            let source_before = crate::native_vm_context::ValueSnapshot::read(m, source)?;
+            let destination_before = crate::native_vm_context::ValueSnapshot::read(m, variable)?;
             stack::call(m, 0x420546, &[variable, source], Some(converter), |m| {
                 crate::native_vm_alu::assign_integer(m, converter, variable, source, fpu)
             })?;
-            a.observe_context(m,crate::native_vm_context::Observation::ParameterAssignment {source,destination:variable,source_before,source_after:crate::native_vm_context::ValueSnapshot::read(m,source)?,destination_before,destination_after:crate::native_vm_context::ValueSnapshot::read(m,variable)?})?;
+            a.observe_context(
+                m,
+                crate::native_vm_context::Observation::ParameterAssignment {
+                    thread: pending.thread,
+                    frame,
+                    source,
+                    destination: variable,
+                    source_before,
+                    source_after: crate::native_vm_context::ValueSnapshot::read(m, source)?,
+                    destination_before,
+                    destination_after: crate::native_vm_context::ValueSnapshot::read(m, variable)?,
+                },
+            )?;
             s(m, Reg::Edx, m.r32(source));
             stack::call(m, 0x420553, &[1], Some(source), |m| {
                 crate::native_vm_values::release(m, source, a)

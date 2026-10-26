@@ -26,18 +26,30 @@ pub struct Runtime {
     booted: bool,
     fpu: crate::native_vm_fpu::State,
     loader: Loader,
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     callback_owner: std::sync::Arc<()>,
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     next_callback: u64,
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     callbacks: Vec<ActiveCallback>,
 }
 /// An opaque continuation owned by one live source runtime. A semantic thread
 /// identity or captured raw pointer cannot manufacture this capability.
+// Pending root (#110): the live callback is not installed in production yet.
+#[allow(dead_code)]
 pub struct CallbackId {
     owner: std::sync::Arc<()>,
     generation: u64,
 }
 struct ActiveCallback {
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     generation: u64,
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     source: crate::native_vm_callback::Context,
 }
 struct Loader {
@@ -81,6 +93,8 @@ impl Runtime {
     /// Consume the real pending425a90 CALL only when its script payload is
     /// the object already issued and bound by this runtime. The complete
     /// callback/interpreter state remains owned here across native pauses.
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn begin_callback(
         &mut self,
         m: &mut Space,
@@ -119,6 +133,8 @@ impl Runtime {
             generation,
         })
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     fn callback_index(&self, callback: &CallbackId) -> Result<usize, String> {
         if !std::sync::Arc::ptr_eq(&self.callback_owner, &callback.owner)
             || self
@@ -133,6 +149,8 @@ impl Runtime {
         }
         Ok(self.callbacks.len() - 1)
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn advance_callback(
         &mut self,
         m: &mut Space,
@@ -149,6 +167,8 @@ impl Runtime {
             .source
             .advance(m, &mut self.fpu, &mut environment)
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn callback_native_entry(
         &self,
         m: &Space,
@@ -160,6 +180,8 @@ impl Runtime {
         self.loader.owners.validate_native_entry(m, entry)?;
         Ok(entry)
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn resume_callback_native(
         &mut self,
         m: &mut Space,
@@ -177,6 +199,8 @@ impl Runtime {
             .source
             .resume_native(m, &mut self.fpu, &mut environment)
     }
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn finish_callback(&mut self, m: &mut Space, callback: &CallbackId) -> Result<(), String> {
         let index = self.callback_index(callback)?;
         self.callbacks[index]
@@ -356,6 +380,8 @@ impl Runtime {
     }
     /// Inverse lookup of a live source-issued script allocation. Only an
     /// already acknowledged semantic ObjectAllocate can establish this owner.
+    // Pending root (#110): the live callback is not installed in production yet.
+    #[allow(dead_code)]
     pub fn semantic_object(&self, m: &Space, address: u32) -> Result<u32, String> {
         self.loader.owners.semantic_object(m, address)
     }

@@ -44,7 +44,12 @@ mod native_part;
 mod native_player;
 mod native_player_command;
 mod native_player_device;
+// Unwired raw-runtime modules (#110): oracle-tested, but production does not
+// yet install the raw Runtime, so only tests reach most of their items. Each
+// allow goes when its caller is wired; see docs/boot-status.md (2026-10-26).
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_player_runtime;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_postparse;
 mod native_query;
 mod native_query_frame;
@@ -68,32 +73,57 @@ mod native_spring;
 mod native_stack;
 mod native_vm_abi;
 mod native_vm_alu;
+// Unwired raw-runtime modules (#110), as above: tested against the original
+// but not yet called by production. Remove each allow when it is wired.
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_array_class;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_array_object;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_bootstrap;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_callback;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_class_context;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_class_init;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_context;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_counter;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_dispatch;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_fpu;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_jvm;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_live;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_lookup;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_metadata;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_namespace;
 mod native_vm_pool;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_resource;
 mod native_vm_root;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_runtime;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_signature;
+#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_test_store;
 mod native_vm_thread_lifecycle;
 mod native_vm_thread_run;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_values;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_world;
+#[cfg_attr(not(test), allow(dead_code))]
 mod part_render;
 mod parts;
 mod presentation;
