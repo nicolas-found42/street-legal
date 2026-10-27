@@ -1614,6 +1614,7 @@ dependencies = [
 name = "slr-boot"
 version = "0.1.0"
 dependencies = [
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

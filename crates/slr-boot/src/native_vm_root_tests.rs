@@ -62,9 +62,7 @@ fn root_caller_profile(registry: bool, remaining: bool, suffix: bool, world: boo
     })) else {
         return;
     };
-    let _profile = SOURCE_PROFILE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _profile = SourceProfilePermit::acquire();
     let value: Json = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(value["schema"], 1);
     assert_eq!(value["cw"], 127);
