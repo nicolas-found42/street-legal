@@ -8,6 +8,7 @@ license.workspace = true
 slr-calllog = { path = "../slr-calllog" }
 slr-io = { path = "../slr-io" }
 slr-vm = { path = "../slr-vm" }
+serde_json = "1"
 
 [dev-dependencies]
 slr-render-natives = { path = "../slr-render-natives" }

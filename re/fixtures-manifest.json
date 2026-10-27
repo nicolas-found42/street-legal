@@ -51,6 +51,17 @@
   },
   {
    "consumed_by": [
+    "crates/slr-input/tests/device_oracle.rs"
+   ],
+   "inputs": [
+    "re/oracle/input_device_rig.py"
+   ],
+   "path": "re/out/boot/input-device.jsonl",
+   "producer": "re/oracle/input_device_vectors.py",
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/input_device_vectors.py gen"
+  },
+  {
+   "consumed_by": [
     "crates/slr-boot/src/native_camera.rs"
    ],
    "path": "re/out/boot/native-camera-original.json",
