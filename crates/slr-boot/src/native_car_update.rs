@@ -363,7 +363,7 @@ impl Host for RuntimeHost<'_> {
     }
     fn array(&mut self, array: u32) -> Vec<u32> {
         self.vm
-            .array_cells_mut(array)
+            .array_cells(array)
             .map_or_else(Vec::new, |v| v.iter().map(|v| v.payload).collect())
     }
     fn payload(&mut self, m: &mut Space, resource: u32) -> Result<u32, String> {

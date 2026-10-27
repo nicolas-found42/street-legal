@@ -528,11 +528,19 @@ impl Scheduler {
         // 0x416943-0x416974: the entry flag is `budget == 0.0f`, and the
         // deadline is the f32 `clock() + budget`.
         let timed = budget != 0.0;
-        let mut deadline = crate::clock::with_driver_cursor(self.cursor, || {
+        let entered = crate::clock::with_driver_cursor(self.cursor, || {
             read_clock(clock, ClockSite::DriveEnter)
-        })
-        .add(X87::from_f32(budget), pc, RC)
-        .to_f32(pc, RC);
+        });
+        let mut deadline = entered.add(X87::from_f32(budget), pc, RC).to_f32(pc, RC);
+        decision(
+            "enter",
+            self.cursor,
+            &[
+                ("clock", x87_hex(entered)),
+                ("budget_bits", format!("{:#010x}", budget.to_bits())),
+                ("deadline_bits", format!("{:#010x}", deadline.to_bits())),
+            ],
+        );
         // 0x416978-0x416997: 10.0, shortened to a smaller budget (never
         // touched when the budget is zero).
         let mut slice_unit = SLICE_UNIT;
@@ -543,17 +551,28 @@ impl Scheduler {
         let mut ran = true;
         loop {
             if cancel() {
+                decision("exit", self.cursor, &[("reason", "cancelled".into())]);
                 return SchedExit::TimeUp;
             }
             // 0x41699f: the deadline, for a non-zero budget. `fcomp` leaves
             // C0 (CF) set for `clock < deadline`, so a clear C0 is the exe's
             // `je` back to the caller.
             if timed {
-                let (cc, _) = crate::clock::with_driver_cursor(self.cursor, || {
+                let now = crate::clock::with_driver_cursor(self.cursor, || {
                     read_clock(clock, ClockSite::DriveLoop)
-                })
-                .fcom(X87::from_f32(deadline));
+                });
+                let (cc, _) = now.fcom(X87::from_f32(deadline));
+                decision(
+                    "deadline",
+                    self.cursor,
+                    &[
+                        ("clock", x87_hex(now)),
+                        ("deadline_bits", format!("{:#010x}", deadline.to_bits())),
+                        ("before_deadline", cc.c0.to_string()),
+                    ],
+                );
                 if !cc.c0 {
+                    decision("exit", self.cursor, &[("reason", "deadline".into())]);
                     return SchedExit::TimeUp;
                 }
             }
@@ -561,12 +580,14 @@ impl Scheduler {
             if self.cursor.is_none() {
                 self.cursor = self.head(queues);
                 if !ran {
+                    decision("exit", self.cursor, &[("reason", "idle-pass".into())]);
                     return SchedExit::TimeUp;
                 }
                 ran = false;
             }
             // 0x4169de: nothing left to schedule.
             let Some(t) = self.cursor else {
+                decision("exit", None, &[("reason", "list-end".into())]);
                 return SchedExit::ListEnd;
             };
             let f = queues.get(t).flags;
@@ -579,11 +600,24 @@ impl Scheduler {
                     // 0x416a05-0x416a16: wake a sleeping thread whose
                     // deadline is older than the clock (`test ah,0x41`).
                     if f & SLEEPING != 0 {
-                        let (cc, _) = crate::clock::with_driver_cursor(self.cursor, || {
+                        let now = crate::clock::with_driver_cursor(self.cursor, || {
                             read_clock(clock, ClockSite::DriveSleepProbe)
-                        })
-                        .fcom(X87::from_f32(queues.get(t).sleep_deadline));
-                        if !cc.c0 && !cc.c3 {
+                        });
+                        let (cc, _) = now.fcom(X87::from_f32(queues.get(t).sleep_deadline));
+                        let woke = !cc.c0 && !cc.c3;
+                        decision(
+                            "sleep-probe",
+                            Some(t),
+                            &[
+                                ("clock", x87_hex(now)),
+                                (
+                                    "sleep_deadline_bits",
+                                    format!("{:#010x}", queues.get(t).sleep_deadline.to_bits()),
+                                ),
+                                ("woke", woke.to_string()),
+                            ],
+                        );
+                        if woke {
                             queues.get_mut(t).flags &= !SLEEPING;
                         }
                     }
@@ -594,6 +628,15 @@ impl Scheduler {
                             .sub(X87::from_f32(slice_unit), pc, RC)
                             .add(X87::from_f32(slice), pc, RC)
                             .to_f32(pc, RC);
+                        decision(
+                            "run",
+                            Some(t),
+                            &[
+                                ("name", queues.get(t).name.clone()),
+                                ("slice_bits", format!("{:#010x}", slice.to_bits())),
+                                ("deadline_bits", format!("{:#010x}", deadline.to_bits())),
+                            ],
+                        );
                         crate::clock::with_driver_cursor(Some(t), || run(queues, t, slice, clock));
                         ran = true;
                     }
@@ -787,6 +830,34 @@ fn slice_for(priority: i32, slice_unit: f32, pc: Precision) -> f32 {
     weighted
         .mul(X87::from_f32(slice_unit), pc, RC)
         .to_f32(pc, RC)
+}
+
+/// One observed driver decision. Observers never read the clock or alter the
+/// queues; every value here was already computed by the driver itself.
+fn decision(step: &str, thread: Option<ThreadId>, fields: &[(&str, String)]) {
+    if !crate::diagnostics::enabled() {
+        return;
+    }
+    let mut all = vec![
+        ("step".to_string(), step.to_string()),
+        (
+            "queue_index".to_string(),
+            thread.map_or_else(|| "none".into(), |t| t.to_string()),
+        ),
+    ];
+    all.extend(fields.iter().map(|(k, v)| ((*k).to_string(), v.clone())));
+    crate::diagnostics::emit(crate::diagnostics::EventKind::External {
+        category: "scheduler-decision".into(),
+        fields: all,
+    });
+}
+fn x87_hex(value: X87) -> String {
+    value
+        .to_bytes()
+        .iter()
+        .rev()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

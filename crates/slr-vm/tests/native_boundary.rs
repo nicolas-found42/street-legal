@@ -4,7 +4,7 @@ use slr_vm::{
     interp::Thread,
     vmclass::{Class, Method},
 };
-fn unavailable(_: &CallInfo<'_>) -> Result<(), String> {
+fn unavailable(_: &slr_vm::host::NativeContext<'_>, _: &CallInfo<'_>) -> Result<(), String> {
     Err("engine collaborator unavailable".into())
 }
 fn must_not_run(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {

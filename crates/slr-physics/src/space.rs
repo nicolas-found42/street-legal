@@ -90,6 +90,29 @@ impl Space {
             .map_or(0, |p| p[(a & (PAGE - 1)) as usize])
     }
 
+    /// First differing byte in a snapshot, including zero-filled unmapped pages.
+    /// Addresses wrap in the same flat32-bit space as ordinary reads.
+    pub fn first_difference(&self, start: u32, expected: &[u8]) -> Option<(u32, u8, u8)> {
+        let mut offset = 0;
+        while offset < expected.len() {
+            let address = start.wrapping_add(offset as u32);
+            let inside = (address & (PAGE - 1)) as usize;
+            let count = (PAGE as usize - inside).min(expected.len() - offset);
+            let bytes = &expected[offset..offset + count];
+            if let Some(page) = self.pages.get(&(address & !(PAGE - 1))) {
+                let actual = &page[inside..inside + count];
+                if actual != bytes {
+                    let i = actual.iter().zip(bytes).position(|(a, b)| a != b).unwrap();
+                    return Some((address.wrapping_add(i as u32), actual[i], bytes[i]));
+                }
+            } else if let Some(i) = bytes.iter().position(|&b| b != 0) {
+                return Some((address.wrapping_add(i as u32), 0, bytes[i]));
+            }
+            offset += count;
+        }
+        None
+    }
+
     pub fn w8(&mut self, a: u32, v: u8) {
         self.note(a);
         self.page_mut(a)[(a & (PAGE - 1)) as usize] = v;
@@ -152,6 +175,30 @@ impl Space {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_compare_unmapped_pages_crossings_and_wrapped_addresses() {
+        let mut m = Space::new();
+        for (i, value) in [(4095, 7), (4096, 9), (u32::MAX, 11), (0, 13)] {
+            m.w8(i, value);
+        }
+        for (start, len) in [(0, 8193), (4093, 12), (u32::MAX - 3, 12), (0x2000, 17)] {
+            let mut expected = (0..len)
+                .map(|i| m.r8(start.wrapping_add(i)))
+                .collect::<Vec<_>>();
+            assert_eq!(m.first_difference(start, &expected), None);
+            for index in [0, expected.len() / 2, expected.len() - 1] {
+                expected[index] ^= 0x80;
+                let at = start.wrapping_add(index as u32);
+                assert_eq!(
+                    m.first_difference(start, &expected),
+                    Some((at, m.r8(at), expected[index]))
+                );
+                expected[index] ^= 0x80;
+            }
+        }
+        assert_eq!(m.first_difference(u32::MAX, &[]), None);
+    }
 
     #[test]
     fn alloc_is_zeroed_aligned_and_journaled() {

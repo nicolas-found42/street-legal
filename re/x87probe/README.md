@@ -82,3 +82,16 @@ sh re/x87probe/rosetta/build.sh
 
 Nothing under `re/out/` is committed (git-ignored via `/re/out`).
 Committed outputs of this suite: this directory + `docs/x87.md`.
+
+The independent rational error proof for the bounded Euler consumer is runnable
+without building a candidate scalar model:
+
+```sh
+python3 re/x87probe/prove_model_error.py > re/out/boot/euler-model-error-proof.json
+cargo test -p slr-boot --bin slr-boot bounded_model_rational_error_proof_is_executable
+```
+
+`model/intel_trig.rs` retains the pinned research model and its original license
+notice for that proof's constants and arithmetic graph. It is not part of a
+Cargo crate or linked into production. The proof bounds the named model's error;
+it does not establish original hardware identity or supply scalar x87 results.

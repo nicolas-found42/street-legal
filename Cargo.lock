@@ -1894,6 +1894,7 @@ dependencies = [
  "slr-fmt-cfg",
  "slr-fmt-rpak",
  "slr-fmt-tufa",
+ "slr-physics",
  "slr-vm",
  "slr-x87",
 ]

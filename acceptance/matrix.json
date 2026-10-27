@@ -343,7 +343,10 @@
         "D"
       ],
       "status": "open",
-      "evidence": []
+      "evidence": [
+        "crates/slr-fmt-video/src/player.rs",
+        "docs/window.md"
+      ]
     },
     {
       "id": "G1",
@@ -556,8 +559,13 @@
       "id": "S9",
       "kind": "supporting",
       "title": "Real window/display path (windowed and fullscreen) on macOS arm64",
-      "status": "open",
-      "evidence": []
+      "status": "passed",
+      "evidence": [
+        "acceptance/window.py",
+        "crates/slr-d3d9/examples/display_probe.rs",
+        "crates/slr-d3d9/src/display.rs",
+        "docs/window.md"
+      ]
     },
     {
       "id": "S10",

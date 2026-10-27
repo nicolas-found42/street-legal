@@ -2144,3 +2144,61 @@ fn transient_initializers_use_current_embedding_thread_precision() {
         });
     }
 }
+
+#[test]
+fn initializer_assignment_records_its_converted_source_before_pool_release() {
+    use slr_vm::{
+        machine::Event,
+        values::{PoolEvent, TypeTag, Value},
+    };
+    for static_field in [false, true] {
+        let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
+        let pool = vec![
+            PoolEntry::Str("Recorded".into()),
+            PoolEntry::Class(0),
+            PoolEntry::Str("F".into()),
+            PoolEntry::Str("value".into()),
+        ];
+        let field = [[if static_field { 0x28 } else { 1 }, 3, 2, 0]];
+        vm.loader
+            .load_file(&module(
+                &pool,
+                if static_field { &field } else { &[] },
+                if static_field { &[] } else { &field },
+                &[u32::MAX, 0, 1, u32::MAX, 0],
+                &[vec![n(0x1007, 0x1c), n(0x100b, 7), n(0x10, 0)]],
+            ))
+            .unwrap();
+        let word = vm.alloc_object("Recorded").unwrap();
+        let result = if static_field {
+            vm.read_loaded_static_field("Recorded", "value").unwrap()
+        } else {
+            vm.read_field(word, "value").unwrap()
+        };
+        assert_eq!(
+            result,
+            Value {
+                tag: TypeTag::Float,
+                payload: 7.0f32.to_bits()
+            }
+        );
+        let events = vm.machine_trace().pending(usize::MAX);
+        assert!(!events
+            .iter()
+            .any(|entry| matches!(entry.event, Event::CellWriteAccess { .. })));
+        let (position, identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(position, entry)| match entry.event {
+                Event::CellStore {
+                    identity,
+                    before,
+                    after,
+                } if before == Value::int(7) && after == result => Some((position, identity)),
+                _ => None,
+            })
+            .expect("initializer conversion needs an owned afterimage");
+        assert!(events[position+1..].iter().any(|entry|matches!(&entry.event,Event::Pool(PoolEvent::Release{cell,..}) if cell.pool==identity.pool && cell.slot==identity.slot && cell.generation==identity.generation && cell.value==result)));
+    }
+}

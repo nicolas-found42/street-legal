@@ -7,22 +7,26 @@ use crate::{
     interp::{HeapSlot, Pc, VarId},
     values::{CellId, PoolCellView, PoolEvent, Value},
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    rc::Rc,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Operand {
     Null,
     Value(CellId),
     Variable(VarId),
     Heap(HeapSlot),
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum OperandAction {
     Push,
     Pop,
     Drop,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FramePhase {
     Create,
     Enter,
@@ -30,7 +34,7 @@ pub enum FramePhase {
     Return,
     Destroy,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct FrameView {
     pub identity: u64,
     pub receiver: u32,
@@ -38,9 +42,15 @@ pub struct FrameView {
     pub signature: u32,
     pub saved_pc: Option<Pc>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Event {
     Pool(PoolEvent),
+    ClockInput {
+        site: crate::clock::ClockSite,
+        input: crate::clock::CounterInput,
+        thread: Option<crate::clock::ThreadContext>,
+        driver_cursor: Option<usize>,
+    },
     ThreadCreate {
         identity: u64,
     },
@@ -96,6 +106,12 @@ pub enum Event {
         slot: HeapSlot,
         value: Value,
     },
+    /// Finalizer cleanup destroys the array's owned element cells and clears
+    /// its container. The complete prior values identify those actual owners.
+    ArrayClear {
+        word: u32,
+        before: Vec<Value>,
+    },
     /// The producer must reject these paths until source stores are paired.
     UnresolvedMutation {
         owner: String,
@@ -146,6 +162,23 @@ pub enum Event {
     ClassRegister {
         identity: u32,
         module: Option<u64>,
+        bodies: Vec<crate::interp::BodyId>,
+    },
+    /// Exact resolved dependency records before recursive initialization.
+    /// The raw producer must allocate the dependency owner at this phase;
+    /// waiting for ClassInstall would reorder it after its dependencies.
+    ClassDependencies {
+        identity: u32,
+        base: Option<u32>,
+        interfaces: Vec<u32>,
+    },
+    /// The class has installed its static owner after resolving and
+    /// initializing these exact dependency records. Empty owners need this
+    /// event too: no HeapConstruct exists from which to recover installation.
+    ClassInstall {
+        identity: u32,
+        base: Option<u32>,
+        interfaces: Vec<u32>,
     },
     MethodSelect {
         thread: u64,
@@ -174,7 +207,7 @@ pub enum Event {
         error: Option<String>,
     },
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Entry {
     pub sequence: u64,
     pub event: Event,
@@ -186,6 +219,9 @@ struct State {
     next_sequence: u64,
     next_identity: u64,
     pending: VecDeque<Entry>,
+    primary_next: u64,
+    next_reader: u64,
+    readers: BTreeMap<u64, u64>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Trace(Rc<RefCell<State>>);
@@ -228,27 +264,84 @@ impl Trace {
             .expect("machine event sequence exhausted");
         state.pending.push_back(Entry { sequence, event });
     }
+    /// Attach a second lossless consumer before the first event/owner. A
+    /// recorder and a source producer acknowledge independently; a fast sink
+    /// cannot discard the other sink's unprocessed history. Dropping a reader
+    /// retains its unacknowledged prefix until the complete trace is dropped.
+    pub fn reader(&self) -> Result<Reader, &'static str> {
+        let mut state = self.0.borrow_mut();
+        if !state.enabled || state.next_sequence != 0 || state.next_identity != 0 {
+            return Err("machine reader must attach before owner creation");
+        }
+        let identity = state
+            .next_reader
+            .checked_add(1)
+            .ok_or("machine reader identity exhausted")?;
+        state.next_reader = identity;
+        state.readers.insert(identity, 0);
+        Ok(Reader {
+            trace: self.clone(),
+            identity,
+        })
+    }
     pub fn pending(&self, limit: usize) -> Vec<Entry> {
-        self.0
-            .borrow()
-            .pending
-            .iter()
-            .take(limit)
-            .cloned()
-            .collect()
+        let state = self.0.borrow();
+        pending(&state, state.primary_next, limit)
     }
     pub fn acknowledge(&self, through: u64) -> Result<(), &'static str> {
         let mut state = self.0.borrow_mut();
-        if !state.pending.iter().any(|entry| entry.sequence == through) {
-            return Err("acknowledgement is not a pending machine event");
-        }
-        while state
-            .pending
-            .front()
-            .is_some_and(|entry| entry.sequence <= through)
-        {
-            state.pending.pop_front();
-        }
+        validate_acknowledgement(&state, state.primary_next, through)?;
+        state.primary_next = through + 1;
+        compact(&mut state);
         Ok(())
+    }
+}
+/// One independent consumer of a run's causal stream. It cannot attach late,
+/// rewind, acknowledge an invented entry or discard another reader's prefix.
+#[derive(Debug)]
+pub struct Reader {
+    trace: Trace,
+    identity: u64,
+}
+impl Reader {
+    pub fn pending(&self, limit: usize) -> Vec<Entry> {
+        let state = self.trace.0.borrow();
+        pending(&state, state.readers[&self.identity], limit)
+    }
+    pub fn acknowledge(&self, through: u64) -> Result<(), &'static str> {
+        let mut state = self.trace.0.borrow_mut();
+        validate_acknowledgement(&state, state.readers[&self.identity], through)?;
+        state.readers.insert(self.identity, through + 1);
+        compact(&mut state);
+        Ok(())
+    }
+}
+fn pending(state: &State, next: u64, limit: usize) -> Vec<Entry> {
+    state
+        .pending
+        .iter()
+        .skip_while(|entry| entry.sequence < next)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+fn validate_acknowledgement(state: &State, next: u64, through: u64) -> Result<(), &'static str> {
+    if through < next || !state.pending.iter().any(|entry| entry.sequence == through) {
+        return Err("acknowledgement is not a pending machine event");
+    }
+    Ok(())
+}
+fn compact(state: &mut State) {
+    let before = state
+        .readers
+        .values()
+        .copied()
+        .fold(state.primary_next, u64::min);
+    while state
+        .pending
+        .front()
+        .is_some_and(|entry| entry.sequence < before)
+    {
+        state.pending.pop_front();
     }
 }

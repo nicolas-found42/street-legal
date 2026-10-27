@@ -54,6 +54,9 @@ pub fn native_snapshot(
     info: &slr_vm::host::CallInfo<'_>,
     phase: slr_vm::host::NativePhase,
 ) {
+    if let Err(error) = crate::machine_recording::drain(vm) {
+        slr_telemetry::detail("machine-recording-failure", vec![("error".into(), error)]);
+    }
     if !matches!(phase, slr_vm::host::NativePhase::Return) {
         return;
     }
@@ -130,6 +133,7 @@ pub fn snapshot(vm: &VmHost, phase: &str, failure: Option<&str>) -> Result<(), S
     });
     let value = json!({"schema_version":1,"phase":phase,"sequence":sequence,"provenance":slr_telemetry::provenance(),"context":context,"failure":failure,
         "objects":objects,"queues":queues,"native_roots":anchors,"allocation_count":vm.objects.len(),
+        "native_abi":crate::native_diagnostics::state(),
         "resources":crate::factory::diagnostic_state(),
         "threads":crate::sched::diagnostic_threads(vm),
         "diagnostics":diagnostics::stats(),

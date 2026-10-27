@@ -1,6 +1,6 @@
 //! Port-side emission: the D3D9 calls implied by the translator's passes.
 //!
-//! The wgpu translator draws two passes per frame: a depth-tested world pass of
+//! The wgpu translator draws an optional opaque video quad, then two passes: a depth-tested world pass of
 //! pre-transformed clip-space triangles with alpha cutout, then a 2D alpha-blended
 //! OSD pass. This module states each pass in D3D9 terms and writes the result as
 //! SLRLOG D3D9 records (the format the hooked original also produces), so the
@@ -34,14 +34,14 @@ fn call(method: &str, args: Vec<Value>) -> Call {
     (method.to_owned(), args)
 }
 
-fn presentation_parameters() -> Vec<u8> {
-    let words: [u32; 14] = [800, 600, 21, 1, 0, 0, 2, 0, 0, 1, 71, 0, 0, 0];
+fn presentation_parameters(size: (u32, u32)) -> Vec<u8> {
+    let words: [u32; 14] = [size.0, size.1, 21, 1, 0, 0, 2, 0, 0, 1, 71, 0, 0, 0];
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-fn viewport() -> Vec<u8> {
+fn viewport(size: (u32, u32)) -> Vec<u8> {
     let mut v = Vec::new();
-    for w in [0u32, 0, 800, 600] {
+    for w in [0u32, 0, size.0, size.1] {
         v.extend(w.to_le_bytes());
     }
     v.extend(0.0f32.to_le_bytes());
@@ -55,6 +55,8 @@ pub struct Emitter {
     created_device: bool,
     textures: HashMap<String, i32>,
     next_object: i32,
+    logical_size: Option<(u32, u32)>,
+    video: Option<((u32, u32), i32)>,
 }
 
 impl Emitter {
@@ -85,6 +87,7 @@ impl Emitter {
     /// The calls one presented frame implies, in submission order.
     pub fn frame(&mut self, frame: &Frame) -> Vec<Call> {
         let mut calls = Vec::new();
+        let size = frame.back_buffer_size();
         if !self.created_device {
             self.created_device = true;
             calls.push(call("Direct3DCreate9", vec![int(31)]));
@@ -95,11 +98,18 @@ impl Emitter {
                     int(1),
                     Value::Bool(true),
                     int(0x84),
-                    Value::Bytes(presentation_parameters()),
+                    Value::Bytes(presentation_parameters(size)),
                     Value::Bool(true),
                 ],
             ));
         }
+        if self.logical_size.is_some_and(|previous| previous != size) {
+            calls.push(call(
+                "Reset",
+                vec![Value::Bytes(presentation_parameters(size))],
+            ));
+        }
+        self.logical_size = Some(size);
         if !frame.calls.is_empty() {
             calls.extend(frame.calls.iter().cloned());
             if calls.last().is_none_or(|(m, _)| m != "Present") {
@@ -119,7 +129,7 @@ impl Emitter {
                 int(0),
             ],
         ));
-        calls.push(call("SetViewport", vec![Value::Bytes(viewport())]));
+        calls.push(call("SetViewport", vec![Value::Bytes(viewport(size))]));
         calls.push(call("BeginScene", vec![]));
         let blend = |calls: &mut Vec<Call>| {
             for (state, value) in [
@@ -141,6 +151,48 @@ impl Emitter {
                 ));
             }
         };
+        if let Some(image) = &frame.video {
+            let dimensions = (image.width, image.height);
+            let id = if let Some((_, id)) = self.video.filter(|(size, _)| *size == dimensions) {
+                id
+            } else {
+                self.next_object += 1;
+                let id = 1000 + self.next_object;
+                calls.push(call(
+                    "CreateTexture",
+                    vec![
+                        int(image.width as i32),
+                        int(image.height as i32),
+                        int(1),
+                        int(0),
+                        int(21),
+                        int(1),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                ));
+                self.video = Some((dimensions, id));
+                id
+            };
+            for (state, value) in [(7, 0), (14, 0), (15, 0), (27, 0), (137, 0), (22, 1)] {
+                calls.push(call("SetRenderState", vec![int(state), int(value)]));
+            }
+            for (kind, value) in [(1, 2), (2, 2), (3, 0), (4, 2), (5, 2), (6, 0)] {
+                calls.push(call(
+                    "SetTextureStageState",
+                    vec![int(0), int(kind), int(value)],
+                ));
+            }
+            for (kind, value) in [(1, 3), (2, 3), (5, 2), (6, 2), (7, 0)] {
+                calls.push(call("SetSamplerState", vec![int(0), int(kind), int(value)]));
+            }
+            calls.push(call("SetFVF", vec![int(FVF_XYZRHW_DIFFUSE_TEX1)]));
+            calls.push(call("SetTexture", vec![int(0), int(id)]));
+            calls.push(call(
+                "DrawPrimitiveUP",
+                vec![int(4), int(2), Value::Bool(true), int(TRANSLATED_STRIDE)],
+            ));
+        }
         if world {
             blend(&mut calls);
             for (state, value) in [(7, 1), (14, 1), (23, 4), (15, 1), (24, 2), (25, 5)] {
@@ -391,5 +443,58 @@ mod tests {
         assert_eq!(report["equal"], false);
         let d = &report["frames"][0]["first_divergence"];
         assert_eq!(d["differences"][0]["field"], "state.xf.2");
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use crate::VideoImage;
+    use std::sync::Arc;
+    #[test]
+    fn video_pass_and_logical_dimensions_are_transcribed_before_world_and_osd() {
+        let mut frame = Frame {
+            logical_size: Some((640, 480)),
+            video: Some(Box::new(VideoImage {
+                serial: 0,
+                width: 2,
+                height: 1,
+                rgba: Arc::new(vec![255; 8]),
+            })),
+            ..Default::default()
+        };
+        let mut emitter = Emitter::default();
+        let calls = emitter.frame(&frame);
+        let device = calls.iter().find(|(m, _)| m == "CreateDevice").unwrap();
+        let Value::Bytes(parameters) = &device.1[4] else {
+            panic!("parameters")
+        };
+        assert_eq!(
+            &parameters[..8],
+            &[640u32.to_le_bytes(), 480u32.to_le_bytes()].concat()
+        );
+        let viewport = calls.iter().find(|(m, _)| m == "SetViewport").unwrap();
+        let Value::Bytes(viewport) = &viewport.1[0] else {
+            panic!("viewport")
+        };
+        assert_eq!(
+            &viewport[8..16],
+            &[640u32.to_le_bytes(), 480u32.to_le_bytes()].concat()
+        );
+        assert_eq!(
+            calls.iter().filter(|(m, _)| m == "DrawPrimitiveUP").count(),
+            1
+        );
+        assert!(calls
+            .iter()
+            .any(|(m, a)| m == "SetRenderState" && *a == vec![int(27), int(0)]));
+        let next = emitter.frame(&frame);
+        assert!(!next.iter().any(|(m, _)| m == "CreateTexture"));
+        frame.logical_size = Some((800, 600));
+        let resized = emitter.frame(&frame);
+        assert!(resized.iter().any(|(m, _)| m == "Reset"));
+        frame.video = None;
+        let no_video = emitter.frame(&frame);
+        assert!(!no_video.iter().any(|(m, _)| m == "DrawPrimitiveUP"));
     }
 }

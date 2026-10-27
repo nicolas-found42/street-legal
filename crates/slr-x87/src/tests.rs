@@ -24,7 +24,7 @@
 //! module is what CI runs.
 
 use crate::trans::{self, tolerance};
-use crate::{ConditionCodes, Precision, Rounding, SfFlags, X87};
+use crate::{Arithmetic, ConditionCodes, Precision, Rounding, SfFlags, X87};
 use std::sync::{Mutex, MutexGuard};
 
 // ---------------------------------------------------------------------------
@@ -1670,4 +1670,45 @@ fn fucom_invalid_regression_vectors() {
     assert!(x(true, 0x7FFF, 0x8000_0000_0000_0001).is_signaling_nan());
     assert!(!x(false, 0x7FFE, 0xA000_0000_0000_0000).is_signaling_nan());
     assert!(!x(false, 0x0000, 0x2000_0000_0000_0000).is_signaling_nan());
+}
+
+#[test]
+fn atomic_results_keep_their_own_exception_bits_under_contention() {
+    let _serial = serial();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    std::thread::scope(|scope| {
+        for worker in 0..8 {
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                for iteration in 0..200 {
+                    let inexact = (iteration + worker) % 2 == 0;
+                    let (result, flags) = X87::from_f32(1.).arithmetic_with_exceptions(
+                        X87::from_f32(if inexact { 3. } else { 2. }),
+                        if inexact {
+                            Arithmetic::Divide
+                        } else {
+                            Arithmetic::Add
+                        },
+                        Precision::F32,
+                        Rounding::NearestEven,
+                    );
+                    assert_eq!(flags, u8::from(inexact));
+                    assert_eq!(
+                        result
+                            .to_f32(Precision::F32, Rounding::NearestEven)
+                            .to_bits(),
+                        if inexact { 0x3eaaaaab } else { 3f32.to_bits() }
+                    );
+                    // Binary32 represents 2^24 exactly, but cannot represent
+                    // the adjacent integer 2^24+1 (ties-to-even rounds down).
+                    let (result, flags) =
+                        X87::from_f64(if inexact { 16777217. } else { 16777216. })
+                            .to_f32_with_exceptions(Precision::F32, Rounding::NearestEven);
+                    assert_eq!(result.to_bits(), 16777216f32.to_bits());
+                    assert_eq!(flags, u8::from(inexact));
+                }
+            });
+        }
+    });
 }

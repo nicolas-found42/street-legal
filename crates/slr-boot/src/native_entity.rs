@@ -1,5 +1,5 @@
-//! Physics entities created by original 49b300/49b230. The currently verified
-//! path uses the original null rotation argument (identity orientation).
+//! Physics entities created by original 49b300/49b230, including explicit
+//! rotation matrices and compound mass, inertia and bound regeneration.
 use slr_physics::{cfg::PHYSICS_WORLD as WORLD, space::Space};
 use slr_x87::{Precision, Rounding, X87};
 const PC: Precision = Precision::F32;
@@ -13,8 +13,8 @@ fn stored(v: X87) -> u32 {
 
 /// Construct and bind a root entity to an existing physical body. Original
 /// 49b0b0 links the body reference at +5c, computes its threshold and copies
-/// the active state to its second integration buffer. Rotation matrices are
-/// deliberately rejected until the matrix/quaternion path is differential tested.
+/// the active state to its second integration buffer. A supplied rotation uses
+/// the original matrix/quaternion path; null produces identity orientation.
 pub fn root(
     m: &mut Space,
     body: u32,
@@ -401,168 +401,270 @@ fn compound_mass_inner(m: &mut Space, entity: u32) -> Result<[u32; 3], String> {
     Ok(center)
 }
 
-/// Complete49a050 for identity-oriented compound graphs whose bounds derive
-/// from boxes or explicit collision vertices. The parent may have no children.
-pub fn compound(m: &mut Space, entity: u32) -> Result<(), String> {
-    compound_recursive(m, entity, &mut vec![])
-}
-fn compound_recursive(m: &mut Space, entity: u32, ancestors: &mut Vec<u32>) -> Result<(), String> {
-    crate::native_stack::function(m, &[entity], None, |m| {
-        compound_frame(m, entity);
-        compound_recursive_inner(m, entity, ancestors)
-    })
-}
-fn compound_recursive_inner(
+/// Original498f50 bounds dispatch. Kinds0/1 regenerate a sphere,
+/// kinds5/6 regenerate explicit box vertices; the original default branch
+/// leaves geometry unchanged for every other parent definition kind.
+/// exe: FUN_00498f50
+pub fn regenerate_bounds(
     m: &mut Space,
     entity: u32,
-    ancestors: &mut Vec<u32>,
+    kind: u32,
+    center_ptr: u32,
 ) -> Result<(), String> {
-    if ancestors.contains(&entity) {
-        return Err("NativeEntityBoundary: cyclic compound ancestor graph".into());
-    }
-    ancestors.push(entity);
-    let body = m.r32(entity + 0x5c);
-    let definition = m.r32(body + 0x78);
-    if m.r32(body + 0x9c) & 0x100 != 0 {
-        return Ok(());
-    }
-    if !matches!(m.r32(definition + 8), 5 | 6) {
-        return Err(
-            "NativeEntityBoundary: compound bounds currently require definition kind6".into(),
-        );
-    }
-    let mut children = vec![];
-    let mut child = m.r32(entity + 0x24);
-    while child != 0 {
-        if children.contains(&child) {
-            return Err("NativeEntityBoundary: cyclic compound child list".into());
+    use crate::native_stack::{self as stack, Reg};
+    stack::function(m, &[entity, kind, center_ptr], None, |m| {
+        stack::alloc(m, 0x144);
+        stack::push_reg(m, Reg::Ebx);
+        stack::set_reg(m, Reg::Ebx, entity);
+        stack::push_reg(m, Reg::Esi);
+        let body = m.r32(entity + 0x5c);
+        stack::set_reg(m, Reg::Esi, body);
+        stack::store(m, 0x124, body);
+        let definition = m.r32(body + 0x78);
+        let mut children = vec![];
+        let mut child = m.r32(entity + 0x24);
+        while child != 0 {
+            if children.contains(&child) {
+                return Err("NativeEntityBoundary: cyclic compound child list".into());
+            }
+            children.push(child);
+            child = m.r32(child + 0x28);
         }
-        children.push(child);
-        child = m.r32(child + 0x28);
-    }
-    // Validate every fallible branch before mass-phase mutation.
-    for child in &children {
-        let d = m.r32(m.r32(*child + 0x5c) + 0x78);
-        if !matches!(m.r32(d + 8), 0..=7) {
-            return Err(
-                "NativeEntityBoundary: compound child bounds kind requires original498f50".into(),
-            );
-        }
-    }
-    let fixed_mass = m.r32(entity + 0x58) & 0x8000 != 0;
-    let mut center = if fixed_mass {
-        [0; 3]
-    } else {
-        compound_mass_inner(m, entity)?
-    };
-    let mut minimum = [0; 3];
-    let mut maximum = [0; 3];
-    let bounds = crate::native_stack::sp(m) + 0x14;
-    let kind = m.r32(definition + 8);
-    crate::native_stack::external(
-        m,
-        if fixed_mass { 0x49a60b } else { 0x49a406 },
-        &[entity, kind, bounds],
-        None,
-        |m| {
-            use crate::native_stack::{self as stack, Reg};
-            stack::alloc(m, 0x144);
-            stack::push_reg(m, Reg::Ebx);
-            stack::set_reg(m, Reg::Ebx, entity);
-            stack::push_reg(m, Reg::Esi);
-            stack::set_reg(m, Reg::Esi, body);
-            stack::store(m, 0x124, body);
-            stack::push_reg(m, Reg::Ebp);
-            stack::push_reg(m, Reg::Edi);
-            for child in &children {
-                if m.r32(*child + 0x58) & 0x20 != 0 {
-                    continue;
-                }
-                let d = m.r32(m.r32(*child + 0x5c) + 0x78);
-                let delta: [u32; 3] = std::array::from_fn(|i| {
-                    sub(
-                        m.r32(*child + 0x64 + i as u32 * 4),
-                        m.r32(entity + 0x64 + i as u32 * 4),
-                    )
-                });
-                let margin = if m.r32(*child + 0x24) != 0 {
-                    0
-                } else {
-                    0x3c23d70a
-                };
-                let radius = add(margin, m.r32(d + 0x10));
-                let kind = m.r32(d + 8);
-                let points: Vec<[u32; 3]> = if kind == 0 {
-                    vec![]
-                } else if kind == 1 {
-                    vec![[0; 3]]
-                } else if (2..=4).contains(&kind) {
-                    let axis = (kind - 2) as usize;
-                    let mut positive = [0; 3];
-                    positive[axis] = m.r32(d + 0x9c);
-                    let mut negative = positive;
-                    negative[axis] ^= 0x80000000;
-                    vec![positive, negative]
-                } else if kind == 5 {
-                    (0..8)
-                        .map(|bits| {
-                            std::array::from_fn(|axis| {
-                                mul(
-                                    if bits & (1 << axis) == 0 {
-                                        (-1f32).to_bits()
-                                    } else {
-                                        1f32.to_bits()
-                                    },
-                                    m.r32(d + 0x9c + axis as u32 * 4),
-                                )
-                            })
-                        })
-                        .collect()
-                } else {
-                    let (n, p) = if m.r32(d + 0x9c) != 0 {
-                        (m.r32(d + 0x9c), m.r32(d + 0xa0))
-                    } else if m.r32(d + 8) == 6 {
-                        (m.r32(d + 0x20), m.r32(d + 0x24))
-                    } else {
-                        (0, 0)
-                    };
-                    (0..n)
-                        .map(|i| std::array::from_fn(|axis| m.r32(p + i * 12 + axis as u32 * 4)))
-                        .collect()
-                };
-                let relative_rotation = matrix_inplace_product(
-                    transpose(read_matrix(m, entity + 0xa4)),
-                    read_matrix(m, *child + 0xa4),
-                );
-                for point in points {
-                    let transformed: [u32; 3] = std::array::from_fn(|axis| {
-                        let order = if axis == 2 { [1, 2, 0] } else { [2, 0, 1] };
-                        add(
-                            add(
-                                mul(relative_rotation[order[0] * 3 + axis], point[order[0]]),
-                                mul(relative_rotation[order[1] * 3 + axis], point[order[1]]),
-                            ),
-                            mul(relative_rotation[order[2] * 3 + axis], point[order[2]]),
-                        )
-                    });
-                    if kind == 5 {
-                        crate::native_stack::store(m, 0x11c, transformed[2]);
-                    }
-                    for axis in 0..3 {
-                        let position = add(transformed[axis], delta[axis]);
-                        let low = sub(position, radius);
-                        let high = add(position, radius);
-                        if f32::from_bits(low) < f32::from_bits(minimum[axis]) {
-                            minimum[axis] = low;
-                        }
-                        if f32::from_bits(maximum[axis]) < f32::from_bits(high) {
-                            maximum[axis] = high;
-                        }
-                    }
+        let mut center = std::array::from_fn(|i| m.r32(center_ptr + i as u32 * 4));
+        match kind {
+            0 | 1 => sphere_bounds(m, definition, &children, center),
+            5 | 6 => {
+                stack::push_reg(m, Reg::Ebp);
+                stack::push_reg(m, Reg::Edi);
+                box_bounds(m, entity, body, definition, &children, &mut center);
+                for (i, value) in center.into_iter().enumerate() {
+                    m.w32(center_ptr + i as u32 * 4, value);
                 }
             }
-        },
-    );
+            _ => (),
+        }
+        Ok(())
+    })
+}
+fn clear_poly(m: &mut Space, poly: u32) {
+    //4ac6e0 frees owned allocations; Space's allocator never reuses them.
+    let flags = m.r32(poly + 0x14);
+    if m.r32(poly + 0x10) != 0 && flags & 2 != 0 {
+        m.w32(poly + 0x10, 0);
+    }
+    if m.r32(poly + 4) != 0 && flags & 4 != 0 {
+        m.w32(poly + 4, 0);
+    }
+    for offset in [0, 8, 12, 0x14] {
+        m.w32(poly + offset, 0);
+    }
+}
+fn sphere_bounds(m: &mut Space, definition: u32, children: &[u32], center: [u32; 3]) {
+    let mut radius = 0;
+    for &child in children {
+        if m.r32(child + 0x58) & 0x20 != 0 {
+            continue;
+        }
+        let relative = m.r32(child + 0x1c);
+        let [x, y, z] = std::array::from_fn::<_, 3, _>(|i| f(m.r32(relative + 4 + i as u32 * 4)));
+        //498fdd..499014: z*z + y*y, then x*x, sqrt, child radius, margin.
+        let length = z
+            .mul(z, PC, RC)
+            .add(y.mul(y, PC, RC), PC, RC)
+            .add(x.mul(x, PC, RC), PC, RC)
+            .sqrt(PC, RC);
+        let d = m.r32(m.r32(child + 0x5c) + 0x78);
+        let margin = if m.r32(child + 0x24) == 0 {
+            f(0x3c23d70a)
+        } else {
+            f(0)
+        };
+        let value = length.add(f(m.r32(d + 0xc)), PC, RC).add(margin, PC, RC);
+        if f(radius).fcom(value).0.c0 {
+            radius = stored(value);
+        }
+    }
+    for (offset, value) in [(8, 1), (0xc, radius), (0x10, radius), (0x9c, radius)] {
+        m.w32(definition + offset, value);
+    }
+    //4ac370 rebuilds a one-point, one-face poly without using its radius arg.
+    let poly = definition + 0x20;
+    clear_poly(m, poly);
+    m.w32(poly + 0xc, 1);
+    let face = m.alloc(0x20);
+    m.w32(poly + 0x10, face);
+    let point = m.alloc(12);
+    m.w32(poly + 4, point);
+    m.w32(poly + 0x14, m.r32(poly + 0x14) | 7);
+    for offset in [0, 4, 8] {
+        m.w32(point + offset, 0);
+    }
+    m.w32(poly, 1);
+    m.w32(poly + 8, 1);
+    m.w32(face, 1);
+    m.w32(face + 4, point);
+    for offset in [0, 4, 8] {
+        m.w32(face + 8 + offset, m.r32(0x644640 + offset));
+    }
+    m.w32(face + 0x14, 0);
+    m.w32(face + 0x18, 6);
+    let edges = m.alloc(0x78);
+    m.w32(face + 0x1c, edges);
+    for (i, value) in center.into_iter().enumerate() {
+        m.w32(definition + 0x40 + i as u32 * 4, value);
+    }
+}
+fn box_bounds(
+    m: &mut Space,
+    entity: u32,
+    body: u32,
+    definition: u32,
+    children: &[u32],
+    center: &mut [u32; 3],
+) {
+    let mut minimum = [0; 3];
+    let mut maximum = [0; 3];
+    for child in children {
+        if m.r32(*child + 0x58) & 0x20 != 0 {
+            continue;
+        }
+        let d = m.r32(m.r32(*child + 0x5c) + 0x78);
+        let parent_state = entity + 0x64 + m.r32(entity + 0x20c) * 0xd4;
+        let child_state = *child + 0x64 + m.r32(*child + 0x20c) * 0xd4;
+        let world_delta: [u32; 3] = std::array::from_fn(|i| {
+            sub(
+                m.r32(child_state + i as u32 * 4),
+                m.r32(parent_state + i as u32 * 4),
+            )
+        });
+        let parent_rotation = read_matrix(m, parent_state + 0x40);
+        // 499115..499181 forms the child displacement in the
+        // parent's local frame, with a distinct first-column sum.
+        let delta: [u32; 3] = std::array::from_fn(|axis| {
+            let order = if axis == 0 { [2, 1, 0] } else { [0, 2, 1] };
+            add(
+                add(
+                    mul(world_delta[order[0]], parent_rotation[order[0] * 3 + axis]),
+                    mul(world_delta[order[1]], parent_rotation[order[1] * 3 + axis]),
+                ),
+                mul(world_delta[order[2]], parent_rotation[order[2] * 3 + axis]),
+            )
+        });
+        let margin = if m.r32(*child + 0x24) != 0 {
+            0
+        } else {
+            0x3c23d70a
+        };
+        let radius = add(margin, m.r32(d + 0x10));
+        let kind = m.r32(d + 8);
+        let points: Vec<[u32; 3]> = if kind == 0 {
+            vec![]
+        } else if kind == 1 {
+            vec![[0; 3]]
+        } else if (2..=4).contains(&kind) {
+            let axis = (kind - 2) as usize;
+            let mut positive = [0; 3];
+            positive[axis] = m.r32(d + 0x9c);
+            let mut negative = positive;
+            negative[axis] ^= 0x80000000;
+            vec![positive, negative]
+        } else if kind == 5 {
+            (0..8)
+                .map(|bits| {
+                    std::array::from_fn(|axis| {
+                        mul(
+                            if bits & (1 << axis) == 0 {
+                                (-1f32).to_bits()
+                            } else {
+                                1f32.to_bits()
+                            },
+                            m.r32(d + 0x9c + axis as u32 * 4),
+                        )
+                    })
+                })
+                .collect()
+        } else if matches!(kind, 6 | 7) {
+            let (n, p) = if m.r32(d + 0x9c) != 0 {
+                (m.r32(d + 0x9c), m.r32(d + 0xa0))
+            } else if m.r32(d + 8) == 6 {
+                (m.r32(d + 0x20), m.r32(d + 0x24))
+            } else {
+                (0, 0)
+            };
+            (0..n)
+                .map(|i| std::array::from_fn(|axis| m.r32(p + i * 12 + axis as u32 * 4)))
+                .collect()
+        } else {
+            vec![]
+        };
+        let relative_rotation = matrix_inplace_product(
+            transpose(parent_rotation),
+            read_matrix(m, child_state + 0x40),
+        );
+        for point in points {
+            let transformed: [u32; 3] = std::array::from_fn(|axis| {
+                let order = if matches!(kind, 6 | 7) {
+                    if axis == 2 {
+                        [0, 2, 1]
+                    } else {
+                        [1, 0, 2]
+                    }
+                } else if axis == 2 {
+                    [1, 2, 0]
+                } else {
+                    [2, 1, 0]
+                };
+                stored(
+                    f(relative_rotation[order[0] * 3 + axis])
+                        .mul(f(point[order[0]]), PC, RC)
+                        .add(
+                            f(relative_rotation[order[1] * 3 + axis]).mul(
+                                f(point[order[1]]),
+                                PC,
+                                RC,
+                            ),
+                            PC,
+                            RC,
+                        )
+                        .add(
+                            f(relative_rotation[order[2] * 3 + axis]).mul(
+                                f(point[order[2]]),
+                                PC,
+                                RC,
+                            ),
+                            PC,
+                            RC,
+                        ),
+                )
+            });
+            // These are actual FSTP temporaries, not comparison padding.
+            // Later original REP MOVSD operations can retain their bytes.
+            let temporary = match kind {
+                5 => Some(0x114),
+                6 if m.r32(d + 0x9c) != 0 => Some(0x108),
+                6 => Some(0xe4),
+                7 => Some(0xfc),
+                _ => None,
+            };
+            if let Some(offset) = temporary {
+                for (i, value) in transformed.into_iter().enumerate() {
+                    crate::native_stack::store(m, offset + i as i32 * 4, value);
+                }
+            }
+            for axis in 0..3 {
+                let position = add(transformed[axis], delta[axis]);
+                let low = sub(position, radius);
+                let high = add(position, radius);
+                if f(low).fcom(f(minimum[axis])).0.c0 {
+                    minimum[axis] = low;
+                }
+                let status = f(high).fcom(f(maximum[axis])).0;
+                if !status.c0 && !status.c3 {
+                    maximum[axis] = high;
+                }
+            }
+        }
+    }
     let length_squared = |v: [u32; 3]| add(add(mul(v[0], v[0]), mul(v[1], v[1])), mul(v[2], v[2]));
     let a = length_squared(minimum);
     let b = length_squared(maximum);
@@ -572,7 +674,7 @@ fn compound_recursive_inner(
         a
     };
     if f32::from_bits(m.r32(body + 0x14)) == 0. {
-        center =
+        *center =
             std::array::from_fn(|i| add(minimum[i], mul(sub(maximum[i], minimum[i]), 0x3f000000)));
     }
     for axis in 0..3 {
@@ -581,6 +683,7 @@ fn compound_recursive_inner(
         minimum[axis] = add(minimum[axis], negative);
         maximum[axis] = add(maximum[axis], negative);
     }
+    clear_poly(m, definition + 0x20);
     let vertices = m.alloc(0x60);
     m.w32(definition + 0x20, 8);
     m.w32(definition + 0x24, vertices);
@@ -612,6 +715,62 @@ fn compound_recursive_inner(
             },
         );
     }
+}
+
+/// Complete49a050 for compound graphs whose bounds derive from boxes or
+/// explicit collision vertices. The parent may have no children.
+pub fn compound(m: &mut Space, entity: u32) -> Result<(), String> {
+    compound_recursive(m, entity, &mut vec![])
+}
+fn compound_recursive(m: &mut Space, entity: u32, ancestors: &mut Vec<u32>) -> Result<(), String> {
+    crate::native_stack::function(m, &[entity], None, |m| {
+        compound_frame(m, entity);
+        compound_recursive_inner(m, entity, ancestors)
+    })
+}
+fn compound_recursive_inner(
+    m: &mut Space,
+    entity: u32,
+    ancestors: &mut Vec<u32>,
+) -> Result<(), String> {
+    if ancestors.contains(&entity) {
+        return Err("NativeEntityBoundary: cyclic compound ancestor graph".into());
+    }
+    ancestors.push(entity);
+    let body = m.r32(entity + 0x5c);
+    let definition = m.r32(body + 0x78);
+    if m.r32(body + 0x9c) & 0x100 != 0 {
+        return Ok(());
+    }
+    let mut children = vec![];
+    let mut child = m.r32(entity + 0x24);
+    while child != 0 {
+        if children.contains(&child) {
+            return Err("NativeEntityBoundary: cyclic compound child list".into());
+        }
+        children.push(child);
+        child = m.r32(child + 0x28);
+    }
+    let fixed_mass = m.r32(entity + 0x58) & 0x8000 != 0;
+    let mut center = if fixed_mass {
+        [0; 3]
+    } else {
+        compound_mass_inner(m, entity)?
+    };
+    let kind = m.r32(definition + 8);
+    let bounds = crate::native_stack::sp(m) + 0x14;
+    for (i, value) in center.into_iter().enumerate() {
+        m.w32(bounds + i as u32 * 4, value);
+    }
+    crate::native_stack::call(
+        m,
+        if fixed_mass { 0x49a60b } else { 0x49a406 },
+        &[entity, kind, bounds],
+        None,
+        |m| regenerate_bounds(m, entity, kind, bounds),
+    )?;
+    center = std::array::from_fn(|i| m.r32(bounds + i as u32 * 4));
+    let length_squared = |v: [u32; 3]| add(add(mul(v[0], v[0]), mul(v[1], v[1])), mul(v[2], v[2]));
     if !fixed_mass && f32::from_bits(length_squared(center)) > f32::from_bits(0x3727c5ac) {
         for child in &children {
             let relative = m.r32(*child + 0x1c);
@@ -623,13 +782,26 @@ fn compound_recursive_inner(
             }
         }
         let active = m.r32(entity + 0x20c);
+        let rotation = read_matrix(m, entity + 0xa4 + active * 0xd4);
         for axis in 0..3 {
-            let position = add(
-                m.r32(entity + 0x64 + active * 0xd4 + axis * 4),
-                center[axis as usize],
+            // 49a49c..49a512 rotates the local center of mass into
+            // world coordinates, summing z, y, then x for every row.
+            let displacement = add(
+                add(
+                    mul(center[2], rotation[axis * 3 + 2]),
+                    mul(center[1], rotation[axis * 3 + 1]),
+                ),
+                mul(center[0], rotation[axis * 3]),
             );
-            m.w32(entity + 0x64 + active * 0xd4 + axis * 4, position);
-            m.w32(entity + 0x64 + (active ^ 1) * 0xd4 + axis * 4, position);
+            let position = add(
+                displacement,
+                m.r32(entity + 0x64 + active * 0xd4 + axis as u32 * 4),
+            );
+            m.w32(entity + 0x64 + active * 0xd4 + axis as u32 * 4, position);
+            m.w32(
+                entity + 0x64 + (active ^ 1) * 0xd4 + axis as u32 * 4,
+                position,
+            );
         }
     }
     let relative = m.r32(entity + 0x1c);
@@ -641,10 +813,10 @@ fn compound_recursive_inner(
         for axis in 0..3 {
             let value = add(
                 add(
-                    mul(center[0], rotation[axis * 3]),
+                    mul(center[2], rotation[axis * 3 + 2]),
                     mul(center[1], rotation[axis * 3 + 1]),
                 ),
-                mul(center[2], rotation[axis * 3 + 2]),
+                mul(center[0], rotation[axis * 3]),
             );
             m.w32(
                 relative + 4 + axis as u32 * 4,
@@ -665,6 +837,11 @@ fn compound_recursive_inner(
         } else {
             1000f32.to_bits()
         },
+    );
+    crate::native_stack::set_reg(
+        m,
+        crate::native_stack::Reg::Edi,
+        crate::native_stack::load(m, 0),
     );
     crate::native_stack::add_sp(m, 4); // original49a6a9 POP EDI before ancestor recursion.
     if relative != 0 {
@@ -1449,6 +1626,81 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(actual, expected, "{field}: mass {}", row["mass"]);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn original_bounds_all_definition_dispatches_match_full_buffers() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(bytes) = std::fs::read(root.join("re/out/boot/native-bounds-original.json")) else {
+            assert!(
+                std::env::var_os("SLR_REQUIRE_ORACLE").is_none(),
+                "missing required native bounds fixture"
+            );
+            eprintln!("SLR_ORACLE_SKIPPED: run re/oracle/native_bounds_probe.py");
+            return;
+        };
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(data["fpu_cw"], 0x7f);
+        let digest =
+            |p: &str| format!("{:x}", Sha256::digest(std::fs::read(root.join(p)).unwrap()));
+        assert_eq!(
+            data["exe_sha256"],
+            digest("reference/raw/StreetLegal_Redline.bak.exe")
+        );
+        assert_eq!(
+            data["producer_sha256"],
+            digest("re/oracle/native_bounds_probe.py")
+        );
+        let rows = data["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 171);
+        let word = |v: &serde_json::Value| v.as_u64().unwrap() as u32;
+        for (index, row) in rows.iter().enumerate() {
+            let mut m = Space::new();
+            for (i, v) in row["before"].as_array().unwrap().iter().enumerate() {
+                m.w32(slr_physics::space::HEAP_BASE + i as u32 * 4, word(v));
+            }
+            for (i, v) in row["stack"].as_array().unwrap().iter().enumerate() {
+                m.w32(0x7fef_f000 + i as u32 * 4, word(v));
+            }
+            m.set_heap_ptr(word(&row["before_heap"]));
+            regenerate_bounds(
+                &mut m,
+                word(&row["entity"]),
+                word(&row["kind"]),
+                word(&row["center"]),
+            )
+            .unwrap();
+            assert_eq!(m.heap_ptr(), word(&row["heap"]), "row{index} heap");
+            let diff = row["after"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    let address = slr_physics::space::HEAP_BASE + i as u32 * 4;
+                    (m.r32(address) != word(v)).then_some((
+                        format!("{address:#x}"),
+                        word(v),
+                        m.r32(address),
+                    ))
+                })
+                .take(24)
+                .collect::<Vec<_>>();
+            assert!(
+                diff.is_empty(),
+                "row{index} kind{} child{} buffer{}: {diff:?}",
+                row["kind"],
+                row["child_kind"],
+                row["index"]
+            );
         }
     }
 }
