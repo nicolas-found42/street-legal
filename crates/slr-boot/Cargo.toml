@@ -29,3 +29,6 @@ slr-d3d9 = { path = "../slr-d3d9" }
 slr-fmt-texture = { path = "../slr-fmt-texture" }
 zune-jpeg = "0.5"
 zune-core = "0.5"
+
+[dev-dependencies]
+rustc-hash = "1.1"

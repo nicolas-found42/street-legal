@@ -710,6 +710,7 @@ pub fn prepare_descriptors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashSet;
     use serde_json::{json, Value as Json};
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
@@ -731,7 +732,7 @@ mod tests {
         len: usize,
     }
     impl SnapshotBytes {
-        fn intern(data: &[u8], pool: &mut std::collections::HashSet<std::sync::Arc<[u8]>>) -> Self {
+        fn intern(data: &[u8], pool: &mut FxHashSet<std::sync::Arc<[u8]>>) -> Self {
             let pages = data
                 .chunks(4096)
                 .map(|page| {
@@ -783,7 +784,7 @@ mod tests {
             .write_all(&serde_json::to_vec(blobs).unwrap())
             .unwrap();
         let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut pool = std::collections::HashSet::new();
+        let mut pool = FxHashSet::default();
         let result = blobs
             .iter()
             .map(|blob| {
@@ -820,7 +821,7 @@ mod tests {
     }
     #[test]
     fn interned_snapshots_keep_every_byte_and_detect_page_boundary_changes() {
-        let mut pool = std::collections::HashSet::new();
+        let mut pool = FxHashSet::default();
         let bytes = vec![7; 8193];
         let a = SnapshotBytes::intern(&bytes, &mut pool);
         assert_eq!(a.len(), 8193);
@@ -1354,7 +1355,65 @@ mod tests {
     fn source_runtime_constructs_input_after_scripted_static_initializers() {
         bootstrap_prefix(18);
     }
-    static SOURCE_PROFILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // These fixtures can expand to several gigabytes each. Run a bounded number
+    // concurrently instead of serializing every original-backed profile.
+    static SOURCE_PROFILE: (std::sync::Mutex<usize>, std::sync::Condvar) =
+        (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+    struct SourceProfilePermit;
+
+    impl SourceProfilePermit {
+        fn acquire() -> Self {
+            static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let limit = *LIMIT.get_or_init(|| {
+                if let Some(explicit) = std::env::var("SLR_BOOTSTRAP_TEST_JOBS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|&value| value > 0)
+                {
+                    return explicit;
+                }
+                // Each decoded profile has reached over 8 GiB. Retain the
+                // original serial behavior unless there is ample physical RAM.
+                let memory = std::process::Command::new("sysctl")
+                    .args(["-n", "hw.memsize"])
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(|output| output.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+                if memory >= 40 * 1024 * 1024 * 1024 {
+                    cpus.min(3)
+                } else {
+                    1
+                }
+            });
+            let (lock, available) = &SOURCE_PROFILE;
+            let mut active = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while *active >= limit {
+                active = available
+                    .wait(active)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            *active += 1;
+            Self
+        }
+    }
+
+    impl Drop for SourceProfilePermit {
+        fn drop(&mut self) {
+            let (lock, available) = &SOURCE_PROFILE;
+            let mut active = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *active -= 1;
+            available.notify_one();
+        }
+    }
     fn bootstrap_prefix(mode: u8) {
         let resolve = mode != 0;
         let cache = mode >= 2;
@@ -1456,11 +1515,8 @@ mod tests {
         else {
             return;
         };
-        // Composed fixture states are large. Serialize these profiles so
-        // parallel test execution cannot multiply their decoded heap storage.
-        let _profile = SOURCE_PROFILE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Bound the number of simultaneously decoded multi-gigabyte fixtures.
+        let _profile = SourceProfilePermit::acquire();
         let v: Json = serde_json::from_slice(&std::fs::read(data).unwrap()).unwrap();
         assert_eq!(v["schema"], 1);
         assert_eq!(v["cw"], 127);
