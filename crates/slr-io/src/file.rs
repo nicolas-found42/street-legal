@@ -151,8 +151,8 @@
 //!   writing). The loaders the slot run triggers (`0x539080` JPEG companion,
 //!   `0x539170` blob) belong to the resource manager: the port records them as
 //!   [`LoadRequest`]s. A resource row's kind is the manager's path lookup
-//!   (`0x538380`): the kind registered with [`FileHost::set_kind_path`], 0 for
-//!   an unknown path. A count the file cannot hold is the exe's undefined
+//!   (`0x538380`): reuse a case-insensitively matching registered path, or
+//!   register it at the next manager index. A count the file cannot hold is the exe's undefined
 //!   end-of-file loop; the port reads zero words and keeps going for as many
 //!   rows as the count names.
 //! - The slot rows `write(ResourceRef)` appends carry no object, so `close`
@@ -1201,9 +1201,9 @@ impl FileHost {
 
     /// `0x485655`..`0x4856cc`: the resource entries `(id, len, path)` the
     /// footer stores, rebuilt as [`ResourceRow`]s (`S+8` counts the nodes,
-    /// `0x485685`). The row's kind is the resource manager's lookup of the
-    /// path (`0x538380`): the registered kind whose archive path matches
-    /// ([`FileHost::set_kind_path`]), 0 when the manager knows none.
+    /// `0x485685`). The row's kind is the resource manager's registration of
+    /// the path (`0x538380`): reuse a case-insensitive match, or append a new
+    /// descriptor after the existing manager indices.
     fn read_resource_rows(&mut self, slot: u32, count: i32, file: &mut NativeFile) {
         for _ in 0..count.max(0) {
             let id = self.read_word(slot);
@@ -1217,14 +1217,20 @@ impl FileHost {
         }
     }
 
-    /// `0x538380`: the kind whose registered archive path is `path`.
-    fn kind_of_path(&self, path: &str) -> u32 {
-        self.kind_paths
+    /// `0x538380`: find or register an archive, preserving first-use indices.
+    fn kind_of_path(&mut self, path: &str) -> u32 {
+        if let Some(kind) = self
+            .kind_paths
             .iter()
-            .filter(|(_, registered)| registered.as_str() == path)
+            .filter(|(_, registered)| registered.eq_ignore_ascii_case(path))
             .map(|(kind, _)| *kind)
             .min()
-            .unwrap_or(0)
+        {
+            return kind;
+        }
+        let kind = self.kind_paths.keys().max().map_or(0, |kind| kind + 1);
+        self.kind_paths.insert(kind, path.to_owned());
+        kind
     }
 
     /// `0x54cf00`: hand `data` to the file layer and record the
@@ -1746,6 +1752,52 @@ mod tests {
             crate::resid::read_res_id(&mut host, OBJ),
             crate::resid::pack(3, 7)
         );
+    }
+
+    #[test]
+    fn open_read_registers_unknown_archives_in_footer_order() {
+        let paths = ["DATA/Cars.rpk", "data/cars.rpk", "data/wheels.rpk"];
+        let mut footer = 0u32.to_le_bytes().to_vec(); // no script-side slots
+        footer.extend_from_slice(&3u32.to_le_bytes());
+        for (index, path) in paths.iter().enumerate() {
+            footer.extend_from_slice(&(index as u32 + 1).to_le_bytes());
+            footer.extend_from_slice(&(path.len() as u32 + 1).to_le_bytes());
+            footer.extend_from_slice(path.as_bytes());
+            footer.push(0);
+        }
+        let mut bytes = SDAT_HEADER.to_vec();
+        for (row, low) in [(1, 7), (2, 9), (3, 11)] {
+            bytes.extend_from_slice(&crate::resid::pack(row, low).to_le_bytes());
+        }
+        bytes.extend_from_slice(&footer);
+        bytes.extend_from_slice(&(footer.len() as u32).to_le_bytes());
+        let tree = Tree::new();
+        tree.put(NAME, &bytes);
+        let mut host = tree.host();
+        host.set_kind_path(0, "system.rpk");
+        host.set_name(OBJ, NAME);
+        for _ in 0..2 {
+            assert_eq!(host.open(OBJ, MODE_READ), 1);
+            assert_eq!(
+                host.native_file(OBJ)
+                    .unwrap()
+                    .resources
+                    .iter()
+                    .map(|row| row.kind)
+                    .collect::<Vec<_>>(),
+                vec![1, 1, 2]
+            );
+            for (kind, low) in [(1, 7), (1, 9), (2, 11)] {
+                assert_eq!(
+                    crate::resid::read_res_id(&mut host, OBJ),
+                    crate::resid::pack(kind, low)
+                );
+            }
+            host.close(OBJ);
+        }
+        assert_eq!(host.kind_path(1), Some("DATA/Cars.rpk"));
+        assert_eq!(host.kind_path(2), Some("data/wheels.rpk"));
+        assert_eq!(host.kind_path(3), None);
     }
 
     /// A short header read leaves the version byte 0 and takes the rewind arm;
