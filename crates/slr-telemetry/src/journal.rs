@@ -54,10 +54,14 @@ pub fn root() -> Option<PathBuf> {
 pub fn emit(kind: &str, data: Value) -> Result<u64, String> {
     let mut slot = JOURNAL.lock().map_err(|e| e.to_string())?;
     let Some(s) = slot.as_mut() else { return Ok(0) };
+    append(s, kind, data, json!(slr_vm::diagnostics::current_context()))
+}
+
+fn append(s: &mut Journal, kind: &str, data: Value, context: Value) -> Result<u64, String> {
     s.sequence += 1;
     let value = json!({"schema_version":1,"run_id":s.run_id,"sequence":s.sequence,
         "wall_ns":crate::monotonic_ns(),"thread":format!("{:?}",std::thread::current().id()),
-        "context":slr_vm::diagnostics::current_context(),"kind":kind,"data":data});
+        "context":context,"kind":kind,"data":data});
     let mut bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
     if s.bytes > 0 && s.bytes + bytes.len() as u64 > SEGMENT_BYTES {
@@ -72,6 +76,24 @@ pub fn emit(kind: &str, data: Value) -> Result<u64, String> {
         .map_err(|e| format!("SessionJournalBoundary: {e}"))?;
     s.bytes += bytes.len() as u64;
     Ok(s.sequence)
+}
+
+/// Record a panic and force the journal to disk, from inside a panic hook.
+///
+/// Never blocks and never panics: if the panicking thread holds the journal
+/// lock the note is skipped (every earlier record was already synced by
+/// [`emit`]), and a poisoned lock is still usable. The VM context is omitted
+/// because reading it could itself panic mid-update.
+pub fn panic_flush(message: &str) {
+    let mut slot = match JOURNAL.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if let Some(s) = slot.as_mut() {
+        let _ = append(s, "panic", json!({ "message": message }), Value::Null);
+        let _ = s.file.sync_all();
+    }
 }
 
 #[cfg(test)]

@@ -264,6 +264,28 @@ pub fn stats() -> Stats {
 pub fn recent() -> Vec<Event> {
     STATE.with(|s| s.borrow().recent.iter().cloned().collect())
 }
+/// The newest `limit` retained events, for a panic hook: answers `None` instead
+/// of panicking again when the panic fired while the ring was being updated.
+pub fn try_recent(limit: usize) -> Option<Vec<Event>> {
+    STATE.with(|s| {
+        s.try_borrow().ok().map(|s| {
+            let skip = s.recent.len().saturating_sub(limit);
+            s.recent.iter().skip(skip).cloned().collect()
+        })
+    })
+}
+/// [`stats`] for a panic hook; `None` while the state is mid-update.
+pub fn try_stats() -> Option<Stats> {
+    STATE.with(|s| {
+        s.try_borrow().ok().map(|s| Stats {
+            events_total: s.sequence,
+            ring_retained: s.recent.len(),
+            ring_evicted: s.ring_evicted,
+            reentrant_not_streamed: s.reentrant_not_streamed,
+            capacity: s.capacity,
+        })
+    })
+}
 pub fn thread_context<H: Host>(thread: &Thread, host: &H) -> Context {
     Context {
         thread: Some(thread.clock_identity),

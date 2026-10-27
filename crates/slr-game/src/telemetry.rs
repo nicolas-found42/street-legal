@@ -115,7 +115,11 @@ impl Diagnostics {
         }
         LAST.with(|last| *last.borrow_mut() = Some(value.clone()));
         if let Err(error) = slr_telemetry::write_state(value) {
-            eprintln!("street-legal: diagnostics: {error}");
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Error,
+                "frontend.diagnostics",
+                &format!("street-legal: diagnostics: {error}"),
+            );
         }
         self.last_frame = frame_of(value);
     }
@@ -172,7 +176,11 @@ impl Diagnostics {
             "failed": failures.len(),
         });
         if let Err(error) = slr_telemetry::write_artifact("autotest.json", &value) {
-            eprintln!("street-legal: diagnostics: {error}");
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Error,
+                "frontend.diagnostics",
+                &format!("street-legal: diagnostics: {error}"),
+            );
         }
         self.event(
             "autotest",
@@ -194,7 +202,11 @@ impl Diagnostics {
     /// Report the bundle's location once, at the end of the run.
     pub fn announce(&self) {
         if self.enabled {
-            eprintln!("street-legal: diagnostics {}", self.directory.display());
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Info,
+                "frontend.diagnostics",
+                &format!("street-legal: diagnostics {}", self.directory.display()),
+            );
         }
     }
 
@@ -227,11 +239,19 @@ impl Diagnostics {
         // Finish first: it writes `capture-end.json`, which the manifest must
         // then inventory. The manifest is therefore always the last artifact.
         if let Err(error) = slr_telemetry::finish(failure) {
-            eprintln!("street-legal: diagnostics: {error}");
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Error,
+                "frontend.diagnostics",
+                &format!("street-legal: diagnostics: {error}"),
+            );
             return;
         }
         if let Err(error) = slr_telemetry::write_manifest(value) {
-            eprintln!("street-legal: diagnostics: {error}");
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Error,
+                "frontend.diagnostics",
+                &format!("street-legal: diagnostics: {error}"),
+            );
         }
     }
 }
