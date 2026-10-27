@@ -162,23 +162,45 @@ def load_records(path):
     return reader.records()
 
 
-def native_prefix(path):
+def native_prefix(path, scan_bytes=None):
     """Diagnostic only: retain decoded complete records before a crash tail."""
     if not path.exists(): return {"missing":True,"valid_records":0}
-    data = path.read_bytes()
-    records, offset, error = [], 8, None
+    total = path.stat().st_size
+    budget = total if scan_bytes is None else min(total, scan_bytes)
+    records, count, offset, scanned, error, truncated = [], 0, 8, 0, None, False
     try:
-        calllog.Reader(data)
-        while offset < len(data):
-            if offset + 5 > len(data): raise ValueError("truncated record header")
-            tag, size = struct.unpack_from("<BI",data,offset)
-            if size > calllog.MAX_BODY or offset + 5 + size > len(data): raise ValueError("truncated or oversized record")
-            decoded = calllog.Reader(data[:8] + data[offset:offset+5+size]).records()
-            records.extend(decoded)
-            offset += 5 + size
+        with path.open("rb") as source:
+            header = source.read(min(8, budget))
+            scanned = len(header)
+            if budget < 8 and total >= 8:
+                truncated = True
+            else:
+                calllog.Reader(header)
+                while offset < total:
+                    if budget - scanned < 5:
+                        truncated = budget < total
+                        if not truncated: raise ValueError("truncated record header")
+                        break
+                    frame = source.read(5)
+                    scanned += len(frame)
+                    if len(frame) != 5: raise ValueError("truncated record header")
+                    _, size = struct.unpack("<BI", frame)
+                    if size > calllog.MAX_BODY or offset + 5 + size > total:
+                        raise ValueError("truncated or oversized record")
+                    if size > budget - scanned:
+                        truncated = True
+                        break
+                    body = source.read(size)
+                    scanned += len(body)
+                    if len(body) != size: raise ValueError("truncated or oversized record")
+                    decoded = calllog.Reader(header + frame + body).records()
+                    count += len(decoded)
+                    records = (records + decoded)[-12:]
+                    offset += 5 + size
     except Exception as exception: error = str(exception)
-    return {"valid_records":len(records),"valid_bytes":offset,"total_bytes":len(data),
-        "tail_error":error,"tail_error_offset":offset if error else None,"recent_records":records[-12:],"acceptance_evidence":False}
+    return {"valid_records":count,"valid_bytes":offset,"total_bytes":total,
+        "tail_error":error,"tail_error_offset":offset if error else None,"recent_records":records,
+        "scanned_bytes":scanned,"truncated":truncated,"acceptance_evidence":False}
 
 
 def descriptor(signature):
@@ -1363,7 +1385,7 @@ def digest(target, runs_root, chain=DIGEST_CHAIN, max_bytes=DIGEST_BYTES, scan_b
             truncated["report"] = f"report.json is {report_path.stat().st_size} bytes; not loaded"
         else:
             report = guarded("report", lambda: json.loads(report_path.read_text()), {})
-    record = guarded("index_record", lambda: index_bundle(bundle, Path(runs_root)), {}) or {}
+    record = guarded("index_record", lambda: index_record(bundle, manifest, report, Path(runs_root)), {}) or {}
     comparisons = report.get("comparisons") or manifest.get("comparisons") or {}
     mismatch_value = next(((label, value) for label, value in comparisons.items() if value.get("equal") is False), None)
     mapped = (report.get("divergence_context") or {}).get("comparison")
@@ -1407,8 +1429,9 @@ def digest(target, runs_root, chain=DIGEST_CHAIN, max_bytes=DIGEST_BYTES, scan_b
     crash = guarded("crash", lambda: json.loads(crash_path.read_text()), None) if crash_path.is_file() else None
     prefixes = None
     if manifest.get("status") in (None, "running") or not comparisons:
-        prefixes = {label: {key: value for key, value in native_prefix(streams / name).items() if key != "recent_records"}
+        prefixes = {label: {key: value for key, value in native_prefix(streams / name, scan_bytes).items() if key != "recent_records"}
                     for label, name in (("filtered", "runtime.calllog"), ("unfiltered", "runtime-all.calllog"))}
+        truncated["native_prefixes"] = any(value.get("truncated") for value in prefixes.values())
     runs = Path(runs_root)
     quoted = lambda path: json.dumps(str(path))
     commands = {"replay_from": f"python3 re/boot-diagnose.py --runs-root {runs} --replay-from {bundle}",
@@ -1435,8 +1458,12 @@ def digest(target, runs_root, chain=DIGEST_CHAIN, max_bytes=DIGEST_BYTES, scan_b
               "limits": {"chain_events": chain, "max_bytes": max_bytes, "string_chars": DIGEST_STRING,
                          "scan_bytes": scan_bytes},
               "truncated": truncated}
+    result["bytes"] = 0
     def size():
-        return len(json.dumps(result, default=str).encode())
+        # Include the bytes field itself and the CLI's trailing newline.
+        while result["bytes"] != len(digest_json(result).encode()):
+            result["bytes"] = len(digest_json(result).encode())
+        return result["bytes"]
     # Last resort for a pathological bundle: shed the oldest chain entries,
     # then the ring, until the answer fits; each cut is declared.
     while size() > max_bytes and result["causal_chain"]:
@@ -1446,10 +1473,26 @@ def digest(target, runs_root, chain=DIGEST_CHAIN, max_bytes=DIGEST_BYTES, scan_b
     while size() > max_bytes and result["failure"].get("recent_events"):
         result["failure"]["recent_events"] = result["failure"]["recent_events"][len(result["failure"]["recent_events"]) // 4 + 1:]
         result["failure"]["ring"]["output_truncated"] = True
+        result["failure"]["ring"]["returned"] = len(result["failure"]["recent_events"])
         result["truncated"]["failure_ring"] = True
         result["truncated"]["output"] = True
-    result["bytes"] = size()
+    # Small budgets may not hold even an empty chain and ring. Explicitly
+    # omit optional sections rather than return an oversized digest.
+    for section in ("commands", "crash", "targeted_rerun", "native_prefixes", "provenance",
+                    "native_call", "first_mismatch", "failure", "error", "errors", "bundle",
+                    "run_id", "progress", "reconstructed", "finished", "embedding", "kind", "status"):
+        if size() <= max_bytes:
+            break
+        result[section] = None
+        result["truncated"]["output"] = True
+        result["truncated"].setdefault("sections", []).append(section)
+    size()
     return result
+
+
+def digest_json(result):
+    """The exact serialization whose UTF-8 size the digest reports."""
+    return json.dumps(result, indent=2, sort_keys=True, default=str) + "\n"
 
 
 def main(argv=None):
@@ -1530,7 +1573,7 @@ def main(argv=None):
         if options.chain < 1 or options.max_bytes < 2048:
             parser.error("--chain must be positive and --max-bytes at least 2048")
         runs_root = archive.reader_runs_root(options.runs_root, REPO)
-        print(json.dumps(digest(options.target, runs_root, options.chain, options.max_bytes), indent=2, sort_keys=True, default=str))
+        print(digest_json(digest(options.target, runs_root, options.chain, options.max_bytes)), end="")
         return 0
     if argv[:1] == ["analyze"]:
         parser = argparse.ArgumentParser()

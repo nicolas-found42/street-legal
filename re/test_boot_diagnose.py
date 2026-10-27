@@ -667,6 +667,39 @@ class FlakeCheckTests(Fixture):
   self.assertFalse(records[0]['flake']['nondeterministic']);self.assertTrue(records[0]['flake']['signature_stable'])
 
 class DigestTests(Fixture):
+ def test_minimum_budget_bounds_the_actual_cli_output(self):
+  bundle=self.repo/'runs/minimum-budget';(bundle/'runtime').mkdir(parents=True)
+  (bundle/'manifest.json').write_text(json.dumps({'run_id':'minimum-budget','status':'failed','error':'x'*5000}))
+  result=run_cli('digest',bundle,'--json','--runs-root',self.repo/'runs','--max-bytes','2048')
+  self.assertEqual(result.returncode,0,result.stderr)
+  value=json.loads(result.stdout)
+  self.assertLessEqual(len(result.stdout.encode()),2048)
+  self.assertEqual(value['bytes'],len(result.stdout.encode()))
+  self.assertTrue(value['truncated']['output'])
+ def test_digest_does_not_reload_an_oversized_report(self):
+  bundle=self.repo/'runs/large-report';(bundle/'runtime').mkdir(parents=True)
+  (bundle/'manifest.json').write_text(json.dumps({'run_id':'large-report','status':'failed'}))
+  with (bundle/'report.json').open('wb') as report:report.truncate(65*1024*1024)
+  with mock.patch.object(diag,'index_bundle',side_effect=AssertionError('unbounded report reread')) as reread:
+   value=diag.digest(bundle,self.repo/'runs')
+  reread.assert_not_called()
+  self.assertIn('report',value['truncated'])
+ def test_unfinished_native_prefix_scan_obeys_its_byte_budget(self):
+  bundle=self.repo/'runs/large-log';runtime=bundle/'runtime';runtime.mkdir(parents=True)
+  (bundle/'manifest.json').write_text(json.dumps({'run_id':'large-log','status':'running'}))
+  data=(self.repo/'expected.slrlog').read_bytes()
+  (runtime/'runtime.calllog').write_bytes(data+data[8:]*200)
+  original_read=Path.read_bytes
+  def bounded_read(path):
+   if path==runtime/'runtime.calllog':raise AssertionError('unbounded log read')
+   return original_read(path)
+  with mock.patch.object(Path,'read_bytes',bounded_read):
+   value=diag.digest(bundle,self.repo/'runs',scan_bytes=len(data))
+  prefix=value['native_prefixes']['filtered']
+  self.assertEqual(prefix['valid_records'],1)
+  self.assertTrue(prefix['truncated'])
+  self.assertIsNone(prefix['tail_error'])
+  self.assertTrue(value['truncated']['native_prefixes'])
  def digest(self,target,*extra):
   result=run_cli('digest',target,'--json','--runs-root',self.repo/'runs',*extra);self.assertEqual(result.returncode,0,result.stderr)
   return json.loads(result.stdout)
