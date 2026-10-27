@@ -21,6 +21,7 @@ from collections import Counter
 from pathlib import Path
 
 from g11 import g11_result
+from g4 import g4_result
 from validators import boot_result, ledger_result, result, retirement_result, run_boot, stock_identity
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +148,10 @@ def evaluate(rows: list[dict], boot_bundle=None, execute=(), output_root=None, b
     )
     by_id["S10"].update(retirement_result(output_root, by_id["S1"] if live_boot else None,
         live_execution="S10" in execute))
+    by_id["G4"].update(
+        g4_result(output_root) if "G4" in execute else
+        result("not_run", "Run --execute G4 for fresh oracle vectors, observed tests and the per-native physics classification; receipts cannot assert pass.")
+    )
     by_id["G11"].update(
         g11_result(output_root, bochs, hardware) if "G11" in execute else
         result("not_run", "Run --execute G11 (with --bochs) for the fresh per-operation x87 trust table; receipts cannot assert pass.")
@@ -180,7 +185,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--table", action="store_true", help="report only; cannot establish acceptance")
     parser.add_argument("--json", action="store_true", help="emit computed results, never inventory claims")
     parser.add_argument("--boot-bundle", type=Path, help="recompare a source/input-bound isolated boot bundle")
-    parser.add_argument("--execute", action="append", choices=("S1", "S10", "S11", "G1", "G11"), default=[], help="run a live validator; S10 also executes S1; may be repeated")
+    parser.add_argument("--execute", action="append", choices=("S1", "S10", "S11", "G1", "G4", "G11"), default=[], help="run a live validator; S10 also executes S1; may be repeated")
     parser.add_argument("--bochs", type=Path, default=os.environ.get("SLR_BOCHS"), help="clean sparse Bochs checkout at the pinned revision (G11)")
     parser.add_argument("--intel-observation", type=Path, help="directory with corpus.json, intel.out and intel.stderr from an untranslated Intel x87 run (G11)")
     parser.add_argument("--output-root", type=Path, default=ROOT / "re/out/acceptance", help="retained isolated validation bundles")

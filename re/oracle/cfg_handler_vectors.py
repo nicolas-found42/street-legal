@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from oracle import Oracle, CW_D3D9  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT_DIR = os.path.join(REPO, "re", "out", "cfg_handlers")
+OUT_DIR = os.environ.get("SLR_CFG_VECTORS_OUT") or os.path.join(REPO, "re", "out", "cfg_handlers")
 MAIN_CHECKOUT = "/Users/nicolas/Documents/github/games/street-legal"
 UC_VER = "2.1.4"
 CW = CW_D3D9           # game float code runs at x87 PC=24 on the device thread (ADR 0007)
@@ -625,6 +625,7 @@ LEAVES = {
     "wing": ("part", 10, ["body 1 2 3 4 5 6 7 sphere 1 1 1"], lambda r: _float_battery(10)),
     "rollbar": ("part", 4, [], lambda r: _int_battery(2) + _float_battery(4)),
     "sfx_loop": ("part", 2, [], lambda r: _float_battery(2)),
+    "skinned": ("part", 3, [], lambda r: _float_battery(3)),
 }
 # Duplicate-key / count-boundary stress: keywords whose handlers append bounded records
 # (at most 16/8/2) or rebind slots: hammer them past the boundary.
@@ -650,7 +651,7 @@ LEAVES_NNUM = {"friction": 2, "skid": 3, "wheeldeform": 1, "arm": 7, "hub": 10,
                "sfx_engine_down": 6, "sfx_exhaust": 6, "sfx_gearbox_fwd": 2,
                "sfx_gearbox_rev": 2, "sfx_wreck": 1, "sfx_gearchange": 2, "shadow": 7,
                "bolt": 7, "flapsfx": 2, "slotmove": 5, "slotturn": 6, "deform": 1,
-               "intdamage": 1, "material": 4, "wing": 10, "rollbar": 4, "sfx_loop": 2,
+               "intdamage": 1, "material": 4, "wing": 10, "rollbar": 4, "sfx_loop": 2, "skinned": 3,
                "key": 1, "handbrake": 1, "osd_damage_slot": 1}
 LEAVES_SSTR = {"osd_gear": 1, "osd_speed": 1, "osd_rpm": 1, "osd_nos": 1, "osd_turbo": 1,
                "osd_mileage": 1, "osd_abs": 1, "osd_asr": 1, "osd_hbrake": 1,
