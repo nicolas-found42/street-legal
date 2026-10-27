@@ -89,11 +89,9 @@
 //!   nodes, their links and the objects, whose fields the walks also touch
 //!   (`0x485df0` starts at the head word, whose empty value is the end marker
 //!   at `S+0x1c`/`S+0x3c`, whose `+0x10`/`+0x1c` the walks compare against).
-//! - `File.open` materialises no rows (I2, module docs): a file opened for
-//!   reading leaves both tables empty, so `readResID` misses where the exe —
-//!   which rebuilds the tables from the footer (`0x485190`, `0x485685`) —
-//!   would hit. The counters *are* read from the file, so a row appended after
-//!   such an open continues the file's numbering.
+//! - `File.open` (read mode) rebuilds both tables from the footer like the
+//!   exe (see `crate::file`'s module docs); a loaded slot row's `res_id` is 0,
+//!   so `readResID` on a script-side word answers 0 after a reopen.
 //! - A kind the manager has no descriptor for is undefined in the exe
 //!   (`0x5383f0` answers 0 and `0x485df7` then reads `[0+8]`); the port uses
 //!   the id's high half as the row's kind and an empty path
@@ -855,25 +853,32 @@ mod tests {
 
         // `close` keeps the body; re-open the same file for reading
         let mut host = tree.host();
+        host.set_kind_path(KIND, PATH); // the manager outlives the file
         host.set_name(OBJ, NAME);
         assert_eq!(host.open(OBJ, MODE_READ), 1);
-        // the tables the exe's `open` would materialise from the footer (I2
-        // materialises none): hand them over
-        {
-            let file = host.native_file_mut(OBJ).unwrap();
-            file.resources.push(ResourceRow {
+        // `open` rebuilds both tables from the footer (`0x485685`, `0x485190`)
+        let file = host.native_file(OBJ).unwrap();
+        assert_eq!(
+            file.resources,
+            vec![ResourceRow {
                 id: 1,
                 kind: KIND,
-                path: PATH.into(),
-            });
-            file.slots.push(SlotRow {
+                path: PATH.into()
+            }]
+        );
+        assert_eq!(
+            file.slots,
+            vec![SlotRow {
                 id: 1,
                 kind: 7,
-                res_id: SCRIPT_ID,
-            });
-        }
+                res_id: 0
+            }]
+        );
         assert_eq!(read_res_id(&mut host, OBJ), SAVED_ID);
-        assert_eq!(read_res_id(&mut host, OBJ), SCRIPT_ID);
+        // the file stores only the slot's index: the reference id it carried
+        // while writing (`+0x1c`) is not on disk, so a loaded slot answers 0
+        // until a companion object is attached (original: `save_session.py`)
+        assert_eq!(read_res_id(&mut host, OBJ), 0);
     }
 
     /// `close` writes the rows into the version-2 footer: the slot-run count
