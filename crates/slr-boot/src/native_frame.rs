@@ -676,6 +676,12 @@ mod callback_tests {
 
     #[test]
     fn original_control_animation_passes_match_complete_heaps_events_and_abi() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-control-animation-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-control-animation-original.json"))
@@ -834,6 +840,12 @@ mod tests {
 
     #[test]
     fn truncated_drive_observations_cannot_establish_parity() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-frame-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-frame-original.json")).unwrap(),
@@ -935,6 +947,12 @@ mod tests {
     }
     #[test]
     fn original_drive_dispatch_matches_complete_heaps_and_callback_states() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-frame-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-frame-original.json"))

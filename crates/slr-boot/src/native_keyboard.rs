@@ -310,6 +310,12 @@ mod tests {
     #[test]
     fn original_wrapper_poll_all_branches_match_entire_memory_scratch_registers_and_leaf_sequence()
     {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-keyboard-original-attempt3.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-keyboard-original-attempt3.json"))

@@ -292,6 +292,12 @@ mod tests {
     }
     #[test]
     fn original_boot_commands_match_complete_heap_and_actual_callback_abi() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-player-command-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-player-command-original.json"))

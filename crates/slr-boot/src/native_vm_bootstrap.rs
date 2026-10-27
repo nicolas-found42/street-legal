@@ -712,7 +712,7 @@ mod tests {
     use super::*;
     use serde_json::{json, Value as Json};
     use sha2::{Digest, Sha256};
-    use std::io::Write;
+    use std::io::{Read, Write};
     thread_local! {static STORES:std::cell::RefCell<Vec<(u32,u32,u32)>>=const{std::cell::RefCell::new(Vec::new())};}
     fn observe(p: u32, n: u32, v: u32) {
         if p < 0x7fe00000 {
@@ -725,7 +725,49 @@ mod tests {
     fn digest(p: &std::path::Path) -> String {
         format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()))
     }
-    fn decode(blobs: &[&Json]) -> Vec<Vec<u8>> {
+    /// Full expected bytes, interned by exact page equality to bound memory.
+    struct SnapshotBytes {
+        pages: Vec<std::sync::Arc<[u8]>>,
+        len: usize,
+    }
+    impl SnapshotBytes {
+        fn intern(data: &[u8], pool: &mut std::collections::HashSet<std::sync::Arc<[u8]>>) -> Self {
+            let pages = data
+                .chunks(4096)
+                .map(|page| {
+                    if let Some(existing) = pool.get(page) {
+                        existing.clone()
+                    } else {
+                        let page: std::sync::Arc<[u8]> = page.into();
+                        pool.insert(page.clone());
+                        page
+                    }
+                })
+                .collect();
+            Self {
+                pages,
+                len: data.len(),
+            }
+        }
+        fn into_iter(self) -> impl Iterator<Item = u8> {
+            self.pages
+                .into_iter()
+                .flat_map(|page| Vec::from(page.as_ref()))
+        }
+        fn len(&self) -> usize {
+            self.len
+        }
+        fn iter(&self) -> impl Iterator<Item = &u8> {
+            self.pages.iter().flat_map(|page| page.iter())
+        }
+        fn first_difference(&self, m: &Space, base: u32) -> Option<(u32, u8, u8)> {
+            self.pages
+                .iter()
+                .enumerate()
+                .find_map(|(i, page)| m.first_difference(base + i as u32 * 4096, page))
+        }
+    }
+    fn decode(blobs: &[&Json]) -> Vec<SnapshotBytes> {
         let script="import base64,hashlib,json,struct,sys,zlib\nfor b in json.load(sys.stdin):\n raw=base64.b64decode(b['zlib_base64'],validate=True); z=zlib.decompressobj(); d=z.decompress(raw,2097153); assert len(d)<=2097152 and not z.unconsumed_tail; d+=z.flush(); assert z.eof and not z.unused_data and len(d)==b['bytes'] and hashlib.sha256(d).hexdigest()==b['sha256']; sys.stdout.buffer.write(struct.pack('<I',len(d))+d)";
         let mut child = std::process::Command::new("python3")
             .args(["-c", script])
@@ -740,37 +782,63 @@ mod tests {
             .unwrap()
             .write_all(&serde_json::to_vec(blobs).unwrap())
             .unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut pool = std::collections::HashSet::new();
+        let result = blobs
+            .iter()
+            .map(|blob| {
+                let mut header = [0; 4];
+                stdout.read_exact(&mut header).unwrap();
+                let n = u32::from_le_bytes(header) as usize;
+                assert_eq!(n, word(&blob["bytes"]) as usize);
+                assert!(n <= 2097152);
+                let mut data = vec![0; n];
+                stdout.read_exact(&mut data).unwrap();
+                assert_eq!(
+                    json!(format!("{:x}", Sha256::digest(&data))),
+                    blob["sha256"]
+                );
+                SnapshotBytes::intern(&data, &mut pool)
+            })
+            .collect();
+        let mut extra = [0];
+        assert_eq!(stdout.read(&mut extra).unwrap(), 0);
         let out = child.wait_with_output().unwrap();
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let mut cursor = 0;
-        let result = blobs
-            .iter()
-            .map(|b| {
-                assert!(out.stdout.len() >= cursor + 4);
-                let n =
-                    u32::from_le_bytes(out.stdout[cursor..cursor + 4].try_into().unwrap()) as usize;
-                cursor += 4;
-                assert_eq!(n, word(&b["bytes"]) as usize);
-                assert!(out.stdout.len() >= cursor + n);
-                let data = out.stdout[cursor..cursor + n].to_vec();
-                cursor += n;
-                assert_eq!(json!(format!("{:x}", Sha256::digest(&data))), b["sha256"]);
-                data
-            })
-            .collect();
-        assert_eq!(cursor, out.stdout.len());
         result
     }
     struct State {
-        heap: Vec<u8>,
-        stack: Vec<u8>,
-        image: Vec<(u32, Vec<u8>)>,
+        heap: SnapshotBytes,
+        stack: SnapshotBytes,
+        image: Vec<(u32, SnapshotBytes)>,
         heap_ptr: u32,
         registers: [u32; 8],
+    }
+    #[test]
+    fn interned_snapshots_keep_every_byte_and_detect_page_boundary_changes() {
+        let mut pool = std::collections::HashSet::new();
+        let bytes = vec![7; 8193];
+        let a = SnapshotBytes::intern(&bytes, &mut pool);
+        assert_eq!(a.len(), 8193);
+        assert_eq!(a.iter().copied().collect::<Vec<_>>(), bytes);
+        assert_eq!(pool.len(), 2);
+        let mut changed = bytes.clone();
+        changed[4096] = 9;
+        let b = SnapshotBytes::intern(&changed, &mut pool);
+        assert!(std::sync::Arc::ptr_eq(&a.pages[0], &b.pages[0]));
+        assert!(!std::sync::Arc::ptr_eq(&a.pages[1], &b.pages[1]));
+        let mut m = Space::new();
+        for (i, byte) in bytes.iter().enumerate() {
+            m.w8(0x20000000 + i as u32, *byte);
+        }
+        assert_eq!(a.first_difference(&m, 0x20000000), None);
+        assert_eq!(b.first_difference(&m, 0x20000000), Some((0x20001000, 7, 9)));
+        m.w8(0x20002000, 8);
+        assert_eq!(a.first_difference(&m, 0x20000000), Some((0x20002000, 8, 7)));
     }
     fn states(values: &[&Json]) -> Vec<State> {
         let mut blobs = vec![];
@@ -849,7 +917,7 @@ mod tests {
         let mut regions = vec![(0x20000000, &v.heap), (0x7fefd000, &v.stack)];
         regions.extend(v.image.iter().map(|(p, b)| (*p, b)));
         for (base, bytes) in regions {
-            let difference = m.first_difference(base, bytes);
+            let difference = bytes.first_difference(m, base);
             assert!(
                 difference.is_none(),
                 "{label} memory {base:x}: {difference:x?}"

@@ -442,6 +442,12 @@ mod tests {
 
     #[test]
     fn every_retained_case_matches_complete_original_memory_and_admitted_raw_points() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/euler-consumer-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         use sha2::{Digest, Sha256};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let path = root.join("re/out/boot/euler-consumer-original.json");
@@ -602,6 +608,12 @@ mod tests {
     }
     #[test]
     fn reduced_angle_proof_matches_every_original_caller_heap_word() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/checkpoints/20261021-campaign/car-command/euler-specials-v2.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: serde_json::Value =
             serde_json::from_slice(
@@ -650,6 +662,12 @@ mod tests {
 
     #[test]
     fn reduced_angle_cube_certifies_original_outputs_or_stays_explicit() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/certified-euler-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         use sha2::{Digest, Sha256};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: serde_json::Value = serde_json::from_slice(

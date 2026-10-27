@@ -195,6 +195,13 @@ mod tests {
     }
     #[test]
     fn original_variable_owner_vector_complete_heap_and_all_stores() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../re/out/checkpoints/abi-reconstruction-20261023/variables-original-v1.json",
+        );
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let v: Value =
             serde_json::from_slice(
@@ -367,6 +374,13 @@ mod reentry_tests {
     }
     #[test]
     fn original_initialized_class_reentry_matches_complete_heap_stack_and_gprs() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../re/out/checkpoints/abi-reconstruction-20261023/variables-original-v1.json",
+        );
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let v: Value =
             serde_json::from_slice(

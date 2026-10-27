@@ -564,6 +564,17 @@ mod euler_tests {
 
     #[test]
     fn original_euler_special_domains_match_complete_buffers_and_raw_trig() {
+        let required_fixture = std::env::var_os("SLR_EULER_VECTORS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../../re/out/checkpoints/20261021-campaign/car-command/euler-specials-v2.json",
+                )
+            });
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let path = std::env::var("SLR_EULER_VECTORS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| {
@@ -651,6 +662,17 @@ mod euler_tests {
 
     #[test]
     fn config_host_euler_uses_captured_words_and_restores_native_scratch() {
+        let required_fixture = std::env::var_os("SLR_EULER_VECTORS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../../re/out/checkpoints/20261021-campaign/car-command/euler-specials-v2.json",
+                )
+            });
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         use slr_physics::cfg::{Arg, ExtCall, Host, This, EXT_EULER_TO_MATRIX};
         let path = std::env::var("SLR_EULER_VECTORS")
             .map(std::path::PathBuf::from)
@@ -717,6 +739,17 @@ mod euler_tests {
 
     #[test]
     fn original_cfg_click_consumes_exact_euler_with_null_body_collaborator() {
+        let required_fixture = std::env::var_os("SLR_CFG_EULER_VECTORS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../../re/out/checkpoints/20261021-campaign/car-command/cfg-euler-v2.json",
+                )
+            });
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         use slr_physics::cfg::{Arg, Ctx, ExtCall, Host, This, EXT_BODY, EXT_EULER_TO_MATRIX};
         struct ClickHost {
             inner: crate::native_body::ConfigHost,

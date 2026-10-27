@@ -1661,7 +1661,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "slr-calllog",
  "slr-telemetry",
+ "thiserror 2.0.21",
  "wgpu",
  "winit",
 ]
@@ -1782,6 +1784,7 @@ dependencies = [
 name = "slr-formats"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "slr-fmt-cfg",
  "slr-fmt-core",
  "slr-fmt-ground",
@@ -1790,9 +1793,12 @@ dependencies = [
  "slr-fmt-scx",
  "slr-fmt-sdat",
  "slr-fmt-skeleton",
+ "slr-fmt-sound",
  "slr-fmt-spline",
+ "slr-fmt-texture",
  "slr-fmt-traffic",
  "slr-fmt-tufa",
+ "slr-fmt-video",
 ]
 
 [[package]]

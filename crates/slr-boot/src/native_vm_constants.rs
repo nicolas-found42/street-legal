@@ -239,6 +239,13 @@ mod tests {
     }
     #[test]
     fn original_cons_complete_heap_and_ordered_stores() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../re/out/checkpoints/abi-reconstruction-20261023/constants-original-v3.json",
+        );
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let v: Value =
             serde_json::from_slice(

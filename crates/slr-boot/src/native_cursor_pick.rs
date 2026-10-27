@@ -329,6 +329,12 @@ mod tests {
     }
     #[test]
     fn original_unprojection_matches_full_heap_including_aliased_input() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-pick-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let data = vectors();
         let rows = data["unprojections"].as_array().unwrap();
         assert_eq!(rows.len(), 48);
@@ -400,6 +406,12 @@ mod tests {
     }
     #[test]
     fn original_picking_matches_all_heaps_callbacks_globals_and_nullable_outputs() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-pick-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let data = vectors();
         let rows = data["picks"].as_array().unwrap();
         assert_eq!(rows.len(), 34);

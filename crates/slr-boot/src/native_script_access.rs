@@ -66,6 +66,12 @@ mod tests {
 
     #[test]
     fn original_script_access_prefix_matches_complete_heaps_and_live_target() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-script-access-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-script-access-original.json"))

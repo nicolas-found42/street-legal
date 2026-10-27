@@ -33,20 +33,22 @@ class WorktreeLinksTests(unittest.TestCase):
     def test_fixtures_link_but_runs_and_indexes_stay_local(self):
         for name in ("stock/input", "reference/input", "re/out/boot/snapshot.json"):
             self.put(name)
-        for area in ("boot", "menu", "acceptance"):
+        for area in ("boot", "menu", "acceptance", "headless"):
             self.put(f"re/out/{area}/runs/old/manifest.json")
             self.put(f"re/out/{area}/test-runs/old/result.json")
             self.put(f"re/out/{area}/runs-index.jsonl", "main-index\n")
             self.put(f"re/out/{area}/inputs-store/old", "shared-input")
+            self.put(f"re/out/{area}/d3d9-stream/old/run.slrlog")
+            self.put(f"re/out/{area}/snapshot-run/old/metadata.json")
         result = self.run_links()
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in ("stock", "reference", "re/out/boot/snapshot.json"):
             self.assertTrue((self.worker / name).is_symlink(), name)
-        for area in ("boot", "menu", "acceptance"):
+        for area in ("boot", "menu", "acceptance", "headless"):
             output = self.worker / "re/out" / area
-            for name in ("runs", "test-runs", "inputs-store"):
+            for name in ("runs", "test-runs", "inputs-store", "d3d9-stream", "snapshot-run"):
                 self.assertFalse((output / name).is_symlink(), f"{area}/{name}")
-                (output / name / "new-worker-run").mkdir()
+                (output / name / "new-worker-run").mkdir(parents=True)
                 self.assertFalse((self.main / "re/out" / area / name / "new-worker-run").exists())
             (output / "runs-index.jsonl").write_text("worker-index\n")
             self.assertEqual((self.main / "re/out" / area / "runs-index.jsonl").read_text(), "main-index\n")

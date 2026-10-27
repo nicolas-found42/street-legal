@@ -1471,6 +1471,12 @@ mod tests {
     }
     #[test]
     fn constructors_match_original_complete_heap_and_calls() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let data = vectors();
         let rows = data["constructors"].as_array().unwrap();
         assert_eq!(rows.len(), 32);
@@ -1524,6 +1530,12 @@ mod tests {
     }
     #[test]
     fn frame_transitions_match_original_complete_heap_and_ordered_calls() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let data = vectors();
         let rows = data["frames"].as_array().unwrap();
         assert_eq!(rows.len(), 30);
@@ -1569,6 +1581,12 @@ mod tests {
     }
     #[test]
     fn command_sequences_match_original_complete_heap_and_calls() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let data = vectors();
         let rows = data["commands"].as_array().unwrap();
         assert_eq!(rows.len(), 22);
@@ -1609,6 +1627,12 @@ mod tests {
 
     #[test]
     fn system_cursor_wrappers_match_original_global_writes_and_api_order() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-device-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-cursor-device-original.json"))
@@ -1703,6 +1727,12 @@ mod tests {
     }
     #[test]
     fn missing_globals_and_truncated_steps_are_rejected() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-cursor-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let v = vectors();
         for suite in ["constructors", "frames", "commands"] {
             let mut bad = v.clone();

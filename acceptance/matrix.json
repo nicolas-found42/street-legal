@@ -363,6 +363,10 @@
       "status": "partial",
       "note": "Ledger corpus rows exist per format; no single corpus-count report over all 7,858 files; writer coverage partial.",
       "evidence": [
+        "acceptance/formats.py",
+        "acceptance/g2-census-stock.json",
+        "crates/slr-fmt-scx/src/material.rs",
+        "crates/slr-formats/src/census.rs",
         "docs/acceptance-inventory.md",
         "docs/fidelity.md"
       ]
@@ -404,7 +408,13 @@
       "kind": "gate",
       "title": "Rendering (D): per-frame D3D9-equivalent states, stages, transforms and draw streams equal hooked logs; screenshot review",
       "status": "open",
-      "evidence": []
+      "evidence": [
+        "docs/d3d9-stream.md",
+        "acceptance/render_stream.py",
+        "crates/slr-d3d9/src/stream/mod.rs",
+        "re/headless/d3d9_capture.py"
+      ],
+      "notes": "Live registry comparison is supporting evidence only: selected menu streams diverge, other scenes and original pixels/reviews remain incomplete."
     },
     {
       "id": "G7",
@@ -497,8 +507,14 @@
       "id": "S5",
       "kind": "supporting",
       "title": "D3D9-equivalent call stream and screenshot harness against the hooked original",
-      "status": "open",
-      "evidence": []
+      "status": "partial",
+      "evidence": [
+        "docs/d3d9-stream.md",
+        "acceptance/render_stream.py",
+        "crates/slr-d3d9/src/stream/mod.rs",
+        "re/headless/d3d9_capture.py"
+      ],
+      "notes": "Live registry comparison is supporting evidence only: selected menu streams diverge, other scenes and original pixels/reviews remain incomplete."
     },
     {
       "id": "S6",

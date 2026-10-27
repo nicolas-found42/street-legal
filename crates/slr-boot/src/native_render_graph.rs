@@ -676,6 +676,12 @@ mod bone_oracle_tests {
     }
     #[test]
     fn original_named_bone_and_owner_changes_match_complete_buffers() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-render-bone-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         use sha2::{Digest, Sha256};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let bytes = std::fs::read(root.join("re/out/boot/native-render-bone-original.json"))

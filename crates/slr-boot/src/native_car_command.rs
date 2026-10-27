@@ -1576,6 +1576,16 @@ mod tests {
 
     #[test]
     fn original_attachment_commands_match_full_lifecycles() {
+        let required_fixture = std::env::var_os("SLR_CAR_COMMAND_VECTORS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../re/out/boot/native-car-command-attachments-v1.json")
+            });
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let path = std::env::var("SLR_CAR_COMMAND_VECTORS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| {
@@ -1711,6 +1721,16 @@ mod tests {
     }
     #[test]
     fn original_constraint_refresh_matches_complete_buffers() {
+        let required_fixture = std::env::var_os("SLR_CAR_DYNAMICS_VECTORS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../re/out/boot/native-car-dynamics-original.json")
+            });
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let path = std::env::var("SLR_CAR_DYNAMICS_VECTORS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| {

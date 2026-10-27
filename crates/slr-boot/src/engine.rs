@@ -1749,6 +1749,12 @@ pub(crate) mod event_argument_tests {
 
     #[test]
     fn original_script_event_argument_arity_and_conversion_order() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/script-event-arguments-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../re/out/boot/script-event-arguments-original.json");
         let capture: serde_json::Value = serde_json::from_slice(

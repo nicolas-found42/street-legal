@@ -749,6 +749,12 @@ mod tests {
     }
     #[test]
     fn original_player_constructors_empty_frames_and_queries_match_complete_state() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/native-player-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let data: Value = serde_json::from_slice(
             &std::fs::read(root.join("re/out/boot/native-player-original.json"))

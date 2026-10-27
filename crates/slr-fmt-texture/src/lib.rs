@@ -256,9 +256,15 @@ pub fn mip_plan(mip_count: u32, width: u32, height: u32, texture_size: u32) -> M
 /// only the container above is exe-ported. This helper asserts dimensions
 /// only, never pixels.
 pub fn decode_rgb(mip: &Mip) -> std::result::Result<(u16, u16, u16), String> {
+    jpeg_info(&mip.rgb)
+}
+
+/// JPEG header facts `(width, height, components)` through `zune-jpeg`; the
+/// payload must be a complete SOI..EOI stream. Dimensions only, never pixels.
+pub fn jpeg_info(jpeg: &[u8]) -> std::result::Result<(u16, u16, u16), String> {
     use zune_core::bytestream::ZCursor;
     use zune_jpeg::JpegDecoder;
-    let cursor = ZCursor::new(&mip.rgb);
+    let cursor = ZCursor::new(jpeg);
     let mut dec = JpegDecoder::new(cursor);
     dec.decode_headers()
         .map_err(|e| format!("jpeg headers: {e:?}"))?;

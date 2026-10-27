@@ -2,7 +2,7 @@
 #[test]
 fn v4_uv_skips_diffuse_and_specular_words() {
     let mut bytes = b"INVO".to_vec();
-    for word in [4u32, 2, 0, 32, 5, 96, 0, 4, 64, 1, 0x7c1] {
+    for word in [4u32, 2, 4, 28, 5, 92, 4, 64, 1, 0x7c1] {
         bytes.extend(word.to_le_bytes());
     }
     for value in [0f32, 0., 0., 0., 1., 0.] {
