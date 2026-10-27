@@ -47,7 +47,7 @@ uncommitted integration. S11 refreshed by the 2026-10-21 car-update checkpoint; 
 | S6 | DirectSound call stream + listening protocol | open |
 | S7 | DirectInput call stream + ControlSet script exercise | partial |
 | S8 | SDAT/config end-to-end byte-identity and cross-load | partial |
-| S9 | Real window/display path (windowed + fullscreen) on macOS arm64 | passed |
+| S9 | Real window/display path (windowed + fullscreen) on macOS arm64 | partial |
 | S10 | Remove old approximate slice (`slr-core`, `slr-game`) after boot passes (plan M1-14) | open — blocked by S1 |
 | S11 | Ledger regeneration from current tree and test receipts | passed — 483/483 fresh rows, 503 symbols, idempotent regeneration; `re/out/checkpoints/20261021-car-update-active/receipt.json` |
 | S12 | Human visual/listening review receipts for affected rows | open |

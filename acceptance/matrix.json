@@ -559,7 +559,7 @@
       "id": "S9",
       "kind": "supporting",
       "title": "Real window/display path (windowed and fullscreen) on macOS arm64",
-      "status": "passed",
+      "status": "partial",
       "evidence": [
         "acceptance/window.py",
         "crates/slr-d3d9/examples/display_probe.rs",
