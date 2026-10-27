@@ -141,16 +141,25 @@
 //! - The two SDAT lists (slot run at `S+0x34`, resource table at `S+0x14`)
 //!   are modelled as row vectors ([`NativeFile::slots`] /
 //!   [`NativeFile::resources`], `crate::resid`): `write(ResourceRef)` appends
-//!   to them and `close` writes them as the footer's slot run and resource
-//!   entries. `open` still materialises no rows — it reads the two count words
-//!   into [`NativeFile::slot_count`] / [`NativeFile::resource_count`] and stops
-//!   instead of reading the entries the exe would rebuild (`0x485190`,
-//!   `0x485685`) — so a `readResID` after reopening a file misses where the exe
-//!   would hit; a row appended after such an open continues the file's
-//!   numbering, as it does in the exe.
+//!   to them, `close` writes them as the footer's slot run and resource
+//!   entries, and `open` (read mode) rebuilds them from the footer exactly as
+//!   the exe does (`0x485190` for the slot run, `0x485655` for the resource
+//!   entries; differential evidence `re/oracle/save_session.py`, G9/S8). The
+//!   slot run sits between the two count words, so the scan reads
+//!   `[slot count][slot triples][resource count][entries]` in order. A loaded
+//!   slot row carries `res_id` 0 (the exe's `+0x1c` is only set while
+//!   writing). The loaders the slot run triggers (`0x539080` JPEG companion,
+//!   `0x539170` blob) belong to the resource manager: the port records them as
+//!   [`LoadRequest`]s. A resource row's kind is the manager's path lookup
+//!   (`0x538380`): reuse a case-insensitively matching registered path, or
+//!   register it at the next manager index. A count the file cannot hold is the exe's undefined
+//!   end-of-file loop; the port reads zero words and keeps going for as many
+//!   rows as the count names.
 //! - The slot rows `write(ResourceRef)` appends carry no object, so `close`
-//!   issues no prepare, blob read or JPEG-companion save for them (the
-//!   companion savers `0x48daa0` / `0x48da30` are not ported).
+//!   issues no prepare, blob read or JPEG-companion save for them (the exe's
+//!   savers `0x48daa0` / `0x48da30` return at once for a node without an
+//!   object). Slot rows *with* an object come from the script-side
+//!   screenshot/texture natives, which the port does not have yet.
 //! - A short header read leaves the version byte at 0 in the port (the exe
 //!   reads whatever the stack held) and so takes the rewind path.
 //! - The port has no VM-side `java.lang.String` object model: a string
@@ -186,7 +195,7 @@ use slr_vm::host::{marshal_args, CallInfo, NativeFn, VmHost};
 use crate::fileio::{
     FileLayer, NativeFile, NAME_CAP, NATIVE_FILE_NAME_OFFSET, SEEK_CUR, SEEK_END, SEEK_SET,
 };
-use crate::resid::ResRef;
+use crate::resid::{ResRef, ResourceRow, SlotRow};
 
 /// Exe address of `java.io.File.open(I)I`.
 pub const FILE_OPEN: u32 = 0x0048_5440;
@@ -429,6 +438,27 @@ pub enum IoEvent {
     },
 }
 
+/// One resource-manager load `File.open` (read mode) issues while rebuilding
+/// the slot run (`0x485190`): the JPEG companion texture (`0x539080`) or the
+/// inline blob object (`0x539170`). The objects themselves belong to the
+/// renderer; the port records the requests, which are what the original's
+/// scan observably does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadRequest {
+    /// `0x539080(desc, "<file>.<id>")`: the numbered JPEG companion.
+    Companion {
+        /// The companion's name.
+        name: String,
+    },
+    /// `0x539170(desc, blob, size)`.
+    Blob {
+        /// The size argument.
+        size: u32,
+        /// The blob's bytes up to the first NUL.
+        text: Vec<u8>,
+    },
+}
+
 /// The port-side state of one `java.io.File` object: the exe's `name` field
 /// and its handle field (`java.lang.Native.ptr`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -454,6 +484,7 @@ pub struct FileHost {
     next_string: u32,
     events: Vec<IoEvent>,
     log: Vec<String>,
+    loads: Vec<LoadRequest>,
 }
 
 impl FileHost {
@@ -471,6 +502,7 @@ impl FileHost {
             next_string: 0,
             events: Vec::new(),
             log: Vec::new(),
+            loads: Vec::new(),
         }
     }
 
@@ -503,6 +535,18 @@ impl FileHost {
     #[must_use]
     pub fn log(&self) -> &[String] {
         &self.log
+    }
+
+    /// The resource-manager loads `File.open` (read mode) requested while
+    /// rebuilding the slot run, in order ([`LoadRequest`]).
+    #[must_use]
+    pub fn loads(&self) -> &[LoadRequest] {
+        &self.loads
+    }
+
+    /// Drain [`FileHost::loads`].
+    pub fn take_loads(&mut self) -> Vec<LoadRequest> {
+        core::mem::take(&mut self.loads)
     }
 
     /// One object's `name` field and handle field.
@@ -1067,27 +1111,19 @@ impl FileHost {
             // `0x4856d1`
             1 => {
                 self.seek(slot, -8, SEEK_END);
-                let mut size = [0u8; 4];
-                let got = self.layer.read(slot, &mut size);
-                self.events.push(IoEvent::Read { slot, want: 4, got });
-                let mut count = [0u8; 4];
-                let got = self.layer.read(slot, &mut count);
-                self.events.push(IoEvent::Read { slot, want: 4, got });
-                let table_size = u32::from_le_bytes(size);
-                self.seek(slot, (-8i32).wrapping_sub(table_size as i32), SEEK_END);
+                let size = self.read_word(slot);
+                let count = self.read_word(slot);
+                self.seek(slot, (-8i32).wrapping_sub(size as i32), SEEK_END);
                 let pos = self.seek(slot, 0, SEEK_CUR);
                 file.open_word = pos.wrapping_sub(HEADER_LEN as u32); // 0x485727
                                                                       // The v1 footer's second word is the resource count; the exe
                                                                       // adds one per parsed entry (`0x485685`).
-                file.resource_count = file.resource_count.wrapping_add(u32::from_le_bytes(count));
+                self.read_resource_rows(slot, count as i32, file);
             }
             // `0x4855b7`
             2 => {
                 self.seek(slot, -4, SEEK_END);
-                let mut total = [0u8; 4];
-                let got = self.layer.read(slot, &mut total);
-                self.events.push(IoEvent::Read { slot, want: 4, got });
-                let total = u32::from_le_bytes(total);
+                let total = self.read_word(slot);
                 // `0x4855e1`: the footer cannot be shorter than its own words.
                 if total < MIN_FOOTER_TOTAL {
                     self.log.push(INVALID_DATAFILE_FORMAT.replace("%s", name));
@@ -1095,28 +1131,106 @@ impl FileHost {
                 self.seek(slot, (-4i32).wrapping_sub(total as i32), SEEK_END);
                 let pos = self.seek(slot, 0, SEEK_CUR);
                 file.open_word = pos.wrapping_sub(HEADER_LEN as u32); // 0x48561e
-                                                                      // `0x485625`: the slot-count word (`0x485190` materialises the
-                                                                      // run from it) and `0x48563f`: the resource count.
-                let mut slot_count = [0u8; 4];
-                let got = self.layer.read(slot, &mut slot_count);
-                self.events.push(IoEvent::Read { slot, want: 4, got });
-                let mut resource_count = [0u8; 4];
-                let got = self.layer.read(slot, &mut resource_count);
-                self.events.push(IoEvent::Read { slot, want: 4, got });
-                // `0x485190` (the script-side slot builder) writes `S+0x28`
-                // from the slot-count word; the exe increments `S+8` per
-                // parsed resource entry (`0x485685`), so the count word is
-                // added (a fresh struct counts 0).
-                file.slot_count = u32::from_le_bytes(slot_count);
-                file.resource_count = file
-                    .resource_count
-                    .wrapping_add(u32::from_le_bytes(resource_count));
+                                                                      // `0x485625`: the slot-count word, then `0x485190` reads
+                                                                      // the slot run it counts; `0x48563f`: the resource count
+                                                                      // and the entries.
+                let slot_count = self.read_word(slot);
+                self.read_slot_run(slot, name, slot_count as i32, file);
+                let resource_count = self.read_word(slot);
+                self.read_resource_rows(slot, resource_count as i32, file);
             }
             // `0x4857ae`: an unknown version reads no footer.
             _ => {}
         }
         // `0x4857ae`: leave the stream at the body start.
         self.seek(slot, HEADER_LEN as i32, SEEK_SET);
+    }
+
+    /// One little-endian word through `0x54cec0` (a short read leaves the
+    /// zeroed tail; the exe keeps its stack slot).
+    fn read_word(&mut self, slot: u32) -> u32 {
+        let mut word = [0u8; 4];
+        self.read_slot(slot, &mut word);
+        u32::from_le_bytes(word)
+    }
+
+    /// `0x485190(S, count)`: the slot run the footer stores, rebuilt as
+    /// [`SlotRow`]s. Per slot the exe appends a node (incrementing `S+0x28`),
+    /// reads the id, the kind and a size word, then by kind: 5 loads the JPEG
+    /// companion `"<name>.<id>"` (`0x539080`); 7 loads the inline blob of
+    /// `size` bytes when `size > 0`, else the blob
+    /// `"sourcefile <name>.<id>\r\nflags 1\r\n"` that names the companion
+    /// (`0x539170`); other kinds keep only the node. The loaders belong to the
+    /// resource manager (texture objects, M5); the port records the requests
+    /// in [`FileHost::loads`]. A count the file cannot hold is the exe's
+    /// undefined end-of-file loop; the port stops where the bytes end.
+    fn read_slot_run(&mut self, slot: u32, name: &str, count: i32, file: &mut NativeFile) {
+        for _ in 0..count.max(0) {
+            let id = self.read_word(slot);
+            let kind = self.read_word(slot);
+            let size = self.read_word(slot);
+            file.slot_count = file.slot_count.wrapping_add(1); // 0x4851ff
+            file.slots.push(SlotRow {
+                id,
+                kind,
+                res_id: 0,
+            });
+            match kind {
+                5 => self.loads.push(LoadRequest::Companion {
+                    name: format!("{name}.{id}"),
+                }),
+                7 if size > 0 => {
+                    let mut blob = vec![0u8; size as usize];
+                    self.read_slot(slot, &mut blob);
+                    self.loads.push(LoadRequest::Blob {
+                        size,
+                        text: c_string(&blob),
+                    });
+                }
+                7 => {
+                    let companion = format!("{name}.{id}");
+                    self.loads.push(LoadRequest::Blob {
+                        size: companion.len() as u32 + 0x1d,
+                        text: format!("sourcefile {companion}\r\nflags 1\r\n").into_bytes(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `0x485655`..`0x4856cc`: the resource entries `(id, len, path)` the
+    /// footer stores, rebuilt as [`ResourceRow`]s (`S+8` counts the nodes,
+    /// `0x485685`). The row's kind is the resource manager's registration of
+    /// the path (`0x538380`): reuse a case-insensitive match, or append a new
+    /// descriptor after the existing manager indices.
+    fn read_resource_rows(&mut self, slot: u32, count: i32, file: &mut NativeFile) {
+        for _ in 0..count.max(0) {
+            let id = self.read_word(slot);
+            let len = self.read_word(slot);
+            let mut path = vec![0u8; len as usize];
+            self.read_slot(slot, &mut path);
+            let path = String::from_utf8_lossy(&c_string(&path)).into_owned();
+            file.resource_count = file.resource_count.wrapping_add(1); // 0x485685
+            let kind = self.kind_of_path(&path);
+            file.resources.push(ResourceRow { id, kind, path });
+        }
+    }
+
+    /// `0x538380`: find or register an archive, preserving first-use indices.
+    fn kind_of_path(&mut self, path: &str) -> u32 {
+        if let Some(kind) = self
+            .kind_paths
+            .iter()
+            .filter(|(_, registered)| registered.eq_ignore_ascii_case(path))
+            .map(|(kind, _)| *kind)
+            .min()
+        {
+            return kind;
+        }
+        let kind = self.kind_paths.keys().max().map_or(0, |kind| kind + 1);
+        self.kind_paths.insert(kind, path.to_owned());
+        kind
     }
 
     /// `0x54cf00`: hand `data` to the file layer and record the
@@ -1501,11 +1615,19 @@ mod tests {
     }
 
     /// Version 1 finds its footer in the last 8 bytes: table size then entry
-    /// count, and the stream lands at the body start.
+    /// count; the stream walks the table's entries (`0x485655`) and lands at
+    /// the body start.
     #[test]
     fn open_read_scans_the_version_1_footer() {
         let tree = Tree::new();
-        tree.put(NAME, &v1(&[0; 4], 4, 2));
+        // one entry `(id 7, len 3, "ab\0")`
+        let mut table = 7u32.to_le_bytes().to_vec();
+        table.extend_from_slice(&3u32.to_le_bytes());
+        table.extend_from_slice(b"ab\0");
+        let mut file = v1(&[0; 4], table.len() as u32, 1);
+        let at = SDAT_HEADER.len() + 4;
+        file.splice(at..at, table);
+        tree.put(NAME, &file);
         let mut host = tree.host();
         host.set_name(OBJ, NAME);
 
@@ -1521,7 +1643,7 @@ mod tests {
             })
             .cloned()
             .collect();
-        // header, then the two footer words in the last 8 bytes
+        // header, the two footer words, then the table's entry
         assert_eq!(
             slots,
             vec![
@@ -1533,14 +1655,149 @@ mod tests {
                 seek_event(1, -8, SEEK_END),
                 read_event(1, 4, 4),
                 read_event(1, 4, 4),
-                seek_event(1, -12, SEEK_END),
+                seek_event(1, -19, SEEK_END),
                 seek_event(1, 0, SEEK_CUR),
+                read_event(1, 4, 4),
+                read_event(1, 4, 4),
+                read_event(1, 3, 3),
                 seek_event(1, 8, SEEK_SET),
             ]
         );
         let file = host.native_file(OBJ).unwrap();
-        assert_eq!(file.open_word, 0); // footer start (8) less 8
-        assert_eq!(file.resource_count, 2);
+        assert_eq!(file.open_word, 4); // footer start (12) less 8
+        assert_eq!(file.resource_count, 1);
+        assert_eq!(
+            file.resources,
+            vec![ResourceRow {
+                id: 7,
+                kind: 0,
+                path: "ab".into()
+            }]
+        );
+    }
+
+    /// Version 2 rebuilds both tables from the footer in file order: the slot
+    /// run sits *between* the slot-count word and the resource-count word, so
+    /// reading the two count words back to back (the old scan) took a slot
+    /// triple's id for the resource count and found no rows. Slot kinds 5 and
+    /// 7 request the JPEG companion / blob load; kind 7 with a size carries its
+    /// blob inline.
+    #[test]
+    fn open_read_rebuilds_the_version_2_tables() {
+        let blob = b"sourcefile x\0";
+        let path = b"data/cars.rpk\0";
+        let mut footer = Vec::new();
+        footer.extend_from_slice(&3u32.to_le_bytes()); // slot count
+        for (id, kind, size) in [(1u32, 5u32, 0u32), (2, 7, 0), (3, 7, blob.len() as u32)] {
+            for word in [id, kind, size] {
+                footer.extend_from_slice(&word.to_le_bytes());
+            }
+            if size > 0 {
+                footer.extend_from_slice(blob);
+            }
+        }
+        footer.extend_from_slice(&1u32.to_le_bytes()); // resource count
+        footer.extend_from_slice(&1u32.to_le_bytes()); // row id
+        footer.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        footer.extend_from_slice(path);
+        let total = footer.len() as u32;
+        let mut file = SDAT_HEADER.to_vec();
+        file.extend_from_slice(&((1u32 << 16) | 7).to_le_bytes()); // a saved resid word
+        file.extend_from_slice(&footer);
+        file.extend_from_slice(&total.to_le_bytes());
+
+        let tree = Tree::new();
+        tree.put(NAME, &file);
+        let mut host = tree.host();
+        host.set_kind_path(3, "data/cars.rpk");
+        host.set_name(OBJ, NAME);
+        assert_eq!(host.open(OBJ, MODE_READ), 1);
+        let opened = host.native_file(OBJ).unwrap();
+        assert_eq!(opened.slot_count, 3);
+        assert_eq!(opened.resource_count, 1);
+        assert_eq!(
+            opened
+                .slots
+                .iter()
+                .map(|s| (s.id, s.kind, s.res_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 5, 0), (2, 7, 0), (3, 7, 0)]
+        );
+        assert_eq!(
+            opened.resources,
+            vec![ResourceRow {
+                id: 1,
+                kind: 3,
+                path: "data/cars.rpk".into()
+            }]
+        );
+        assert_eq!(
+            host.take_loads(),
+            vec![
+                LoadRequest::Companion {
+                    name: format!("{NAME}.1")
+                },
+                LoadRequest::Blob {
+                    size: NAME.len() as u32 + 2 + 0x1d,
+                    text: format!("sourcefile {NAME}.2\r\nflags 1\r\n").into_bytes(),
+                },
+                LoadRequest::Blob {
+                    size: blob.len() as u32,
+                    text: b"sourcefile x".to_vec(),
+                },
+            ]
+        );
+        // `readResID` hits the rebuilt resource table: row 1 is kind 3
+        assert_eq!(
+            crate::resid::read_res_id(&mut host, OBJ),
+            crate::resid::pack(3, 7)
+        );
+    }
+
+    #[test]
+    fn open_read_registers_unknown_archives_in_footer_order() {
+        let paths = ["DATA/Cars.rpk", "data/cars.rpk", "data/wheels.rpk"];
+        let mut footer = 0u32.to_le_bytes().to_vec(); // no script-side slots
+        footer.extend_from_slice(&3u32.to_le_bytes());
+        for (index, path) in paths.iter().enumerate() {
+            footer.extend_from_slice(&(index as u32 + 1).to_le_bytes());
+            footer.extend_from_slice(&(path.len() as u32 + 1).to_le_bytes());
+            footer.extend_from_slice(path.as_bytes());
+            footer.push(0);
+        }
+        let mut bytes = SDAT_HEADER.to_vec();
+        for (row, low) in [(1, 7), (2, 9), (3, 11)] {
+            bytes.extend_from_slice(&crate::resid::pack(row, low).to_le_bytes());
+        }
+        bytes.extend_from_slice(&footer);
+        bytes.extend_from_slice(&(footer.len() as u32).to_le_bytes());
+        let tree = Tree::new();
+        tree.put(NAME, &bytes);
+        let mut host = tree.host();
+        host.set_kind_path(0, "system.rpk");
+        host.set_name(OBJ, NAME);
+        for _ in 0..2 {
+            assert_eq!(host.open(OBJ, MODE_READ), 1);
+            assert_eq!(
+                host.native_file(OBJ)
+                    .unwrap()
+                    .resources
+                    .iter()
+                    .map(|row| row.kind)
+                    .collect::<Vec<_>>(),
+                vec![1, 1, 2]
+            );
+            for (kind, low) in [(1, 7), (1, 9), (2, 11)] {
+                assert_eq!(
+                    crate::resid::read_res_id(&mut host, OBJ),
+                    crate::resid::pack(kind, low)
+                );
+            }
+            host.close(OBJ);
+        }
+        assert_eq!(host.kind_path(1), Some("DATA/Cars.rpk"));
+        assert_eq!(host.kind_path(2), Some("data/wheels.rpk"));
+        assert_eq!(host.kind_path(3), None);
     }
 
     /// A short header read leaves the version byte 0 and takes the rewind arm;
