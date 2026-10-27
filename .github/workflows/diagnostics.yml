@@ -28,6 +28,8 @@ jobs:
         run: python3 -m pip install -r re/coverage/requirements.txt
       - name: Acceptance validator tests (data-free)
         run: python3 acceptance/selftest.py
+      - name: DirectSound capture guards (data-free)
+        run: python3 -m unittest discover -s re/oracle -p "test_dsound_capture.py" -v
       - name: D3D9 original capture guards (data-free)
         run: python3 -m unittest discover -s re/headless -p "test_d3d9_capture.py" -v
       - name: Worktree output isolation tests (data-free)

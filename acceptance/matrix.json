@@ -421,7 +421,10 @@
       "kind": "gate",
       "title": "Audio (D): DirectSound-equivalent call streams equal original logs; human listening per item",
       "status": "open",
-      "evidence": []
+      "evidence": [
+        "docs/audio.md",
+        "re/oracle/dsound_capture.py"
+      ]
     },
     {
       "id": "G8",
@@ -520,8 +523,14 @@
       "id": "S6",
       "kind": "supporting",
       "title": "DirectSound call stream and listening protocol",
-      "status": "open",
-      "evidence": []
+      "status": "partial",
+      "evidence": [
+        "acceptance/listening/README.md",
+        "crates/slr-audio/src/device.rs",
+        "crates/slr-audio/src/diff.rs",
+        "crates/slr-audio/src/stream.rs",
+        "docs/audio.md"
+      ]
     },
     {
       "id": "S7",
