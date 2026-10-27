@@ -28,6 +28,8 @@ jobs:
         run: python3 -m pip install -r re/coverage/requirements.txt
       - name: Acceptance validator tests (data-free)
         run: python3 acceptance/selftest.py
+      - name: Worktree output isolation tests (data-free)
+        run: python3 tools/test_link_worktree.py
       - name: Coverage inventory tests (data-free)
         run: python3 re/coverage/test_inventory.py
       - uses: dtolnay/rust-toolchain@stable

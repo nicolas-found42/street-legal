@@ -7,6 +7,105 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
+### 2026-10-27: full-port campaign resumed
+
+The user resumed end-to-end implementation with full-send authorization. The
+completion contract is unchanged: every P01–P30 feature and every G/S gate must
+pass its executable requirements. The current inventory accepts **0 of 54**;
+component tests and collected function evidence do not close those obligations.
+The old stopped-state checkpoint below is historical, not the current frontier.
+
+Integrated foundations on `main`:
+
+- #123, merge `02d2340`: SDAT resource/slot footer reconstruction, repaired to
+  register unseen archive paths in original order with case-insensitive reuse.
+- #124, merge `acfed65`: permanent diagnostic archive, provenance, hook/fixture
+  records and digest. Digest output and unfinished-log reads now obey their
+  explicit bounds; old archive bundles were not adopted or deleted.
+- #126, merge `5104a11`: per-obligation validator registry and discovered tests.
+  The extracted boot endpoint constant and evidence-prefix confinement are
+  repaired. New validators belong in registry modules, not the removed shared
+  `acceptance/validators.py` dispatch.
+
+PR #128 merged as `951b4cf`. Its declared-platform input
+component freshly matches 17 original Unicorn scenarios / 1,657 operations;
+1,157 workspace tests pass with required oracle fixtures. The collector records
+500 passing comparison rows, including 14 input entry points, and rejects absent
+input data without changing prior evidence. Those are component
+results, not ControlSet/device/whole-game acceptance. The original input
+worktree remains preserved.
+
+| Frontier | Current source / state | Next implementation boundary |
+|---|---|---|
+| Native VM / strict boot (#110, #40; S1/G3/P01) | `claude/native-vm-raw-runtime-f0ad55` at `242fbc8`, clean, one commit beyond its remote; no PR. Its branch reports 7,001/9,209 unfiltered and 4,892/6,508 filtered records; this campaign has not reproduced that replay. Raw runtime remains unwired. | Integrate diagnostics and this canonical handoff, reproduce strict clock replay, then finish car drive `0x454500` and the remaining native graph. A menu smoke is not strict boot equality. |
+| Saves/config (#71/#72; S8/G9) | #123 merged; #127 (`claude/saves-sdat-e2e-c4b04b`) retains native-session tooling. Its old original-manager hook reproduced the port's lookup-only bug. | Execute real original package registration in the harness, migrate S8/G9 to the registry, rerun byte/cross-load comparisons. Keep script-level sessions/JPEG companions blocked until implemented. |
+| Input (#70; S7/G8/P29) | #128 publishes the device component. Its capture encoder now preserves original negative zero; tests reject dropped/extra/mispaired captured rows and mark missing captures unexecuted. | Wire the layer into host/device input and unchanged ControlSet scripts, add live S7/G8 validators and physical-device observations. |
+| Physics / float (G4/G11) | #122 at `4a2ab4b` plus preserved uncommitted tyre/transcendental work. | Migrate validators onto #126; keep approximate Pacejka diagnostics separate from exact passing evidence. Resolve untrusted operations, remaining natives and all-car/part scenarios without tolerance-based approval. |
+| Render (S5/G6) | `claude/render-d3d9-stream-d4e159` has preserved uncommitted capture/canonicalization/comparison work. | Migrate validators; integrate stream emission before the window branch; finish missing transform/material/state behavior and named-scene comparisons. |
+| Window / video (S9/P30; #65/#66/#104) | `claude/window-s9-ee2f0f` has preserved display, resize/fullscreen and Prime playback work. | Resolve shared `slr-d3d9` edits after render, prove original mode/video sequences, exercise the native display path. |
+| Audio (S6/G7; #67–#69) | `claude/audio-dsound-417509` has preserved software device/stream/comparator work. | Finish original-backed library/scenario comparison, CoreAudio output and per-item listening evidence; add registry validators. |
+| Formats / production shape (G2/S3) | `claude/formats-scx-ef41ee` has preserved material/census work and old-dispatch validator edits. | Migrate G2; replace exploratory checks with assertions, prove the whole stock corpus and production shape pipeline. |
+| Remaining acceptance machinery | Original acceptance worktree has uncommitted composition/denominator/review/row validators; its composition positive test still needs repair. | Validate fresh evidence and producer coverage; implement remaining row scenarios. S12 requires genuine human receipts and S13 an independent frozen-revision pass. |
+
+All dirty worktrees were preserved before integration under ignored
+`re/out/checkpoints/full-send-20261027T033306Z/`. Do not discard their contents or
+close M-vs-P issues as duplicates: implementation tickets and feature acceptance
+have different completion criteria. The required fmt/Clippy/workspace-test gate
+is retained; the historical proposal to weaken it has not been adopted.
+
+`tools/link-worktree.sh` shares stock/reference and immutable local fixtures.
+Its default local output roots are `boot`, `menu`, and `acceptance`; run archives, input stores
+and indexes remain local. It refuses pre-existing shared output symlinks instead
+of writing through them. Inspect older archives through their explicit
+`--runs-root`; the helper does not import them into a worker's mutable outputs.
+The explicit `acceptance/check.py --evidence-root MAIN_CHECKOUT` option accepts
+only existing evidence paths confined to the same sanctioned prefix of this
+repository's declared checkout. Final verification still needs source-bound,
+fresh execution and complete retained evidence.
+
+### Historical campaign coordination (2026-10-26; superseded)
+
+
+Baseline on main `7d203a7` (fresh, this day): `python3 acceptance/check.py --table`
+reports **0 of 54 passing** (1 failed, 2 not run, 51 unsupported). Strict boot replay
+still fails at filtered record 620 of 6,508 (unfiltered 909 of 9,209) with the
+`THRD-RUNVMI Dummy.getInfo` / `THRD-INSTVAR-INI java.game.parts.Part` thread-order
+mismatch. The four `stock_*` integration tests pass. Logs live in the canonical
+evidence archive `~/Documents/street-legal-evidence/` (outside every worktree).
+
+**Work was deliberately stopped at the user's request on 2026-10-26.** All frontier
+sessions are stopped; none of this is complete and no obligation moved. Each
+frontier below keeps its own worktree under `.claude/worktrees/`, with unfinished
+work uncommitted in some of them (hooks were not run on it). Resume by reopening
+that session or reading its worktree diff; do not discard worktrees.
+
+| Frontier | Obligations | Owner crates | Branch / state when stopped | Remaining work |
+|---|---|---|---|---|
+| Native-VM raw runtime and strict replay (serial) | #110, S1, G3, P01 | `slr-boot`, `slr-vm` | `claude/native-vm-raw-runtime-f0ad55` at `97af621`: 4 hook-passed commits on the recovered raw-runtime branch (adds scheduler/callback repair and audited nested natives; PR draft claims strict replay 7,001/9,209 unfiltered and 4,892/6,508 filtered, not reproduced by the coordinator). One uncommitted `main.rs` hunk is left (planned commit 6). No PR opened. | Commit 6, reproduce the replay numbers in a fresh worktree, open the PR for #110, then the `0x454500` car native drive (replay frame 31), then the rest of the native command/installation graph to reach the 6,508-record endpoint with 300 idle frames. |
+| Diagnostics archive/provenance fixes 1-6 | G10 | `re/boot-diagnose.py`, `slr-telemetry` | `claude/diagnostics-archive-provenance-eeda20`, 17 uncommitted files | Finish, run the hook, PR. |
+| Saves/config SDAT end to end | G9, S8 | `slr-fmt-sdat`, `slr-io` | `claude/saves-sdat-e2e-c4b04b`, 8 uncommitted files (`re/oracle/save_session.py`, `slr-io` edits) | Scripted-session byte identity vs the headless original, cross-load, G9/S8 validator. |
+| Input / ControlSet / DirectInput stream | G8, S7 | `slr-input` | `claude/input-controlset-9f0338`, started only (`re/oracle/input_device_rig.py`) | Original DirectInput call-stream capture, port equivalence, G8/S7 validator. |
+| D3D9-equivalent stream harness | G6, S5 | `slr-d3d9`, `slr-render-natives` | `claude/render-d3d9-stream-d4e159`, started only (`crates/slr-d3d9/src/stream/`) | Shared call-stream schema, port emission, first-divergence tool, M5-01 inventory, validator. |
+| Float and physics level 1 | G11, G4 | `slr-x87`, `slr-physics` | `claude/physics-x87-parity-cc5912` at `2064c59` (committed: fresh per-operation x87 trust table, exact fscale, Intel-hardware kit) plus 11 uncommitted files | Remaining non-bit-exact x87 operations need evidence or a user decision (ADR 0007); G4 differential rows marked `ported (no test yet)`; G11/G4 validators. |
+| Issue triage | planning only | GitHub | 10 blocked-by edges applied (e.g. #40, #57, #67 blocked by #13); labels and comments not yet posted | Post comments/labels, dependency-ordered wave list, proposed closures of M-vs-P duplicates. |
+| Not started | G7/S6 audio, G2/S3 formats and production SCX pipeline, S9 window, S12 human reviews, validators for all other obligations, S10 slice removal, S13 frozen independent verification | | | Everything not listed above. |
+
+Open decision for the user: the 22-minute pre-commit hook is dominated by one
+`slr-boot` unit-test binary (`native_vm_bootstrap` tests) on the raw-runtime branch.
+A tiered gate (fmt and clippy in pre-commit, slow tests in pre-push and CI) is
+proposed, not applied.
+
+Worktrees reach the git-ignored `stock/`, `reference/` and `re/out/` through
+`tools/link-worktree.sh` (read-only entries; a worktree-local `re/out/boot`).
+Acceptance validators refuse evidence reached through symlinks, so the final
+`acceptance/check.py` run, including S13, must happen in a checkout whose `re/out`
+is a real directory. Only S1, S10, S11 and part of G1 have validators today; every
+other obligation needs a checked-in validator before it can pass.
+
+Recovery if interrupted: `git worktree list`, `gh pr list`, the session list, then
+re-run `python3 acceptance/check.py --table` in the main checkout and the strict
+replay command below with `--runs-root ~/Documents/street-legal-evidence/runs`.
+
 Last updated: 2026-10-24, garage room on `codex/garage-room-rendering`.
 
 The original New Career script path now displays the actual stock 3D garage:
