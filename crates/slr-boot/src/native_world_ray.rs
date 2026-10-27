@@ -301,7 +301,9 @@ mod genuine_tests {
     #[test]
     fn genuine_cursor_pick_and_world_ray_match_retained_original_state() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let path = root.join("re/out/boot/native-cursor-pick-genuine-original.json");
+        let path = std::env::var_os("SLR_CURSOR_PICK_GENUINE_VECTORS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("re/out/boot/native-cursor-pick-genuine-original.json"));
         let Ok(bytes) = std::fs::read(path) else {
             eprintln!("SLR_ORACLE_SKIPPED: genuine_cursor_pick_and_world_ray_match_retained_original_state");
             assert!(
@@ -312,9 +314,24 @@ mod genuine_tests {
         };
         let data: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["schema"], 1);
-        for (source, digest) in data["sources"].as_object().unwrap() {
+        assert_eq!(
+            data["provenance"]["exe_sha256"],
+            "7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde"
+        );
+        let required = [
+            "re/oracle/headless_snapshot.py",
+            "re/oracle/native_cursor_pick_genuine_probe.py",
+            "re/oracle/oracle.py",
+            "re/oracle/snapshot_replay.py",
+        ];
+        let sources = data["sources"].as_object().unwrap();
+        assert_eq!(
+            sources.keys().map(String::as_str).collect::<Vec<_>>(),
+            required
+        );
+        for source in required {
             assert_eq!(
-                *digest,
+                sources[source],
                 format!(
                     "{:x}",
                     Sha256::digest(std::fs::read(root.join(source)).unwrap())
