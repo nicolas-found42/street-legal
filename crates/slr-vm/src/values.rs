@@ -32,7 +32,7 @@ use std::{
 /// Identity of one allocation lifetime. The slot is reused by the original
 /// freelist; the generation distinguishes successive owners. These are opaque
 /// arena identities, never executable/native memory addresses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct CellId {
     pub pool: u64,
     pub slot: u32,
@@ -142,12 +142,12 @@ pub enum CellEvent {
     Allocate { id: CellId, origin: AllocOrigin },
     Release { id: CellId },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum PoolKind {
     Value,
     Variable,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum PoolEvent {
     Allocate {
         kind: PoolKind,
@@ -164,7 +164,7 @@ pub enum PoolEvent {
 /// Immutable observation of a precise allocation lifetime. The name word is
 /// present only for a variable cell; it is a semantic name identity, not a
 /// claimed original pointer. Raw observers must resolve it explicitly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PoolCellView {
     pub kind: PoolKind,
     pub pool: u64,
@@ -369,7 +369,7 @@ impl SharedValuePool {
 /// `Ljava.lang.String;` compare) and the conversion/assignability walkers
 /// (`FUN_00417da0`, `FUN_00405400`) read the whole name. So a tag carries
 /// the full name; [`TypeTag::of`] keeps the exe's first-byte dispatch.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub enum TypeTag {
     /// `I`: 32-bit integer (payload is the word itself).
     Int,
@@ -470,7 +470,7 @@ impl TypeTag {
 ///
 /// This is the `(type, payload)` pair the oracle vectors record per cell;
 /// addresses are arena-dependent and never compared.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub struct Value {
     /// Type tag (first byte of the type name).
     pub tag: TypeTag,
@@ -557,7 +557,7 @@ impl fmt::Display for Value {
 /// The exe returns only the pointer either way; the test oracle records
 /// this discriminant through memory-write capture (pooled growth writes
 /// the pool headers; freelist reuse does not).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub enum AllocOrigin {
     /// Reused head of the freelist (`param_1[4]` chain).
     Freelist,

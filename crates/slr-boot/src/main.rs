@@ -2,46 +2,138 @@
 mod engine;
 mod factory;
 mod gc_runtime;
+mod ground_environment;
 mod live_input;
+mod machine_recording;
 mod materialise;
 mod missing_rows;
 mod native_assets;
 mod native_body;
 mod native_button;
+mod native_callbacks;
 mod native_camera;
 mod native_car;
 mod native_car_command;
+mod native_car_query;
 mod native_car_update;
+mod native_cursor;
+mod native_cursor_pick;
+mod native_cursor_runtime;
 mod native_defaults;
 mod native_definition;
+mod native_diagnostics;
 mod native_dynamics;
 mod native_entity;
 mod native_factory;
 mod native_file;
+mod native_fpu;
+mod native_frame;
 mod native_geometry;
+mod native_image;
+mod native_install;
+mod native_install_runtime;
+mod native_instance;
+mod native_instance_new;
+mod native_instance_runtime;
+mod native_matrix;
+mod native_matrix_interval;
 mod native_mesh_inertia;
 mod native_mesh_resource;
 mod native_message;
+mod native_nested;
+mod native_notifications;
 mod native_part;
+mod native_player;
+mod native_world_ray;
+// Unwired raw-runtime modules (#110): oracle-tested, but production does not
+// yet install the raw Runtime, so only tests reach most of their items. Each
+// allow goes when its caller is wired; see docs/boot-status.md (2026-10-26).
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_player_command;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_player_device;
+mod native_player_runtime;
 mod native_postparse;
 mod native_query;
+mod native_query_frame;
+mod native_render_graph;
 mod native_render_lod;
 mod native_render_resource;
 mod native_render_type;
 mod native_resource_base;
+// Raw manager lookup is currently exercised by the snapshot adapter; the
+// production installation host still uses the live typed manager projection.
+mod native_keyboard;
+#[cfg(test)]
+mod native_resource_index;
 mod native_resource_load;
 mod native_resource_manager;
+mod native_script_access;
 mod native_shape;
 mod native_shape_v4;
 mod native_spatial;
 mod native_spring;
 mod native_stack;
+// Unwired raw-runtime modules (#110), as above: tested against the original
+// but not yet called by production. Remove each allow when it is wired.
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_abi;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_alu;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_array_class;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_array_object;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_bootstrap;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_callback;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_class_context;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_class_init;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_context;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_counter;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_dispatch;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_fpu;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_jvm;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_live;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_lookup;
+mod native_vm_metadata;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_namespace;
+mod native_vm_pool;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_resource;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_root;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_runtime;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_signature;
+#[cfg(test)]
+mod native_vm_test_store;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_thread_lifecycle;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_thread_run;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_values;
 mod native_world;
 mod part_render;
 mod parts;
 mod presentation;
 mod resource_identity;
 mod sched;
+#[cfg(test)]
+mod snapshot_harness;
 mod telemetry;
 mod video;
 mod viewport;
@@ -434,7 +526,39 @@ pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmEr
     )
 }
 
+/// Bracket one main-loop phase. A phase without its exit failed inside.
+fn frame_phase(frame: u64, phase: &str, edge: &str) {
+    telemetry::detail(
+        "frame-phase",
+        vec![
+            ("frame".into(), frame.to_string()),
+            ("phase".into(), phase.into()),
+            ("edge".into(), edge.into()),
+        ],
+    );
+}
+
+fn live_native_boundary(
+    context: &slr_vm::host::NativeContext<'_>,
+    info: &CallInfo<'_>,
+) -> Result<(), String> {
+    machine_recording::drain(context.host)?;
+    native_boundary(info)
+}
+
 fn native_boundary(info: &CallInfo<'_>) -> Result<(), String> {
+    if native_body::has_active_native_frame() {
+        let admitted = native_body::inspect_world_memory(|m| {
+            native_nested::admits(m, info.class, info.name, info.sig)
+        })
+        .unwrap_or(false);
+        if admitted {
+            native_diagnostics::admitted(info.class, info.name, info.sig);
+            return Ok(());
+        }
+        native_diagnostics::boundary(info.class, info.name, info.sig, "nested-native");
+        return Err("NativeAbiBoundary: nested VM native entry requires the original callback/interpreter/wrapper CALL context".into());
+    }
     if info.class == "java.lang.GameType"
         && !matches!(
             info.name,
@@ -468,6 +592,40 @@ fn loading_reset(vm: &mut VmHost, _info: &CallInfo<'_>) -> Option<u32> {
     }
     None
 }
+#[cfg(test)]
+mod native_abi_guard_tests {
+    use super::*;
+
+    #[test]
+    fn nested_vm_native_boundary_preserves_parent_scratch_and_returns_an_error() {
+        native_body::clear();
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            args: &[],
+            class: "java.util.resource.GameRef",
+            name: "create",
+            sig: "()Ljava.lang.GameType;",
+        };
+        assert!(native_boundary(&info).is_ok());
+        native_body::with_world_memory(|m| {
+            crate::native_stack::function(m, &[0x12345678], None, |m| {
+                let parent_sp = crate::native_stack::sp(m);
+                m.w32(parent_sp.wrapping_sub(0x40), 0x5a123456);
+                let error =
+                    native_body::during_vm_callback(m, || native_boundary(&info)).unwrap_err();
+                assert!(error.contains("NativeAbiBoundary"));
+                assert!(crate::native_stack::active(m));
+                assert_eq!(crate::native_stack::sp(m), parent_sp);
+                assert_eq!(m.r32(parent_sp.wrapping_sub(0x40)), 0x5a123456);
+            });
+            assert!(!crate::native_stack::active(m));
+        })
+        .unwrap();
+        assert!(native_boundary(&info).is_ok());
+    }
+}
+
 fn resource_set(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let mut words = [0; 2];
     if let Err(error) = slr_vm::host::marshal_args(info, &mut words) {
@@ -553,8 +711,8 @@ fn array_copy(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         return None;
     }
     let (src, src_pos, dst, dst_pos, count) = (w[1], w[2] as i32, w[3], w[4] as i32, w[5] as i32);
-    let src_len = vm.array_cells_mut(src).map(|c| c.len() as i32);
-    let dst_len = vm.array_cells_mut(dst).map(|c| c.len() as i32);
+    let src_len = vm.array_cells(src).map(|c| c.len() as i32);
+    let dst_len = vm.array_cells(dst).map(|c| c.len() as i32);
     let (Some(src_len), Some(dst_len)) = (src_len, dst_len) else {
         vm.native_failure = Some("System.arraycopy: source or destination is not an array".into());
         return None;
@@ -571,15 +729,76 @@ fn array_copy(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             Some("System.arraycopy: negative index faults in the executable".into());
         return None;
     }
-    let words: Vec<u32> = vm.array_cells_mut(src)?[src_pos as usize..(src_pos + count) as usize]
+    let words: Vec<u32> = vm.array_cells(src)?[src_pos as usize..(src_pos + count) as usize]
         .iter()
         .map(|v| v.payload)
         .collect();
-    let cells = vm.array_cells_mut(dst)?;
     for (i, word) in words.into_iter().enumerate() {
-        cells[dst_pos as usize + i].payload = word;
+        if let Err(error) = vm.write_array_payload(dst, dst_pos as usize + i, word) {
+            vm.native_failure = Some(format!("System.arraycopy: {error:?}"));
+            return None;
+        }
     }
     None
+}
+#[cfg(test)]
+mod array_copy_machine_tests {
+    use super::*;
+    use slr_vm::{
+        interp::{HeapSlot, Host},
+        machine::Event,
+    };
+    #[test]
+    fn overlapping_copy_records_ordered_typed_payload_stores() {
+        let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
+        let array = vm.alloc_array("I", 3).unwrap();
+        for (index, payload) in [10, 20, 30].into_iter().enumerate() {
+            vm.write_cell(HeapSlot::Array { word: array, index }, Value::int(payload))
+                .unwrap();
+        }
+        let trace = vm.machine_trace();
+        let before = trace.pending(usize::MAX);
+        trace.acknowledge(before.last().unwrap().sequence).unwrap();
+        let args = [
+            Value::int(2),
+            Value::int(1),
+            Value::reference(array),
+            Value::int(0),
+            Value::reference(array),
+            Value::reference(0),
+        ];
+        let info = CallInfo {
+            jvm: 0,
+            thread: 0,
+            args: &args,
+            class: "java.lang.System",
+            name: "arraycopy",
+            sig: "(Ljava.lang.Object;ILjava.lang.Object;II)V",
+        };
+        assert_eq!(array_copy(&mut vm, &info), None);
+        assert!(vm.native_failure.is_none());
+        assert_eq!(
+            vm.array_cells(array)
+                .unwrap()
+                .iter()
+                .map(|v| v.payload)
+                .collect::<Vec<_>>(),
+            [10, 10, 20]
+        );
+        let events = trace.pending(usize::MAX);
+        assert_eq!(events.len(), 2);
+        for (entry, (index, before, after)) in events.iter().zip([(1, 20, 10), (2, 30, 20)]) {
+            assert_eq!(
+                entry.event,
+                Event::HeapStore {
+                    slot: HeapSlot::Array { word: array, index },
+                    before: Value::int(before),
+                    after: Value::int(after)
+                }
+            );
+        }
+    }
 }
 /// `java.io.File` natives over real VM objects and Strings. The file layer
 /// keeps its own object table (name, handle) and string words, so the VM's
@@ -666,6 +885,7 @@ fn install(vm: &mut VmHost) {
     slr_io::findfile::install(vm);
     slr_io::resid::install(vm);
     slr_resource::node::install(vm);
+    ground_environment::install(vm);
     slr_render_natives::install_headless(vm);
     slr_input::install_headless(vm);
     slr_sound::install_headless(vm);
@@ -717,7 +937,7 @@ fn install(vm: &mut VmHost) {
         .insert(slr_lang::thread::THREAD_START, sched::thread_start);
     vm.native_thread_hook = Some(sched::hook);
     vm.native_observer = Some(observe);
-    vm.native_boundary = Some(native_boundary);
+    vm.native_boundary = Some(live_native_boundary);
     vm.native_impls
         .insert(slr_lang::langobj::system::IS_LOADING_RESET, loading_reset);
     presentation::install(vm);
@@ -747,7 +967,7 @@ fn probe_osd_levels(vm: &mut VmHost) {
         });
         let registered = crate::engine::registered_animate(container.unwrap_or(0));
         println!(
-            "OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?} ptr={ptr:?} container={container:?} animates={registered}"
+            "OSD {word:#x} iLevel={level:?} IL_TIPS={tips:?} ptr={ptr:?} container={container:?} animates={registered:?}"
         );
     }
 }
@@ -884,6 +1104,7 @@ fn run(
     factory::attach_created(link, config)
         .map_err(|e| format!("ConfigChildRegistrationBoundary: {e}"))?;
     println!("BOOT Config native link {link:?}");
+    gc_runtime::configure_config(object)?;
     sched::run_created(
         vm,
         "THRD-CREATE",
@@ -987,7 +1208,10 @@ fn run(
             break;
         }
         telemetry::detail("frame-enter", vec![("frame".into(), frame.to_string())]);
+        frame_phase(frame, "engine-step", "enter");
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
+        frame_phase(frame, "engine-step", "exit");
+        frame_phase(frame, "scheduler-tick", "enter");
         pump.tick(vm).map_err(|f| {
             script_stop(
                 vm,
@@ -996,12 +1220,17 @@ fn run(
                 f.error,
             )
         })?;
+        frame_phase(frame, "scheduler-tick", "exit");
         sched::advance_ms(1000.0 / 60.0);
         if sched::replaying() {
             engine::sample_replayed_animation_time();
         }
+        frame_phase(frame, "animate-pass", "enter");
         engine::animate_pass(vm).map_err(|e| animate_error(frame, e))?;
+        frame_phase(frame, "animate-pass", "exit");
+        frame_phase(frame, "resource-cleanup", "enter");
         factory::cleanup(vm).map_err(|e| format!("resource cleanup frame {frame}: {e}"))?;
+        frame_phase(frame, "resource-cleanup", "exit");
         //428d91/428da0: the declared successful headless device frame
         //increments the same generation that GfxEngine.flush advances.
         slr_render_natives::with_render(|render| render.advance_frame_generation());
@@ -1020,6 +1249,7 @@ fn run(
                 serde_json::json!({"frame":frame,"input_id":live_input::input_id(),"step_ns":started.elapsed().as_nanos()}),
             )?;
         }
+        machine_recording::drain(vm)?;
         telemetry::check()?;
         if let Some(error) = sched::replay_error() {
             return Err(error);
@@ -1263,6 +1493,7 @@ fn execute() -> Result<(), String> {
     project_stock(&root, &files).map_err(|e| format!("ProjectionBoundary: {e}"))?;
     slr_io::reset(&files);
     slr_io::findfile::reset_finds(&files);
+    native_body::configure_image(&root.join("StreetLegal_Redline.exe"))?;
     factory::configure(config_instance_id, game_init_instance_id);
     sched::configure_clock(clock_step);
     if let Some(path) = clock_replay {
@@ -1271,6 +1502,9 @@ fn execute() -> Result<(), String> {
     engine::configure(engine::FrameConfig::default());
     viewport::configure_display();
     let mut vm = VmHost::new();
+    if std::env::var_os("SLR_TRACE_MACHINE").is_some() {
+        machine_recording::start(&mut vm, &output, &run_id)?;
+    }
     // Original Config/field initialization runs before D3D9 device creation
     // under CRT 53-bit precision (ADR 0007); the settings activation below
     // changes this same OS-thread state to 24-bit precision.
@@ -1282,14 +1516,16 @@ fn execute() -> Result<(), String> {
     vm.call_trace = std::env::var_os("SLR_TRACE_CALLS").is_some();
     slr_vm::interp::set_step_trace(std::env::var_os("SLR_TRACE_STEPS").is_some());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(
-            &root,
-            &mut vm,
-            config_instance_id,
-            &output,
-            game_init_instance_id,
-            frames,
-        )
+        slr_vm::clock::with_machine_trace(vm.machine_trace(), || {
+            run(
+                &root,
+                &mut vm,
+                config_instance_id,
+                &output,
+                game_init_instance_id,
+                frames,
+            )
+        })
     }))
     .unwrap_or_else(|panic| {
         // The panic hook already published `crash.json`; keep the message in
@@ -1303,6 +1539,7 @@ fn execute() -> Result<(), String> {
                 .unwrap_or("non-string payload")
         ))
     });
+    machine_recording::drain(&vm)?;
     factory::write_trace(&output)?;
     gc_runtime::write_trace(&output)?;
     RES.with(|r| r.borrow().write_trace(&output))?;
@@ -1321,6 +1558,14 @@ fn execute() -> Result<(), String> {
         format!("{:#?}", vm.constructor_calls),
     )
     .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
+    // A latched clock-replay divergence precedes any later failure in the
+    // same frame; report it first instead of the downstream symptom.
+    let outcome = match (outcome, sched::replay_error()) {
+        (Err(error), Some(replay)) if !error.contains(&replay) => Err(format!(
+            "ClockReplayBoundary (first divergence): {replay}; later failure: {error}"
+        )),
+        (outcome, _) => outcome,
+    };
     if let Err(error) = &outcome {
         telemetry::snapshot(&vm, "failure", Some(error))?;
         if presentation::enabled() {

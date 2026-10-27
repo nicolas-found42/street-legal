@@ -10,3 +10,6 @@ re/x87probe/rosetta/vectors.inc
 
 # runtime output of the hooked exe / wine runs
 /diag.log
+
+# local scratch notes
+/.scratch/

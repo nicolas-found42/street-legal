@@ -283,7 +283,11 @@ fn replay_clock() -> Result<X87, String> {
         v.borrow_mut()
             .as_mut()
             .ok_or("clock replay absent".to_owned())?
-            .read(site, &context, precision, rounding)
+            .read_with_inputs(site, &context, precision, rounding)
+            .map(|(value, input)| {
+                slr_vm::clock::record_counter_input(input);
+                value
+            })
             .map_err(|e| e.to_string())
     });
     if diagnostic {
@@ -464,7 +468,7 @@ pub fn thread_start(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         ));
         return None;
     };
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
     thread.alu.precision = vm.runtime_precision;
     let name = with_threads(|h| h.queues().get(id).name.clone());
     assign_clock_metadata(&mut thread, id, &name);
@@ -498,7 +502,8 @@ pub fn run_created(
     args: &[Value],
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|h| h.queues_mut().spawn(10, 0, name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, 0, name);
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, name);
     let flow = match vm.enter_method(&mut thread, class, receiver, method, args) {
@@ -517,9 +522,9 @@ pub fn run_created(
     match result {
         Ok(()) => {
             with_threads(|h| h.queues_mut().get_mut(id).flags = thread.flags);
-            if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0
-                && flow == Flow::Stay
-            {
+            // Completed script creation threads remain queued until the
+            // driver reaps them and retires their machine/owned state.
+            if flow == Flow::Stay {
                 INTERP.with(|m| m.borrow_mut().insert(id, thread));
             }
             Ok(())
@@ -550,14 +555,15 @@ pub fn run_callback(
     name.truncate(end);
     let flags = u32::from(request_return);
     let id = with_threads(|host| host.queues_mut().spawn(10, flags, &name));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, flags, &name);
     thread.alu.precision = vm.runtime_precision;
     thread.flags = flags;
     assign_clock_metadata(&mut thread, id, &name);
     let outer = CURRENT.with(|current| current.replace(Some(id)));
     with_threads(|host| host.set_current(Some(id)));
     let mut dispatched = None;
-    let result = (|| {
+    let mut result = (|| {
         let flow = vm.enter_method(&mut thread, class, receiver, method, args)?;
         dispatched = Some(flow);
         if flow == Flow::Stay {
@@ -574,25 +580,30 @@ pub fn run_callback(
     })();
     let retained = result.is_ok() && !request_return && dispatched == Some(Flow::Stay);
     if retained {
+        // A void callback stays queued even when it finished: the original
+        // clock tape's driver cursor reaches a STOPPED THRD-RUNVMI thread.
+        // The driver marks it dead and its reaper runs the destructor.
         with_threads(|host| {
             host.queues_mut().get_mut(id).flags = thread.flags;
             host.set_current(outer);
         });
-        if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0 {
-            cache_clock_thread(vm, id, &thread);
-            INTERP.with(|threads| {
-                threads.borrow_mut().insert(id, thread);
-            });
-            CURRENT.with(|current| current.set(outer));
-            return Ok(None);
-        }
-    } else {
-        with_threads(|host| {
-            host.dispose_scoped(id);
-            host.set_current(outer);
+        cache_clock_thread(vm, id, &thread);
+        INTERP.with(|threads| {
+            threads.borrow_mut().insert(id, thread);
         });
-        retire_clock_thread(id);
+        CURRENT.with(|current| current.set(outer));
+        return Ok(None);
     }
+    if result.is_ok() {
+        if let Err(error) = thread.retire() {
+            result = Err(error);
+        }
+    }
+    with_threads(|host| {
+        host.dispose_scoped(id);
+        host.set_current(outer);
+    });
+    retire_clock_thread(id);
     CURRENT.with(|current| current.set(outer));
     result.map_err(|error| (thread, error))
 }
@@ -605,7 +616,8 @@ pub fn run_finalizer(
     receiver: u32,
 ) -> Result<(), (Thread, slr_vm::interp::VmError)> {
     let id = with_threads(|host| host.queues_mut().spawn(10, 1, "THRD-FIN"));
-    let mut thread = Thread::new();
+    let mut thread = vm.new_thread();
+    thread.record_origin(10, 1, "THRD-FIN");
     thread.alu.precision = vm.runtime_precision;
     assign_clock_metadata(&mut thread, id, "THRD-FIN");
     thread.flags = 1;
@@ -801,9 +813,13 @@ impl Pump {
                     std::mem::swap(host.queues_mut(), queues);
                     script
                 });
-                INTERP.with(|threads| {
-                    threads.borrow_mut().remove(&id);
-                });
+                // The deleting destructor releases the reaped thread's owners.
+                if let Some(mut thread) = INTERP.with(|threads| threads.borrow_mut().remove(&id)) {
+                    if let Err(error) = thread.retire() {
+                        aborted.set(true);
+                        reap_error = Some(format!("Thread destructor retire: {error:?}"));
+                    }
+                }
                 retire_clock_thread(id);
                 if let Some(script) = script {
                     let mut host = vm.borrow_mut();
@@ -883,8 +899,207 @@ mod clock_provider_tests {
 mod callback_wrapper_tests {
     use super::*;
 
+    #[test]
+    fn callback_records_live_origin_run_owners_and_retirement_without_stock() {
+        use slr_vm::{
+            machine::Event,
+            values::PoolEvent,
+            vmclass::{Class, Method},
+        };
+        slr_lang::thread::reset();
+        configure_clock(0.0);
+        let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
+        let class = vm.loader.insert_test_class(Class {
+            kind: 0,
+            name: "test.Callback".into(),
+            base: None,
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![
+                Method {
+                    class: "test.Callback".into(),
+                    name: "answer".into(),
+                    sig: "()I".into(),
+                    flags: 9,
+                    static_vector: true,
+                    is_native: false,
+                    is_abstract: false,
+                    body: 0,
+                    extra: 0,
+                },
+                Method {
+                    class: "test.Callback".into(),
+                    name: "finish".into(),
+                    sig: "()V".into(),
+                    flags: 9,
+                    static_vector: true,
+                    is_native: false,
+                    is_abstract: false,
+                    body: 1,
+                    extra: 0,
+                },
+            ],
+            bodies: vec![
+                vec![
+                    slr_fmt_tufa::Node {
+                        opword: 0x1027,
+                        operand: 1,
+                        imm: 37,
+                    },
+                    slr_fmt_tufa::Node {
+                        opword: 0x2b,
+                        operand: 1,
+                        imm: 0,
+                    },
+                ],
+                vec![slr_fmt_tufa::Node {
+                    opword: 0x2a,
+                    operand: 1,
+                    imm: 0,
+                }],
+            ],
+        });
+        let outer = with_threads(|host| {
+            let id = host.queues_mut().spawn(4, 0, "outer");
+            host.set_current(Some(id));
+            id
+        });
+        CURRENT.with(|current| current.set(Some(outer)));
+        let order = with_threads(|host| host.queues().run_order());
+        let result = run_callback(&mut vm, "resource", class, 0, "answer", &[], true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, Value::int(37));
+        let events = vm.machine_trace().pending(usize::MAX);
+        let origin = events
+            .iter()
+            .find(|e| {
+                matches!(&e.event,
+            Event::ThreadOrigin { priority: 10, flags: 1, name, .. }
+            if name == "THRD-RUNVMI resource.answer")
+            })
+            .unwrap();
+        let Event::ThreadOrigin { identity, .. } = origin.event else {
+            unreachable!()
+        };
+        let first_frame = events
+            .iter()
+            .find(|e| {
+                matches!(e.event,
+            Event::Frame { thread, .. } if thread == identity)
+            })
+            .unwrap();
+        assert!(origin.sequence < first_frame.sequence);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event,
+            Event::Run { thread, .. } if thread == identity))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event,
+            Event::Opcode { thread, enter: true, .. } if thread == identity))
+                .count(),
+            2
+        );
+        let allocated = events
+            .iter()
+            .filter_map(|e| match e.event {
+                Event::Pool(PoolEvent::Allocate { cell, .. }) => Some(cell),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!allocated.is_empty());
+        for cell in allocated {
+            assert!(events.iter().any(|e| matches!(e.event,
+                Event::Pool(PoolEvent::Release { cell: released, .. })
+                if released.kind == cell.kind && released.pool == cell.pool
+                    && released.slot == cell.slot && released.generation == cell.generation)));
+        }
+        assert!(events.iter().any(|e| matches!(e.event,
+            Event::ThreadRetire { identity: retired, .. } if retired == identity)));
+        // A finished void callback stays queued STOPPED, as the original
+        // driver cursor shows; its destructor runs only when it is reaped.
+        assert!(
+            run_callback(&mut vm, "resource", class, 0, "finish", &[], false)
+                .unwrap()
+                .is_none()
+        );
+        let events = vm.machine_trace().pending(usize::MAX);
+        let void_identity = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::ThreadOrigin {
+                    identity,
+                    flags: 0,
+                    name,
+                    ..
+                } if name == "THRD-RUNVMI resource.finish" => Some(*identity),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!events.iter().any(|e| matches!(e.event,
+            Event::ThreadRetire { identity, .. } if identity == void_identity)));
+        let queued = with_threads(|host| {
+            assert_eq!(host.current(), Some(outer));
+            let order_now = host.queues().run_order();
+            assert_eq!(order_now.len(), order.len() + 1);
+            let queued = *order_now.last().unwrap();
+            assert_eq!(
+                host.queues().get(queued).name,
+                "THRD-RUNVMI resource.finish"
+            );
+            assert_ne!(
+                host.queues().get(queued).flags & slr_vm::interp::flags::STOPPED,
+                0
+            );
+            host.dispose_scoped(outer);
+            host.set_current(None);
+            queued
+        });
+        assert_eq!(CURRENT.with(|current| current.replace(None)), Some(outer));
+        assert!(INTERP.with(|threads| threads.borrow().contains_key(&queued)));
+        // The driver marks the stopped thread dead and its reaper retires it.
+        Pump::new().tick(&mut vm).map_err(|f| f.error).unwrap();
+        let events = vm.machine_trace().pending(usize::MAX);
+        assert!(events.iter().any(|e| matches!(e.event,
+            Event::ThreadRetire { identity, .. } if identity == void_identity)));
+        assert!(INTERP.with(|threads| threads.borrow().is_empty()));
+        assert!(with_threads(|host| host.queues().run_order().is_empty()));
+
+        run_created(&mut vm, "THRD-CREATE lifecycle", class, 0, "finish", &[]).unwrap();
+        let created = with_threads(|host| *host.queues().run_order().last().unwrap());
+        assert!(INTERP.with(|threads| threads.borrow().contains_key(&created)));
+        let creation_identity = vm
+            .machine_trace()
+            .pending(usize::MAX)
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::ThreadOrigin { identity, name, .. } if name == "THRD-CREATE lifecycle" => {
+                    Some(*identity)
+                }
+                _ => None,
+            })
+            .unwrap();
+        Pump::new().tick(&mut vm).map_err(|f| f.error).unwrap();
+        assert!(vm
+            .machine_trace()
+            .pending(usize::MAX)
+            .iter()
+            .any(|e| matches!(e.event,
+            Event::ThreadRetire { identity, .. } if identity == creation_identity)));
+        assert!(INTERP.with(|threads| threads.borrow().is_empty()));
+        assert!(with_threads(|host| host.queues().run_order().is_empty()));
+    }
+
     fn stock_vm(leaf: &str) -> VmHost {
         let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
         for file in [
             "system/Scripts/lang/Object.class",
@@ -908,6 +1123,7 @@ mod callback_wrapper_tests {
         configure_clock(0.0);
         slr_vm::diagnostics::configure("callback-scalar".into(), 128, None);
         let mut vm = VmHost::new();
+        vm.start_machine_recording().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stock");
         vm.loader
             .load_file_named(&std::fs::read(root.join("system/Scripts/lang/Object.class")).unwrap())
@@ -927,6 +1143,26 @@ mod callback_wrapper_tests {
         .unwrap()
         .unwrap();
         assert_eq!(result.tag.name(), "I");
+        let machine = vm.machine_trace().pending(usize::MAX);
+        let origin = machine
+            .iter()
+            .find(|entry| {
+                matches!(&entry.event,
+            slr_vm::machine::Event::ThreadOrigin { priority: 10, flags: 1, name, .. }
+            if name == "THRD-RUNVMI Config.equals")
+            })
+            .unwrap();
+        let slr_vm::machine::Event::ThreadOrigin { identity, .. } = origin.event else {
+            unreachable!()
+        };
+        let first_frame = machine
+            .iter()
+            .find(|entry| {
+                matches!(entry.event,
+            slr_vm::machine::Event::Frame { thread, .. } if thread == identity)
+            })
+            .unwrap();
+        assert!(origin.sequence < first_frame.sequence);
         with_threads(|host| {
             assert_eq!(host.queues().run_order(), original);
             assert!(host.queues().notify_order().is_empty());
@@ -965,6 +1201,10 @@ mod callback_wrapper_tests {
                 .unwrap()
                 .is_none()
         );
+        let machine = vm.machine_trace().pending(usize::MAX);
+        assert!(machine.iter().any(|entry| matches!(&entry.event,
+            slr_vm::machine::Event::ThreadOrigin { priority: 10, flags: 0, name, .. }
+            if name == "THRD-RUNVMI file.finalize")));
         let id = with_threads(|host| {
             let ids = host.queues().notify_order();
             assert_eq!(ids.len(), 1);

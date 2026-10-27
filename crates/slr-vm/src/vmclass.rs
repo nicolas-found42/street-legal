@@ -1781,6 +1781,12 @@ impl Loader {
         self.machine.note(crate::machine::Event::ClassRegister {
             identity: id.get(),
             module: Some(module_identity),
+            bodies: self.records[id.index()]
+                .body_slots
+                .iter()
+                .copied()
+                .map(crate::interp::BodyId)
+                .collect(),
         });
         Ok((id, name))
     }
@@ -1835,6 +1841,12 @@ impl Loader {
         self.machine.note(crate::machine::Event::ClassRegister {
             identity: id.get(),
             module: None,
+            bodies: self.records[id.index()]
+                .body_slots
+                .iter()
+                .copied()
+                .map(crate::interp::BodyId)
+                .collect(),
         });
         id
     }

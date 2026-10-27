@@ -328,7 +328,10 @@ fn failing_native(vm: &mut VmHost, _info: &CallInfo<'_>) -> Option<u32> {
     vm.native_failure = Some("executed backend failure".into());
     Some(0x5566_7788)
 }
-fn rejecting_boundary(_info: &CallInfo<'_>) -> Result<(), String> {
+fn rejecting_boundary(
+    _: &slr_vm::host::NativeContext<'_>,
+    _info: &CallInfo<'_>,
+) -> Result<(), String> {
     Err("test boundary rejection".into())
 }
 
@@ -644,10 +647,20 @@ fn file_loads_share_file_identity_across_modules_and_never_deduplicate_equal_byt
             let Event::ClassRegister {
                 identity: class,
                 module: Some(source),
+                bodies,
             } = &entries[2 + 2 * ordinal].event
             else {
                 panic!("class must retain its own source module")
             };
+            assert_eq!(
+                bodies,
+                &(0..modules[ordinal].trees(&bytes).unwrap().len())
+                    .map(|index| vm
+                        .loader
+                        .body_id_of(loaded[invocation][ordinal].0, index)
+                        .unwrap())
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(source, identity);
             assert_eq!(*class, loaded[invocation][ordinal].0.get());
             assert_eq!(
@@ -710,4 +723,417 @@ fn malformed_file_attempt_and_single_module_load_keep_distinct_file_origins() {
         [files[1].0, files[2].0],
         "malformed file has no invented parsed module"
     );
+}
+
+#[test]
+fn boundary_receives_live_selected_context_before_any_backend_hook() {
+    fn inspect(
+        context: &slr_vm::host::NativeContext<'_>,
+        info: &CallInfo<'_>,
+    ) -> Result<(), String> {
+        assert_eq!(
+            context.host.loader.class_name(context.defining_class),
+            Some("Base")
+        );
+        assert_eq!(context.method_index, Some(1));
+        assert_eq!(context.implementation, 0x41b860);
+        assert_eq!(context.thread.pc.unwrap().idx, 2);
+        assert_ne!(context.thread.flags & flags::RUNNING, 0);
+        assert_eq!(context.cells, context.host.native_argument_cells().unwrap());
+        assert_eq!(context.cells.len(), 1);
+        assert_eq!(context.cells[0].value, info.args[0]);
+        let events = context.host.machine_trace().pending(usize::MAX);
+        assert!(matches!(&events.last().unwrap().event,
+            Event::NativeEnter { thread, frame, defining_class, cells, .. }
+            if *thread == context.thread.machine_identity
+                && *frame == context.thread.frames.last().map(|f| f.machine_identity())
+                && *defining_class == context.defining_class.get()
+                && cells == context.cells));
+        Err("live context inspected".into())
+    }
+    let (mut vm, mut thread, _, _) = native_host();
+    vm.native_boundary = Some(inspect);
+    vm.native_thread_hook = Some(|_, _| panic!("hook ran before boundary admitted the call"));
+    assert!(run(&mut thread, &mut vm).is_err());
+    assert_eq!(
+        vm.native_failure.as_deref(),
+        Some("Base.method()I: live context inspected")
+    );
+    assert!(
+        vm.native_argument_cells().is_none(),
+        "failed scope must release its owners"
+    );
+}
+
+#[test]
+fn explicit_thread_retirement_releases_owners_once_in_destructor_order() {
+    let vm = VmHost::new();
+    vm.start_machine_recording().unwrap();
+    let mut thread = entered(&vm);
+    let frame = thread.frames[0].machine_identity();
+    let local = thread.new_var(Value::int(13), 0);
+    thread.append_local(local).unwrap();
+    thread.push_new(Value::int(29)).unwrap();
+    thread.retire().unwrap();
+    assert!(thread.frames.is_empty());
+    assert!(thread.pc.is_none());
+    assert_ne!(thread.flags & flags::DEAD, 0);
+    let events = vm.machine_trace().pending(usize::MAX);
+    let retired = events
+        .iter()
+        .position(|e| {
+            matches!(e.event,
+        Event::ThreadRetire { identity, .. } if identity == thread.machine_identity)
+        })
+        .unwrap();
+    let destroyed = events
+        .iter()
+        .position(|e| {
+            matches!(e.event,
+        Event::Frame { phase: FramePhase::Destroy, frame: ref view, .. } if view.identity == frame)
+        })
+        .unwrap();
+    let releases = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e.event, Event::Pool(PoolEvent::Release { .. })).then_some(i))
+        .collect::<Vec<_>>();
+    assert_eq!(releases.len(), 2);
+    assert!(releases.iter().all(|i| retired < *i && *i < destroyed));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e.event, Event::CellAbandon { .. })));
+    thread.retire().unwrap();
+    assert_eq!(
+        thread.push_frame(Frame::new(None, 0)),
+        Err(VmError::MachineContext)
+    );
+    assert_eq!(
+        run(&mut thread, &mut Code(vec![])),
+        Err(VmError::MachineContext)
+    );
+    assert_eq!(vm.machine_trace().pending(usize::MAX), events);
+}
+
+#[test]
+fn nested_boundary_uses_inner_thread_and_restores_outer_argument_owners() {
+    fn inspect(
+        context: &slr_vm::host::NativeContext<'_>,
+        info: &CallInfo<'_>,
+    ) -> Result<(), String> {
+        assert_eq!(context.cells, context.host.native_argument_cells().unwrap());
+        assert_eq!(context.cells.len(), 1);
+        let events = context.host.machine_trace().pending(usize::MAX);
+        let active = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::NativeEnter { thread, cells, .. } => Some((*thread, cells)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active.last().unwrap().0, context.thread.machine_identity);
+        assert_eq!(active.last().unwrap().1, context.cells);
+        if info.name == "inner" {
+            assert_eq!(active.len(), 2);
+            assert_ne!(active[0].0, active[1].0);
+            assert_ne!(active[0].1[0].slot, active[1].1[0].slot);
+            assert_eq!(active[0].1[0].pool, active[1].1[0].pool);
+            assert_eq!(context.method_index, Some(0));
+        }
+        Ok(())
+    }
+    fn outer(vm: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
+        let owners = vm.native_argument_cells().unwrap().to_vec();
+        let class = vm.loader.lookup("Inner").unwrap();
+        let mut inner = vm.new_thread();
+        vm.enter_method(&mut inner, class, 0, "inner", &[]).unwrap();
+        assert_eq!(vm.native_argument_cells().unwrap(), owners);
+        let value = inner.pop_deref_with(vm).unwrap();
+        let result = value.payload;
+        inner.release(value);
+        inner.retire().unwrap();
+        Some(result)
+    }
+    let (mut vm, mut thread, _, _) = native_host();
+    let mut inner = empty_class("Inner", None);
+    inner.methods.push(Method {
+        class: "Inner".into(),
+        name: "inner".into(),
+        sig: "()I".into(),
+        flags: 0x49,
+        static_vector: true,
+        is_native: true,
+        is_abstract: false,
+        body: u32::MAX,
+        extra: 0,
+    });
+    vm.loader.insert_test_class(inner);
+    vm.natives.register("Inner", "inner", "()I", 0x41b870);
+    vm.native_impls.insert(0x41b870, native);
+    vm.native_impls.insert(0x41b860, outer);
+    vm.native_boundary = Some(inspect);
+    run(&mut thread, &mut vm).unwrap();
+    assert!(vm.native_argument_cells().is_none());
+    let value = thread.pop_deref_with(&mut vm).unwrap();
+    assert_eq!(value.payload, 0x1122_3344);
+    thread.release(value);
+    thread.retire().unwrap();
+}
+
+#[test]
+fn class_install_records_empty_owners_and_pinned_dependency_ids_once() {
+    let mut vm = VmHost::new();
+    vm.start_machine_recording().unwrap();
+    vm.loader.insert_test_class(empty_class("Besa", None));
+    vm.loader.insert_test_class(empty_class("Base", None));
+    let base = vm.loader.lookup("Base").unwrap().get();
+    let mut interface = empty_class("Interface", None);
+    interface.kind = 1;
+    vm.loader.insert_test_class(interface);
+    let interface = vm.loader.lookup("Interface").unwrap().get();
+    let mut leaf = empty_class("Leaf", Some("Base"));
+    leaf.interfaces.push("Interface".into());
+    vm.loader.insert_test_class(leaf);
+    let leaf = vm.loader.lookup("Leaf").unwrap().get();
+    vm.alloc_object("Leaf").unwrap();
+    let first = vm.machine_trace().pending(usize::MAX);
+    let installs = first
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            Event::ClassInstall {
+                identity,
+                base,
+                interfaces,
+            } => Some((*identity, *base, interfaces.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        installs,
+        vec![
+            (base, None, vec![]),
+            (interface, None, vec![]),
+            (leaf, Some(base), vec![interface])
+        ]
+    );
+    let leaf_install = first
+        .iter()
+        .position(|entry| matches!(entry.event,Event::ClassInstall {identity,..} if identity==leaf))
+        .unwrap();
+    let object=first.iter().position(|entry|matches!(entry.event,Event::ObjectAllocate {class_context,..} if class_context==leaf)).unwrap();
+    assert!(leaf_install < object);
+    let dependencies = first
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            Event::ClassDependencies {
+                identity,
+                base,
+                interfaces,
+            } => Some((*identity, *base, interfaces.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dependencies,
+        vec![
+            (leaf, Some(base), vec![interface]),
+            (base, None, vec![]),
+            (interface, None, vec![])
+        ]
+    );
+    let leaf_dependencies = first
+        .iter()
+        .position(
+            |entry| matches!(entry.event,Event::ClassDependencies {identity,..} if identity==leaf),
+        )
+        .unwrap();
+    let base_install = first
+        .iter()
+        .position(|entry| matches!(entry.event,Event::ClassInstall {identity,..} if identity==base))
+        .unwrap();
+    assert!(leaf_dependencies < base_install);
+
+    let mut replacement = empty_class("Base", None);
+    replacement.kind = 2;
+    vm.loader.insert_test_class(replacement);
+    assert_ne!(vm.loader.lookup("Base").unwrap().get(), base);
+    vm.alloc_object("Leaf").unwrap();
+    let events = vm.machine_trace().pending(usize::MAX);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ClassInstall { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ClassDependencies { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        vm.initialized_dependencies(slr_vm::vmclass::ClassId::from_raw(leaf).unwrap())
+            .unwrap()
+            .0
+            .unwrap()
+            .get(),
+        base
+    );
+}
+
+#[test]
+fn finalizer_array_clear_retains_elements_before_destruction_and_length_store() {
+    use slr_vm::interp::HeapSlot;
+    let mut vm = VmHost::new();
+    vm.start_machine_recording().unwrap();
+    let array = vm.alloc_array("I", 3).unwrap();
+    for (index, payload) in [7, 11, 13].into_iter().enumerate() {
+        vm.write_array_payload(array, index, payload).unwrap();
+    }
+    let trace = vm.machine_trace();
+    let pending = trace.pending(usize::MAX);
+    trace.acknowledge(pending.last().unwrap().sequence).unwrap();
+    vm.gc_clear_references(array);
+    assert!(vm.array_cells(array).unwrap().is_empty());
+    let events = trace
+        .pending(usize::MAX)
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        vec![
+            Event::ArrayClear {
+                word: array,
+                before: vec![Value::int(7), Value::int(11), Value::int(13)]
+            },
+            Event::HeapStore {
+                slot: HeapSlot::Object {
+                    word: array,
+                    slot: 0
+                },
+                before: Value::int(3),
+                after: Value::int(0)
+            },
+        ]
+    );
+}
+
+#[test]
+fn interpreter_arithmetic_and_boolean_edits_record_afterimages_before_reuse() {
+    let vm = VmHost::new();
+    vm.start_machine_recording().unwrap();
+    let mut thread = entered(&vm);
+    let mut code = Code(vec![
+        node(0x1027, 2),
+        node(0x1027, 3),
+        node(0x1007, 0x10),
+        node(0x1027, 5),
+        node(0x1007, 7),
+        node(0x1015, 11),
+        node(0x1027, 9),
+        node(0x1007, 0x15),
+        node(5, 0),
+        node(0x1027, 99),
+        node(0x10, 0),
+    ]);
+    run(&mut thread, &mut code).unwrap();
+    let result = thread.pop_deref_with(&mut code).unwrap();
+    assert_eq!(result.value(), Value::int(0));
+    thread.release(result);
+    thread.retire().unwrap();
+    let entries = vm.machine_trace().pending(usize::MAX);
+    assert!(!entries
+        .iter()
+        .any(|entry| matches!(entry.event, Event::CellWriteAccess { .. })));
+    let stores = entries
+        .iter()
+        .filter_map(|entry| match entry.event {
+            Event::CellStore { before, after, .. } => Some((before, after)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for expected in [
+        (Value::int(2), Value::int(5)),
+        (Value::int(5), Value::int(1)),
+        (Value::int(9), Value::int(0)),
+    ] {
+        assert!(
+            stores.contains(&expected),
+            "missing owned mutation {expected:?}: {stores:?}"
+        );
+    }
+    for (i, entry) in entries.iter().enumerate() {
+        if let Event::CellStore { identity, .. } = entry.event {
+            assert!(entries[i+1..].iter().any(|later|matches!(&later.event,Event::Pool(slr_vm::values::PoolEvent::Release{cell,..})if cell.pool==identity.pool&&cell.slot==identity.slot&&cell.generation==identity.generation)),"store must precede release of its exact owner");
+        }
+    }
+}
+
+#[test]
+fn class_registration_pins_empty_and_equal_tree_bodies_to_distinct_record_ids() {
+    let mut vm = VmHost::new();
+    vm.start_machine_recording().unwrap();
+    let mut ids = vec![];
+    for kind in [0, 1] {
+        let mut class = empty_class("Repeated", None);
+        class.kind = kind;
+        class.bodies = vec![
+            vec![],
+            vec![node(0x1027, 7), node(0x10, 0)],
+            vec![node(0x1027, 7), node(0x10, 0)],
+        ];
+        ids.push(vm.loader.insert_test_class(class));
+    }
+    let events = vm.machine_trace().pending(usize::MAX);
+    assert_eq!(events.len(), 2);
+    let mut seen = std::collections::HashSet::new();
+    for (entry, owner) in events.iter().zip(ids) {
+        let Event::ClassRegister {
+            identity,
+            module: None,
+            bodies,
+        } = &entry.event
+        else {
+            panic!("expected source registration")
+        };
+        assert_eq!(*identity, owner.get());
+        assert_eq!(bodies.len(), 3);
+        for (index, body) in bodies.iter().enumerate() {
+            assert!(seen.insert(*body));
+            assert_eq!(vm.loader.body_id_of(owner, index), Some(*body));
+            assert_eq!(vm.loader.body_owner(*body), Some(owner));
+        }
+    }
+}
+
+#[test]
+fn recorder_and_producer_acknowledge_independently_without_losing_history() {
+    let trace = Trace::default();
+    trace.start().unwrap();
+    let producer = trace.reader().unwrap();
+    let diagnostic = trace.reader().unwrap();
+    for identity in 0..20000 {
+        trace.note(Event::ThreadCreate { identity });
+    }
+    assert!(
+        trace.reader().is_err(),
+        "a late reader cannot reconstruct missing owner creation"
+    );
+    trace.acknowledge(19999).unwrap();
+    assert!(trace.pending(usize::MAX).is_empty());
+    assert_eq!(producer.pending(usize::MAX).len(), 20000);
+    diagnostic.acknowledge(19999).unwrap();
+    producer.acknowledge(9999).unwrap();
+    assert_eq!(producer.pending(1)[0].sequence, 10000);
+    assert!(producer.acknowledge(9999).is_err());
+    assert!(producer.acknowledge(20000).is_err());
+    assert_eq!(producer.pending(usize::MAX).len(), 10000);
+    producer.acknowledge(19999).unwrap();
+    trace.note(Event::ThreadCreate { identity: 20000 });
+    assert_eq!(producer.pending(1), diagnostic.pending(1));
+    assert_eq!(trace.pending(1), diagnostic.pending(1));
+    assert_eq!(producer.pending(1)[0].sequence, 20000);
 }

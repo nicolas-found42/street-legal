@@ -24,6 +24,7 @@
 //! Scenario inputs, declared rather than observed: the fixed frame interval
 //! and the physics world's maximum step.
 use crate::sched;
+use slr_boot::native_event_route;
 use slr_resource::node::with_res;
 use slr_vm::{
     host::{marshal_args, CallInfo, VmHost},
@@ -38,15 +39,6 @@ const STEP_THRESHOLD: f32 = f32::from_bits(0x38d1_b717);
 pub enum EventArg {
     Int(i32),
     Str(Option<String>),
-}
-
-#[derive(Clone, Debug)]
-struct Notification {
-    listener: u32,
-    mask: u32,
-    kind: u32,
-    arg: Option<String>,
-    name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,9 +73,9 @@ impl Default for FrameConfig {
     }
 }
 
-/// Original436370 clears the render links. The captured zero-initialized
-/// allocator scenario supplies the initial target count, which its constructor
-/// leaves untouched. Nonempty player behavior remains a named boundary.
+/// Retained bounded host projection, pending actual4797d0 raw player storage.
+/// That constructor explicitly clears the target count;436370 is a different
+/// class and cannot establish this layout. Nonempty behavior stays explicit.
 #[derive(Default)]
 struct PlayerFrameState {
     targets: u32,
@@ -96,10 +88,7 @@ struct PlayerFrameState {
 #[derive(Default)]
 struct State {
     masks: HashMap<u32, u32>,
-    notifications: HashMap<u32, Vec<Notification>>,
     timers: Vec<Timer>,
-    /// Registered containers by callback kind (8, 9, 0x1c), in order.
-    callbacks: HashMap<u32, Vec<u32>>,
     sim_time: f32,
     world_acc: f32,
     control_acc: f32,
@@ -121,6 +110,10 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 pub fn configure(config: FrameConfig) {
+    crate::native_body::with_world_memory(|m| {
+        crate::native_callbacks::reset(m, crate::native_callbacks::CONTEXT);
+    })
+    .expect("frame callbacks configured outside native memory lease");
     with(|s| {
         *s = State {
             config,
@@ -208,7 +201,7 @@ pub fn controller_bridge(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         .filter(|container| {
             with_res(|host| {
                 host.container(*container)
-                    .is_some_and(|c| c.type_id == 1 && c.load_state == 1)
+                    .is_some_and(|c| c.type_id == 1 && c.load_state & 1 != 0)
             }) && crate::factory::native_class(*container).as_deref() == Some("player")
         });
     slr_io::input::with_input(|host| {
@@ -282,7 +275,9 @@ pub fn set_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
                     script_of(c)
                 );
             }
-            with(|s| *s.masks.entry(c).or_insert(0) |= mask)
+            if let Err(e) = change_instance_mask(c, mask, true) {
+                return fail(vm, info, e);
+            }
         }
         Err(e) => return fail(vm, info, e),
     }
@@ -297,11 +292,34 @@ pub fn clear_event_mask(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             if std::env::var_os("SLR_DISPATCH_TRACE").is_some() {
                 eprintln!("CLEARMASK container={c:#x} mask={mask:#x}");
             }
-            with(|s| *s.masks.entry(c).or_insert(0) &= !mask)
+            if let Err(e) = change_instance_mask(c, mask, false) {
+                return fail(vm, info, e);
+            }
         }
         Err(e) => return fail(vm, info, e),
     }
     None
+}
+
+fn change_instance_mask(container: u32, bits: u32, set: bool) -> Result<(), String> {
+    let host_mask = with(|s| s.masks.get(&container).copied().unwrap_or(0));
+    let native = matches!(
+        crate::factory::native_class(container).as_deref(),
+        Some("car" | "part" | "cursor" | "player")
+    );
+    let mask = crate::native_body::with_world_memory(|m| {
+        let raw = crate::native_body::raw_resource(m, container)?;
+        let mask = if native {
+            m.r32(raw + 0x148)
+        } else {
+            host_mask
+        };
+        let mask = if set { mask | bits } else { mask & !bits };
+        m.w32(raw + 0x148, mask);
+        Ok::<_, String>(mask)
+    })??;
+    with(|s| s.masks.insert(container, mask));
+    Ok(())
 }
 
 fn add_notification_with(vm: &mut VmHost, info: &CallInfo<'_>, extended: bool) -> Option<u32> {
@@ -323,20 +341,134 @@ fn add_notification_with(vm: &mut VmHost, info: &CallInfo<'_>, extended: bool) -
     let (mask, kind) = (w[2], w[3]);
     let arg = string(vm, w[4]);
     let name = if extended { string(vm, w[5]) } else { None };
-    with(|s| {
-        let list = s.notifications.entry(source).or_default();
-        // FUN_0048b500 first drops an existing record for the same
-        // (listener, mask) pair and appends the new one at the tail.
-        list.retain(|n| !(n.listener == listener && n.mask == mask));
-        list.push(Notification {
+    let result = with_notification_references(source, listener, |m, source, listener| {
+        let argument = store_event_text(m, arg.as_deref());
+        crate::native_notifications::add(
+            m,
+            source,
             listener,
             mask,
             kind,
-            arg,
-            name,
-        });
+            argument,
+            name.as_deref().map(str::as_bytes),
+            &mut crate::native_notifications::Runtime,
+        )
     });
+    if let Err(error) = result {
+        return fail(vm, info, error);
+    }
     None
+}
+
+fn store_event_text(m: &mut slr_physics::space::Space, text: Option<&str>) -> u32 {
+    let Some(text) = text else {
+        return 0;
+    };
+    let pointer = m.malloc(text.len() as u32 + 1);
+    for (i, byte) in text.bytes().enumerate() {
+        m.w8(pointer + i as u32, byte);
+    }
+    m.w8(pointer + text.len() as u32, 0);
+    pointer
+}
+pub(crate) fn read_event_text(m: &slr_physics::space::Space, pointer: u32) -> Option<String> {
+    if pointer == 0 {
+        return None;
+    }
+    let mut bytes = vec![];
+    let mut cursor = pointer;
+    while m.r8(cursor) != 0 {
+        bytes.push(m.r8(cursor));
+        cursor = cursor.wrapping_add(1);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+fn with_notification_references(
+    source: u32,
+    listener: u32,
+    f: impl FnOnce(&mut slr_physics::space::Space, u32, u32) -> Result<u32, String>,
+) -> Result<u32, String> {
+    crate::native_body::with_world_memory(|m| {
+        let source = crate::native_body::raw_resource(m, source)?;
+        let listener = crate::native_body::raw_resource(m, listener)?;
+        let refs = m.alloc(32);
+        crate::native_part::bind_reference(m, refs, source);
+        crate::native_part::bind_reference(m, refs + 16, listener);
+        let result = f(m, refs, refs + 16);
+        crate::native_part::bind_reference(m, refs, 0);
+        crate::native_part::bind_reference(m, refs + 16, 0);
+        result
+    })?
+}
+
+struct NotificationRuntime<'a>(&'a mut VmHost);
+impl native_event_route::NotificationHost for NotificationRuntime<'_> {
+    fn read(&mut self, address: u32) -> Result<u32, String> {
+        crate::native_body::with_world_memory(|m| m.r32(address))
+    }
+    fn forward(
+        &mut self,
+        reference: u32,
+        source: u32,
+        event: u32,
+        argument: u32,
+        name: u32,
+    ) -> Result<(), String> {
+        let (listener, arg, name) = crate::native_body::with_world_memory(|m| {
+            let listener = crate::native_body::logical_resource(m.r32(reference + 12));
+            let arg = if event == 0x0010_0000 || event & 0x0fff_ffff == 0x80 {
+                EventArg::Int(argument as i32)
+            } else {
+                EventArg::Str(read_event_text(m, argument))
+            };
+            let name = if event == 0x0010_0000 {
+                None
+            } else {
+                read_event_text(m, name)
+            };
+            (listener, arg, name)
+        })?;
+        if let Some(listener) = listener {
+            // This host projects source identity as the resource handle; the
+            // raw4265c0 host uses the retained weak-reference address instead.
+            dispatch(self.0, listener, Some(source), event, &arg, name.as_deref())?;
+        }
+        Ok(())
+    }
+    fn destroy_notification(&mut self, node: u32) -> Result<(), String> {
+        crate::native_body::with_world_memory(|m| {
+            crate::native_notifications::destroy(
+                m,
+                node,
+                1,
+                &mut crate::native_notifications::Runtime,
+            );
+        })
+    }
+}
+fn dispatch_notifications(
+    vm: &mut VmHost,
+    container: u32,
+    source: Option<u32>,
+    mask: u32,
+    arg: &EventArg,
+) -> Result<(), String> {
+    let (envelope, argument) = crate::native_body::with_world_memory(|m| {
+        let raw = crate::native_body::raw_resource(m, container)?;
+        let argument = match arg {
+            EventArg::Int(value) => *value as u32,
+            EventArg::Str(text) => store_event_text(m, text.as_deref()),
+        };
+        Ok::<_, String>((raw + 0xd8, argument))
+    })??;
+    native_event_route::walk_notifications(
+        &mut NotificationRuntime(vm),
+        envelope,
+        source.unwrap_or(0),
+        mask,
+        argument,
+        container,
+    )
 }
 
 /// exe: LAB_0047e050 -> FUN_0048b500
@@ -362,16 +494,17 @@ pub fn rem_notification(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
         return None;
     };
     let mask = w[2];
-    with(|s| {
-        if let Some(list) = s.notifications.get_mut(&source) {
-            if let Some(i) = list
-                .iter()
-                .position(|n| n.listener == listener && n.mask == mask)
-            {
-                list.remove(i);
-            }
-        }
-    });
+    if let Err(error) = with_notification_references(source, listener, |m, source, listener| {
+        crate::native_notifications::remove(
+            m,
+            source,
+            listener,
+            mask,
+            &mut crate::native_notifications::Runtime,
+        )
+    }) {
+        return fail(vm, info, error);
+    }
     None
 }
 
@@ -419,7 +552,9 @@ pub fn register_callback(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             if !matches!(kind, 8 | 9 | 0x1c) {
                 return None;
             }
-            with(|s| s.callbacks.entry(kind).or_default().push(c));
+            if let Err(error) = append_callback(c, kind) {
+                return fail(vm, info, error);
+            }
         }
         Err(e) => return fail(vm, info, e),
     }
@@ -430,13 +565,14 @@ pub fn register_callback(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 pub fn unregister_callback(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
     let r = words(info).and_then(|w| Ok((receiver_container(info, &w)?, w[1])));
     match r {
-        Ok((c, kind)) => with(|s| {
-            if let Some(list) = s.callbacks.get_mut(&kind) {
-                if let Some(i) = list.iter().position(|x| *x == c) {
-                    list.remove(i);
-                }
+        Ok((c, kind)) => {
+            let id = with_res(|host| host.container(c).map_or(0, |resource| resource.id));
+            if let Err(error) = crate::native_body::with_world_memory(|m| {
+                crate::native_callbacks::unregister(m, crate::native_callbacks::CONTEXT, id, kind);
+            }) {
+                return fail(vm, info, error);
             }
-        }),
+        }
         Err(e) => return fail(vm, info, e),
     }
     None
@@ -445,6 +581,14 @@ pub fn unregister_callback(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> 
 /// exe: LAB_00481cc0, which forwards to a bare `ret` in build 606.
 pub fn unregister_callbacks(_: &mut VmHost, _: &CallInfo<'_>) -> Option<u32> {
     None
+}
+
+fn append_callback(container: u32, kind: u32) -> Result<(), String> {
+    crate::native_body::with_world_memory(|m| {
+        let raw = crate::native_body::raw_resource(m, container)?;
+        crate::native_callbacks::register(m, crate::native_callbacks::CONTEXT, raw, kind);
+        Ok(())
+    })?
 }
 
 fn new_game_ref(vm: &mut VmHost, container: u32) -> Result<u32, String> {
@@ -503,6 +647,9 @@ pub(crate) fn call_script(
                 &format!("script call {method} on {script:#x}"),
                 error,
             );
+            if let Some(failure) = &vm.native_failure {
+                return format!("{detail}; NativeBackendBoundary: {failure}");
+            }
             match slr_vm::host::last_host_error() {
                 Some(host) => format!("{detail}; last host error: {host}"),
                 None => detail,
@@ -562,20 +709,107 @@ pub(crate) fn query_script(
 
 /// Original427210 queries8,9,28 before appending any callback records.
 pub fn register_created(vm: &mut VmHost, container: u32, _script: u32) -> Result<(), String> {
-    // Player frame storage remains the existing host projection. Configured
-    // car/part instances and script instances use the shared envelope router.
-    let values = if crate::factory::native_class(container).as_deref() == Some("player") {
-        [1, 0, 1]
-    } else {
-        crate::native_query::created_capabilities(vm, container)?
-    };
-    with(|state| {
-        for (kind, value) in [8, 9, 0x1c].into_iter().zip(values) {
-            if value != 0 {
-                state.callbacks.entry(kind).or_default().push(container);
-            }
+    let values = crate::native_query::created_capabilities(vm, container)?;
+    for (kind, value) in [8, 9, 0x1c].into_iter().zip(values) {
+        if value != 0 {
+            append_callback(container, kind)?;
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn deliver_script(
+    vm: &mut VmHost,
+    container: u32,
+    source: Option<u32>,
+    mask: u32,
+    arg: &EventArg,
+    name: Option<&str>,
+) -> Result<(), String> {
+    deliver_script_to(vm, script_of(container), container, source, mask, arg, name)
+}
+
+pub(crate) fn deliver_script_to(
+    vm: &mut VmHost,
+    script: u32,
+    container: u32,
+    source: Option<u32>,
+    mask: u32,
+    arg: &EventArg,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let kind = mask & 0x0fff_ffff;
+    if script == 0 {
+        return Ok(());
+    }
+    if matches!(kind, 1 | 4 | 0x20 | 0x40) {
+        return Err(format!(
+            "event type {kind:#x} carries a physics argument structure that is not modelled"
+        ));
+    }
+    // Original425e16 compares the complete mask. This callback carries one
+    // VM object, before string conversion, GameRef construction or asyncMode.
+    if mask == 0x0010_0000 {
+        let word = match arg {
+            EventArg::Int(word) => *word as u32,
+            EventArg::Str(None) => 0,
+            EventArg::Str(Some(_)) => {
+                return Err("NativeVmBoundary: object event requires a VM object word".into());
+            }
+        };
+        if word != 0
+            && word
+                .checked_sub(0x1000)
+                .and_then(|index| vm.objects.get(index as usize))
+                .is_none()
+        {
+            return Err("NativeVmBoundary: object event has unknown VM identity".into());
+        }
+        return call_script(vm, script, "handleEvent", &[Value::reference(word)]);
+    }
+    // Original425e49 constructs the string before allocating the source ref.
+    let argument = match (kind, arg) {
+        (0x80, EventArg::Int(value)) => Value::int(*value),
+        (0x80, EventArg::Str(None)) => Value::int(0),
+        (0x80, EventArg::Str(Some(_))) => {
+            return Err("NativeVmBoundary: integer event carries a native text address without VM integer identity".into());
+        }
+        (_, EventArg::Int(0)) => Value::reference_named(0, "Ljava.lang.String;"),
+        (_, EventArg::Int(_)) => {
+            return Err("NativeVmBoundary: text event requires a native string conversion".into());
+        }
+        (_, EventArg::Str(text)) => {
+            let word = match text {
+                Some(text) => vm
+                    .intern_string(Some(text.as_bytes()))
+                    .map_err(|e| format!("event string: {e:?}"))?,
+                None => 0,
+            };
+            Value::reference_named(word, "Ljava.lang.String;")
+        }
+    };
+    let origin = source.unwrap_or(container);
+    let game_ref = new_game_ref(vm, origin)?;
+    let asynchronous = vm
+        .read_field(script, "asyncMode")
+        .map(|v| v.payload != 0)
+        .unwrap_or(false);
+    let method = name.unwrap_or(if asynchronous {
+        "handleEventAsync"
+    } else {
+        "handleEvent"
     });
+    let mut args = vec![
+        Value::reference_named(game_ref, "Ljava.util.resource.GameRef;"),
+        Value::int(kind as i32),
+    ];
+    args.push(argument);
+    with(|s| {
+        s.trace.push(format!(
+            "dispatch container={container:#x} type={kind:#x} method={method} arg={arg:?}"
+        ));
+    });
+    call_script(vm, script, method, &args)?;
     Ok(())
 }
 
@@ -592,6 +826,12 @@ pub fn dispatch(
         if let Some(class) = crate::factory::native_class(container) {
             crate::world_scene::command(container, &class, text)?;
         }
+    }
+    if matches!(
+        crate::factory::native_class(container).as_deref(),
+        Some("car" | "part" | "cursor")
+    ) {
+        return crate::native_install_runtime::dispatch(vm, container, source, mask, arg, name);
     }
     let kind = mask & 0x0fff_ffff;
     let is_type1 = with_res(|h| h.container(container).is_some_and(|c| c.type_id == 1));
@@ -630,8 +870,10 @@ pub fn dispatch(
                     call_script(vm, script, "setcontrol", &[])?;
                 }
                 Some("device") => {
-                    // The stock Controller has no addDeviceMapping body. Its native
-                    // mapping is still a declared headless-input gap.
+                    return Err(
+                        "NativePlayerBoundary: original47a920 device command is not integrated"
+                            .into(),
+                    );
                 }
                 Some("camera") => {
                     let id = text
@@ -670,13 +912,15 @@ pub fn dispatch(
                     command @ ("viewport" | "osd" | "renderinstance" | "controllable" | "control"
                     | "uncontrol"),
                 ) => {
-                    with(|state| {
-                        if let Some(player) = state.players.get_mut(&container) {
-                            player.unmodelled_command = Some(command.to_owned());
-                        }
-                    });
+                    return Err(format!(
+                        "NativePlayerBoundary: original47a920 {command} command is not integrated"
+                    ));
                 }
-                _ => {}
+                command => {
+                    return Err(format!(
+                    "NativePlayerBoundary: original47a920 command {command:?} is not integrated"
+                ))
+                }
             }
         }
     }
@@ -687,84 +931,9 @@ pub fn dispatch(
         );
     }
     if instance_mask & mask != 0 && script != 0 && !native_consumed {
-        if matches!(kind, 1 | 4 | 0x20 | 0x40) {
-            return Err(format!(
-                "event type {kind:#x} carries a physics argument structure that is not modelled"
-            ));
-        }
-        let origin = source.unwrap_or(container);
-        let game_ref = new_game_ref(vm, origin)?;
-        let asynchronous = vm
-            .read_field(script, "asyncMode")
-            .map(|v| v.payload != 0)
-            .unwrap_or(false);
-        let method = name.unwrap_or(if asynchronous {
-            "handleEventAsync"
-        } else {
-            "handleEvent"
-        });
-        let mut args = vec![
-            Value::reference_named(game_ref, "Ljava.util.resource.GameRef;"),
-            Value::int(kind as i32),
-        ];
-        match arg {
-            EventArg::Int(v) => args.push(Value::int(*v)),
-            EventArg::Str(text) => {
-                let word = match text {
-                    Some(text) => vm
-                        .intern_string(Some(text.as_bytes()))
-                        .map_err(|e| format!("event string: {e:?}"))?,
-                    None => 0,
-                };
-                args.push(Value::reference_named(word, "Ljava.lang.String;"));
-            }
-        }
-        with(|s| {
-            s.trace.push(format!(
-                "dispatch container={container:#x} type={kind:#x} method={method} arg={arg:?}"
-            ));
-        });
-        call_script(vm, script, method, &args)?;
+        deliver_script(vm, container, source, mask, arg, name)?;
     }
-    let notifications = with(|s| s.notifications.get(&container).cloned().unwrap_or_default());
-    let mut one_shot = Vec::new();
-    for n in notifications {
-        if mask & n.mask == 0 {
-            continue;
-        }
-        let forwarded = if n.kind & 0x0fff_ffff != 0 {
-            n.kind
-        } else {
-            mask
-        };
-        let forwarded_arg = if n.kind & 0x1000_0000 != 0 {
-            EventArg::Str(n.arg.clone())
-        } else {
-            arg.clone()
-        };
-        if source.is_some() && n.mask & 0x4000_0000 != 0 {
-            // Forwarded chains skip records flagged `0x40000000`.
-        } else {
-            dispatch(
-                vm,
-                n.listener,
-                Some(source.unwrap_or(container)),
-                forwarded & 0x0fff_ffff,
-                &forwarded_arg,
-                n.name.as_deref(),
-            )?;
-        }
-        if n.mask & 0x8000_0000 != 0 {
-            one_shot.push((n.listener, n.mask));
-        }
-    }
-    if !one_shot.is_empty() {
-        with(|s| {
-            if let Some(list) = s.notifications.get_mut(&container) {
-                list.retain(|n| !one_shot.contains(&(n.listener, n.mask)));
-            }
-        });
-    }
+    dispatch_notifications(vm, container, source, mask, arg)?;
     Ok(())
 }
 
@@ -825,27 +994,6 @@ fn timer_pass(vm: &mut VmHost) -> Result<(), String> {
     Ok(())
 }
 
-fn with_hook_flags<R>(container: u32, f: impl FnOnce() -> R) -> R {
-    // FUN_0048d1f0/FUN_0048d210: bit 0x100 of the container's flags is cleared
-    // for the duration of the callback and the old bits restored afterwards.
-    let old = with_res(|h| {
-        h.container_mut(container).map(|c| {
-            let old = c.flags;
-            c.flags &= !0x100;
-            old
-        })
-    });
-    let result = f();
-    if let Some(old) = old {
-        with_res(|h| {
-            if let Some(c) = h.container_mut(container) {
-                c.flags |= old;
-            }
-        });
-    }
-    result
-}
-
 fn record_player_frame(container: u32, phase: &str, dt: Option<f32>, supported: bool) {
     if !slr_vm::diagnostics::enabled() {
         return;
@@ -881,6 +1029,7 @@ fn record_player_frame(container: u32, phase: &str, dt: Option<f32>, supported: 
     });
 }
 
+#[cfg(test)]
 fn native_player_control(container: u32) -> Result<(), String> {
     let result = with(|state| {
         let player = state
@@ -897,6 +1046,7 @@ fn native_player_control(container: u32) -> Result<(), String> {
     result
 }
 
+#[cfg(test)]
 fn native_player_animate(container: u32, dt: f32) -> Result<(), String> {
     let result = with(|state| {
         //47a78c stores DAT0063c874 before reading the focus or render links.
@@ -956,66 +1106,49 @@ pub fn notify_render_waiters(vm: &VmHost) -> Result<(), String> {
     Ok(())
 }
 
-/// exe: FUN_004291e0 over the kind-8 list.
+/// Original426c90 control pass over the live kind8 registrations.
 fn control_pass(vm: &mut VmHost, dt: f32) -> Result<(), String> {
-    let list = with(|s| s.callbacks.get(&8).cloned().unwrap_or_default());
-    for container in list {
-        if crate::factory::native_class(container).as_deref() == Some("player") {
-            with_hook_flags(container, || native_player_control(container))?;
-            continue;
-        }
-
-        let script = script_of(container);
-        if script == 0 {
-            continue;
-        }
-        with(|s| {
-            s.trace
-                .push(format!("control container={container:#x} dt={dt}"))
-        });
-        with_hook_flags(container, || {
-            call_script(vm, script, "control", &[Value::float(dt)])
-        })?;
-    }
+    crate::native_body::with_world_memory(|m| {
+        crate::native_frame::control(
+            m,
+            crate::native_callbacks::CONTEXT,
+            dt.to_bits(),
+            &mut Drive { vm },
+        )
+    })??;
     Ok(())
 }
 
 /// exe: FUN_00426fd0 over the kind-0x1c list.
 /// Is `container` on the kind-`0x1c` (`animate`) callback list?
-#[must_use]
-pub fn registered_animate(container: u32) -> bool {
-    with(|s| {
-        s.callbacks
-            .get(&0x1c)
-            .is_some_and(|list| list.contains(&container))
+pub fn registered_animate(container: u32) -> Result<bool, String> {
+    let id = with_res(|h| h.container(container).map_or(0, |r| r.id));
+    crate::native_body::with_world_memory(|m| {
+        crate::native_callbacks::contains(m, crate::native_callbacks::CONTEXT, id, 0x1c)
     })
 }
 
 pub fn animate_pass(vm: &mut VmHost) -> Result<(), String> {
-    let list = with(|s| s.callbacks.get(&0x1c).cloned().unwrap_or_default());
-    for container in list {
-        if crate::factory::native_class(container).as_deref() == Some("player") {
-            let dt = with(|state| state.animation_dt);
-            with_hook_flags(container, || native_player_animate(container, dt))?;
-            continue;
-        }
-
-        let script = script_of(container);
-        if script == 0 {
-            continue;
-        }
-        with(|s| s.trace.push(format!("animate container={container:#x}")));
-        with_hook_flags(container, || call_script(vm, script, "animate", &[]))?;
-    }
+    let dt = with(|state| state.animation_dt);
+    crate::native_body::with_world_memory(|m| {
+        crate::native_frame::animate(
+            m,
+            crate::native_callbacks::CONTEXT,
+            dt.to_bits(),
+            &mut Drive { vm },
+        )
+    })??;
     Ok(())
 }
 
-/// `FUN_00426f60` reached from `4a52d0` dispatches the class vtable's
-/// `+0x30` slot for every kind-9 entry. For every stock class that slot is a
-/// diagnostic (`429d80` writes `"drive"`), never a script call, so the port
-/// keeps the world step and performs no callback.
-struct Drive;
-impl crate::native_spatial::IndexHost for Drive {
+/// Original426f60/426e10 traverses kind9 and selects script or native drive.
+/// The car slot is454500, not the429d80 diagnostic used by some classes.
+/// Resource access and script dispatch use the original426e10 graph. Native
+/// class drive bodies remain explicit at their actual virtual entry points.
+struct Drive<'a> {
+    vm: &'a mut VmHost,
+}
+impl crate::native_spatial::IndexHost for Drive<'_> {
     fn access(
         &mut self,
         memory: &mut slr_physics::space::Space,
@@ -1034,14 +1167,194 @@ impl crate::native_spatial::IndexHost for Drive {
         )
     }
 }
-impl crate::native_dynamics::Host for Drive {
-    fn drive(&mut self, _memory: &mut slr_physics::space::Space, _dt: u32) -> Result<(), String> {
+impl crate::native_frame::Host for Drive<'_> {
+    fn minimum(&mut self, m: &mut slr_physics::space::Space, resource: u32) -> Result<(), String> {
+        crate::native_assets::minimum(m, resource)
+    }
+    fn prepare(
+        &mut self,
+        m: &mut slr_physics::space::Space,
+        resource: u32,
+        flags: u32,
+    ) -> Result<u32, String> {
+        crate::native_assets::prepare(
+            m,
+            resource,
+            crate::native_resource_load::Access {
+                flags,
+                quality: 0,
+                priority: 0,
+                time: 0,
+            },
+        )
+    }
+    fn payload(&mut self, m: &mut slr_physics::space::Space, resource: u32) -> Result<u32, String> {
+        crate::native_assets::data(m, resource)
+    }
+    fn native_drive(
+        &mut self,
+        m: &mut slr_physics::space::Space,
+        class: u32,
+        _body: u32,
+        _dt: u32,
+    ) -> Result<(), String> {
+        // Main performs no native drive callback; the drive virtuals (car
+        // 454500 among them) are not ported yet (#110). Record each skip.
+        slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+            category: "native-callback-skipped".into(),
+            fields: vec![
+                ("class".into(), format!("{class:#010x}")),
+                ("kind".into(), "Drive".into()),
+                (
+                    "virtual".into(),
+                    format!("{:#010x}", m.r32(m.r32(class) + 0x30)),
+                ),
+            ],
+        });
+        Ok(())
+    }
+    fn script_drive(
+        &mut self,
+        m: &mut slr_physics::space::Space,
+        envelope: u32,
+    ) -> Result<(), String> {
+        let script = m.r32(envelope + 0x50);
+        // The drive wrapper site is not validated: nested natives stay rejected.
+        let scope = crate::native_diagnostics::Scope {
+            kind: "drive",
+            envelope,
+            script,
+            method: "drive".into(),
+            validated: false,
+        };
+        crate::native_body::during_vm_callback(m, || {
+            crate::native_nested::within(None, || {
+                crate::native_diagnostics::script_callback(scope, || {
+                    call_script(self.vm, script, "drive", &[])
+                })
+            })
+        })
+    }
+}
+/// Record a native class callback the port does not run yet. Main's animate
+/// pass only animated the native player and script-backed containers; other
+/// native bodies were skipped there too. The event keeps each skip visible.
+fn skip_native_callback(class: u32, kind: crate::native_frame::Callback) -> Result<(), String> {
+    slr_vm::diagnostics::emit(slr_vm::diagnostics::EventKind::External {
+        category: "native-callback-skipped".into(),
+        fields: vec![
+            ("class".into(), format!("{class:#010x}")),
+            ("kind".into(), format!("{kind:?}")),
+        ],
+    });
+    Ok(())
+}
+impl crate::native_frame::CallbackHost for Drive<'_> {
+    fn native_callback(
+        &mut self,
+        m: &mut slr_physics::space::Space,
+        class: u32,
+        body: u32,
+        dt: u32,
+        kind: crate::native_frame::Callback,
+    ) -> Result<(), String> {
+        use crate::native_frame::Callback;
+        match m.r32(class) {
+            // The raw cursor animate (461d20 picking through 4fdc40/516c20)
+            // needs the original renderer/camera lists, which headless boot
+            // does not construct yet (#110); it falls through to the skip below.
+            0x5f11e4 if kind == Callback::Animate => skip_native_callback(class, kind),
+            0x5f11e4 => crate::native_cursor_runtime::frame(m, self.vm, class, body, dt, false),
+            crate::native_player::VTABLE => {
+                let container = crate::native_body::body_container(body)
+                    .ok_or("NativePlayerBoundary: callback body has no live owner")?;
+                if let Some(command) = with(|state| {
+                    state
+                        .players
+                        .get(&container)
+                        .and_then(|player| player.unmodelled_command.clone())
+                }) {
+                    return Err(format!(
+                        "NativePlayerBoundary: pending raw command implementation {command}"
+                    ));
+                }
+                let result = match kind {
+                    Callback::Control => crate::native_player::control(m, class, body, dt),
+                    Callback::Animate => crate::native_player::animate(m, class, body, dt),
+                };
+                if kind == Callback::Animate {
+                    with(|state| state.player_animation_dt = f32::from_bits(m.r32(0x63c874)));
+                }
+                record_player_frame(
+                    container,
+                    if kind == Callback::Control {
+                        "control"
+                    } else {
+                        "animate"
+                    },
+                    (kind == Callback::Animate).then(|| f32::from_bits(dt)),
+                    result.is_ok(),
+                );
+                result
+            }
+            // Classes without a ported native callback keep main's behaviour:
+            // main's animate pass never ran a native body's virtual (#110).
+            _ => skip_native_callback(class, kind),
+        }
+    }
+    fn script_callback(
+        &mut self,
+        m: &mut slr_physics::space::Space,
+        envelope: u32,
+        dt: u32,
+        kind: crate::native_frame::Callback,
+    ) -> Result<(), String> {
+        let Some(script) = crate::native_install_runtime::Runtime::script_target(m, envelope)?
+        else {
+            return Ok(());
+        };
+        let args = if kind == crate::native_frame::Callback::Control {
+            vec![Value::float(f32::from_bits(dt))]
+        } else {
+            vec![]
+        };
+        let method = if kind == crate::native_frame::Callback::Control {
+            "control"
+        } else {
+            "animate"
+        };
+        let entered = crate::native_nested::validate(m, envelope);
+        let scope = crate::native_diagnostics::Scope {
+            kind: method,
+            envelope,
+            script,
+            method: method.into(),
+            validated: entered.is_some(),
+        };
+        crate::native_body::during_vm_callback(m, || {
+            crate::native_nested::within(entered, || {
+                crate::native_diagnostics::script_callback(scope, || {
+                    call_script(self.vm, script, method, &args)
+                })
+            })
+        })
+    }
+}
+
+impl crate::native_dynamics::Host for Drive<'_> {
+    fn drive(&mut self, memory: &mut slr_physics::space::Space, dt: u32) -> Result<(), String> {
+        crate::native_callbacks::walk(
+            memory,
+            crate::native_callbacks::CONTEXT,
+            9,
+            |m, reference| crate::native_frame::drive(m, reference, dt, self),
+        )?;
         Ok(())
     }
 }
 
-fn world_step(dt: f32) -> Result<bool, String> {
-    let mut drive = Drive;
+fn world_step(vm: &mut VmHost, dt: f32) -> Result<bool, String> {
+    let mut drive = Drive { vm };
     let (stepped, now, accumulated) = crate::native_body::with_world_memory(|memory| {
         let stepped = crate::native_dynamics::step(memory, dt.to_bits(), &mut drive)?;
         let world = slr_physics::cfg::PHYSICS_WORLD;
@@ -1085,7 +1398,7 @@ pub fn step(vm: &mut VmHost) -> Result<(), String> {
         } else {
             max_step
         };
-        if !world_step(chunk)? {
+        if !world_step(vm, chunk)? {
             break;
         }
         stepped = true;
@@ -1154,11 +1467,32 @@ fn queue_event(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
             w[2]
         );
     }
-    let arg = EventArg::Str(string(vm, w[3]));
+    let arg = match queue_event_argument(w[2], string(vm, w[3])) {
+        Ok(arg) => arg,
+        Err(error) => return fail(vm, info, error),
+    };
     if let Err(e) = dispatch(vm, target, source, w[2], &arg, None) {
         return fail(vm, info, e);
     }
     None
+}
+
+/// The47da30 wrapper converts its String argument to a C-string address.
+///425c60 can instead interpret that address as an integer or VM object.
+/// Null converts exactly to zero; a live native allocation has no equivalent
+/// VM identity in this host and must not become an arbitrary callback word.
+fn queue_event_argument(mask: u32, text: Option<String>) -> Result<EventArg, String> {
+    if mask == 0x0010_0000 || mask & 0x0fff_ffff == 0x80 {
+        if text.is_some() {
+            return Err(
+                "NativeVmBoundary: queueEvent native text address used as a non-text argument"
+                    .into(),
+            );
+        }
+        Ok(EventArg::Int(0))
+    } else {
+        Ok(EventArg::Str(text))
+    }
 }
 
 #[cfg(test)]
@@ -1307,5 +1641,475 @@ mod render_notify_tests {
         assert_eq!(vm.objects.len(), before);
         notify_render_waiters(&vm).unwrap(); // Empty drains are normal.
         slr_lang::thread::reset();
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod event_argument_tests {
+    use super::*;
+    use slr_vm::vmclass::{Class, Field, Method};
+    thread_local! {
+        static CALLS: RefCell<Vec<(String, String, Vec<u32>)>> = const { RefCell::new(Vec::new()) };
+    }
+    fn observe(_: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
+        let mut words = vec![0; info.args.len()];
+        marshal_args(info, &mut words).unwrap();
+        CALLS.with(|calls| {
+            calls
+                .borrow_mut()
+                .push((info.name.into(), info.sig.into(), words))
+        });
+        None
+    }
+    pub(crate) fn take_calls() -> Vec<(String, String, Vec<u32>)> {
+        CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+    }
+    pub(crate) fn setup(asynchronous: bool) -> (VmHost, u32, u32) {
+        crate::factory::configure(None, None);
+        slr_lang::thread::reset();
+        take_calls();
+        let mut vm = VmHost::new();
+        for name in [
+            "java.lang.Object",
+            "java.lang.String",
+            "java.util.resource.GameRef",
+            "EventHarness",
+        ] {
+            let mut fields = vec![];
+            if name == "java.util.resource.GameRef" || name == "java.lang.String" {
+                fields.push(Field {
+                    class: name.into(),
+                    name: "ptr".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                });
+            }
+            if name == "EventHarness" {
+                fields.push(Field {
+                    class: name.into(),
+                    name: "asyncMode".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                });
+            }
+            let mut methods = vec![];
+            if name == "EventHarness" {
+                for method in ["handleEvent", "handleEventAsync", "overrideHandler"] {
+                    for sig in [
+                        "(Ljava.lang.Object;)V",
+                        "(Ljava.util.resource.GameRef;II)V",
+                        "(Ljava.util.resource.GameRef;ILjava.lang.String;)V",
+                    ] {
+                        methods.push(Method {
+                            class: name.into(),
+                            name: method.into(),
+                            sig: sig.into(),
+                            flags: 0x41,
+                            static_vector: false,
+                            is_native: true,
+                            body: 0,
+                            is_abstract: false,
+                            extra: 0,
+                        });
+                        vm.natives.register(name, method, sig, 0x300f0000);
+                    }
+                }
+            }
+            vm.loader.insert_test_class(Class {
+                kind: 0,
+                name: name.into(),
+                base: (name != "java.lang.Object").then(|| "java.lang.Object".into()),
+                interfaces: vec![],
+                methods,
+                fields,
+                bodies: vec![],
+            });
+        }
+        vm.native_impls.insert(0x300f0000, observe);
+        let script = vm.alloc_object("EventHarness").unwrap();
+        vm.write_field(script, "asyncMode", Value::int(i32::from(asynchronous)))
+            .unwrap();
+        let class = vm.loader.lookup("EventHarness").unwrap();
+        let created = crate::factory::instantiate(
+            &mut vm,
+            None,
+            0,
+            crate::factory::InstanceScript::Existing(script),
+            ("harness", ""),
+            Some("EventHarness"),
+            Some(class),
+        )
+        .unwrap();
+        with_res(|host| {
+            let node = host.add_bound_node(created.id, created.container);
+            host.bind_object(script, node);
+        });
+        (vm, script, created.container)
+    }
+
+    #[test]
+    fn original_script_event_argument_arity_and_conversion_order() {
+        let required_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/script-event-arguments-original.json");
+        if crate::oracle_fixture::file(&required_fixture).is_none() {
+            return;
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../re/out/boot/script-event-arguments-original.json");
+        let capture: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path).expect("run re/oracle/script_event_arguments_probe.py"),
+        )
+        .unwrap();
+        assert_eq!(
+            capture["exe_sha256"],
+            "7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde"
+        );
+        use sha2::{Digest, Sha256};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (field, relative) in [
+            ("exe_sha256", "reference/raw/StreetLegal_Redline.bak.exe"),
+            (
+                "producer_sha256",
+                "re/oracle/script_event_arguments_probe.py",
+            ),
+            ("oracle_sha256", "re/oracle/oracle.py"),
+        ] {
+            let bytes =
+                std::fs::read(root.join(relative)).expect("required original oracle source/input");
+            assert_eq!(
+                capture[field],
+                format!("{:x}", Sha256::digest(bytes)),
+                "{relative} changed; regenerate fixture"
+            );
+        }
+        assert_eq!(
+            capture["configuration"],
+            serde_json::json!({"entry": 0x425c60, "fpu_cw": 0x7f})
+        );
+        let rows = capture["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 112);
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let case = &row["case"];
+            let mask = case["event"].as_u64().unwrap() as u32;
+            let has_argument = case["argument"].as_bool().unwrap();
+            assert!([0x100000, 0x10100000, 0x80, 0x10000080, 0x10, 0x10000010, 0].contains(&mask));
+            assert!(
+                seen.insert((
+                    mask,
+                    has_argument,
+                    case["async"].as_bool().unwrap(),
+                    case["source"].as_bool().unwrap(),
+                    case["name"].as_bool().unwrap()
+                )),
+                "duplicate original scenario"
+            );
+            let (mut vm, script, container) = setup(case["async"].as_bool().unwrap());
+            let original = row["calls"].as_array().unwrap();
+            let callback = original.last().unwrap();
+            assert_eq!(callback["kind"], "callback");
+            assert_eq!(callback["request_return"], 0);
+            assert_eq!(callback["terminator"], 0x4f);
+            let object = if mask == 0x100000 && has_argument {
+                vm.alloc_object("java.lang.Object").unwrap()
+            } else {
+                0
+            };
+            let arg = if mask == 0x100000 {
+                EventArg::Int(object as i32)
+            } else if mask & 0x0fff_ffff == 0x80 {
+                EventArg::Int(row["argument_word"].as_u64().unwrap() as i32)
+            } else {
+                EventArg::Str(has_argument.then(|| "event payload".into()))
+            };
+            let before = vm.objects.len();
+            deliver_script_to(
+                &mut vm,
+                script,
+                container,
+                case["source"].as_bool().unwrap().then_some(container),
+                mask,
+                &arg,
+                case["name"].as_bool().unwrap().then_some("overrideHandler"),
+            )
+            .unwrap();
+            let calls = take_calls();
+            assert_eq!(calls.len(), 1, "{case}");
+            assert_eq!(calls[0].0, callback["method"].as_str().unwrap(), "{case}");
+            let arguments = callback["arguments"].as_array().unwrap();
+            assert_eq!(calls[0].2.len(), arguments.len() + 1, "{case}"); // receiver is first after marshalling
+            assert_eq!(calls[0].2[0], script);
+            if mask == 0x100000 {
+                assert_eq!(
+                    original.len(),
+                    1,
+                    "special event must bypass all conversion collaborators"
+                );
+                assert_eq!(arguments.len(), 1);
+                assert_eq!(arguments[0][0], 4);
+                assert_eq!(calls[0].1, "(Ljava.lang.Object;)V");
+                assert_eq!(calls[0].2[1], object);
+                assert_eq!(
+                    vm.objects.len(),
+                    before,
+                    "special event must not allocate a string or GameRef"
+                );
+            } else {
+                assert_eq!(arguments.len(), 3);
+                assert_eq!(arguments[0], serde_json::json!([4, "GameRef"]));
+                assert_eq!(arguments[1], serde_json::json!([2, mask & 0x0fff_ffff]));
+                assert_eq!(calls[0].2[2], mask & 0x0fff_ffff);
+                let game_ref = calls[0].2[1];
+                let node = vm.read_field(game_ref, "ptr").unwrap().payload;
+                with_res(|host| assert_eq!(host.node(node).unwrap().container, container));
+                if mask & 0x0fff_ffff == 0x80 {
+                    assert_eq!(arguments[2][0], 2);
+                    assert_eq!(calls[0].1, "(Ljava.util.resource.GameRef;II)V");
+                    assert_eq!(calls[0].2[3] as u64, arguments[2][1].as_u64().unwrap());
+                    assert_eq!(game_ref, before as u32 + 0x1000);
+                } else {
+                    assert_eq!(arguments[2][0], 4);
+                    assert_eq!(
+                        calls[0].1,
+                        "(Ljava.util.resource.GameRef;ILjava.lang.String;)V"
+                    );
+                    let string = calls[0].2[3];
+                    if has_argument {
+                        assert_eq!(original[0]["kind"], "string");
+                        assert_eq!(vm.string_bytes(string), Some(b"event payload".as_slice()));
+                        assert_eq!(string, before as u32 + 0x1000);
+                        assert_eq!(
+                            game_ref,
+                            string + 1,
+                            "original converts string before constructing GameRef"
+                        );
+                    } else {
+                        assert_eq!(string, 0);
+                        assert_eq!(game_ref, before as u32 + 0x1000);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn event_kind_controls_overload_and_rejects_unconverted_addresses_before_allocating() {
+        for mask in [0x80, 0x1000_0080, 0x10, 0x1010_0000, 0] {
+            let (mut vm, script, container) = setup(true);
+            let before = vm.objects.len();
+            let wrong = if mask & 0x0fff_ffff == 0x80 {
+                EventArg::Str(Some("native text address".into()))
+            } else {
+                EventArg::Int(1234)
+            };
+            assert!(
+                deliver_script_to(&mut vm, script, container, None, mask, &wrong, None)
+                    .unwrap_err()
+                    .contains("NativeVmBoundary")
+            );
+            assert_eq!(vm.objects.len(), before);
+            assert!(take_calls().is_empty());
+            let null = if mask & 0x0fff_ffff == 0x80 {
+                EventArg::Str(None)
+            } else {
+                EventArg::Int(0)
+            };
+            deliver_script_to(&mut vm, script, container, None, mask, &null, None).unwrap();
+            let calls = take_calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].2[3], 0);
+            assert_eq!(
+                calls[0].1,
+                if mask & 0x0fff_ffff == 0x80 {
+                    "(Ljava.util.resource.GameRef;II)V"
+                } else {
+                    "(Ljava.util.resource.GameRef;ILjava.lang.String;)V"
+                }
+            );
+        }
+        for mask in [0x80, 0x1000_0080, 0x0010_0000] {
+            assert!(queue_event_argument(mask, Some("text".into()))
+                .unwrap_err()
+                .contains("NativeVmBoundary"));
+            assert!(matches!(
+                queue_event_argument(mask, None).unwrap(),
+                EventArg::Int(0)
+            ));
+        }
+        assert!(matches!(
+            queue_event_argument(0x1010_0000, Some("text".into())).unwrap(),
+            EventArg::Str(Some(_))
+        ));
+    }
+
+    #[test]
+    fn object_event_keeps_unmodelled_identity_and_wrong_argument_shape_explicit() {
+        let (mut vm, script, container) = setup(true);
+        deliver_script_to(
+            &mut vm,
+            script,
+            container,
+            None,
+            0x100000,
+            &EventArg::Str(None),
+            Some("overrideHandler"),
+        )
+        .unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![(
+                "handleEvent".into(),
+                "(Ljava.lang.Object;)V".into(),
+                vec![script, 0]
+            )]
+        );
+        for arg in [
+            EventArg::Int(0x300f0000),
+            EventArg::Str(Some("not an object".into())),
+        ] {
+            let before = vm.objects.len();
+            assert!(
+                deliver_script_to(&mut vm, script, container, None, 0x100000, &arg, None)
+                    .unwrap_err()
+                    .contains("NativeVmBoundary")
+            );
+            assert_eq!(vm.objects.len(), before);
+            assert!(take_calls().is_empty());
+        }
+    }
+
+    #[test]
+    fn notification_forward_preserves_full_mask_argument_interpretation() {
+        use native_event_route::NotificationHost;
+        for event in [0x80, 0x1000_0080, 0x0010_0000, 0x1010_0000] {
+            let (mut vm, script, container) = setup(true);
+            let object = vm.alloc_object("java.lang.Object").unwrap();
+            with(|state| {
+                state.masks.insert(container, u32::MAX);
+            });
+            let (reference, argument, name) = crate::native_body::with_world_memory(|m| {
+                let raw = crate::native_body::raw_resource(m, container).unwrap();
+                let reference = crate::native_install::local_reference(m);
+                crate::native_part::bind_reference(m, reference, raw);
+                let argument = if event == 0x0010_0000 {
+                    object
+                } else if event & 0x0fff_ffff == 0x80 {
+                    0xf1234567
+                } else {
+                    store_event_text(m, Some("event payload"))
+                };
+                let name = store_event_text(m, Some("overrideHandler"));
+                (reference, argument, name)
+            })
+            .unwrap();
+            let before = vm.objects.len();
+            NotificationRuntime(&mut vm)
+                .forward(reference, container, event, argument, name)
+                .unwrap();
+            let calls = take_calls();
+            assert_eq!(calls.len(), 1);
+            if event == 0x0010_0000 {
+                assert_eq!(
+                    calls[0],
+                    (
+                        "handleEvent".into(),
+                        "(Ljava.lang.Object;)V".into(),
+                        vec![script, object]
+                    )
+                );
+                assert_eq!(vm.objects.len(), before);
+            } else if event & 0x0fff_ffff == 0x80 {
+                assert_eq!(calls[0].1, "(Ljava.util.resource.GameRef;II)V");
+                assert_eq!(calls[0].2[3], argument);
+            } else {
+                assert_eq!(calls[0].0, "overrideHandler");
+                assert_eq!(
+                    calls[0].1,
+                    "(Ljava.util.resource.GameRef;ILjava.lang.String;)V"
+                );
+                assert_eq!(
+                    vm.string_bytes(calls[0].2[3]),
+                    Some(b"event payload".as_slice())
+                );
+            }
+            crate::native_body::with_world_memory(|m| {
+                crate::native_part::bind_reference(m, reference, 0)
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn physics_event_structures_remain_explicit_before_vm_conversion() {
+        let (mut vm, script, container) = setup(false);
+        let before = vm.objects.len();
+        for mask in [
+            1,
+            4,
+            0x20,
+            0x40,
+            0x1000_0001,
+            0x1000_0004,
+            0x1000_0020,
+            0x1000_0040,
+        ] {
+            assert!(deliver_script_to(
+                &mut vm,
+                script,
+                container,
+                None,
+                mask,
+                &EventArg::Str(Some("structure is not text".into())),
+                None
+            )
+            .unwrap_err()
+            .contains("physics argument structure"));
+            assert_eq!(vm.objects.len(), before);
+            assert!(take_calls().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_frame_boundary_tests {
+    use super::*;
+    use crate::native_dynamics::Host as _;
+    #[test]
+    fn registered_script_drive_cannot_be_silently_omitted() {
+        with(|state| *state = State::default());
+        crate::factory::configure(None, None);
+        let container = crate::factory::create_resource(crate::factory::ResourceDescriptor {
+            kind: 1,
+            flags: 0x110,
+            parent: None,
+            template: None,
+            name: "drive regression",
+        })
+        .unwrap();
+        let mut vm = VmHost::new();
+        let mut driver = Drive { vm: &mut vm };
+        crate::native_body::with_world_memory(|m| {
+            crate::native_callbacks::initialize(m, crate::native_callbacks::CONTEXT);
+            assert!(driver.drive(m, 0).is_ok());
+            let raw = crate::native_body::raw_resource(m, container).unwrap();
+            m.w32(raw + 0x64, 1);
+            m.w32(raw + 0xd8 + 0x50, 0x1000);
+            let id = m.r32(raw + 0x50);
+            let flags = m.r32(raw + 0x54);
+            crate::native_callbacks::register(m, crate::native_callbacks::CONTEXT, raw, 9);
+            assert!(driver
+                .drive(m, 0)
+                .unwrap_err()
+                .contains("script instance has no loaded class"));
+            assert_eq!(
+                m.r32(raw + 0x54),
+                flags,
+                "failed VM callback restores flag scope"
+            );
+            crate::native_callbacks::unregister(m, crate::native_callbacks::CONTEXT, id, 9);
+            assert!(driver.drive(m, 0).is_ok());
+        })
+        .unwrap();
     }
 }

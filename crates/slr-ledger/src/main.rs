@@ -85,6 +85,10 @@ fn collect_suites() -> Vec<Suite> {
             vec!["FUN_00556550", "FUN_00556150", "FUN_005565a0", "FUN_00556710", "FUN_00556bc0", "FUN_00556e00", "FUN_00556ec0", "FUN_00557430", "FUN_00557990", "FUN_005579f0", "FUN_00557aa0", "FUN_00558100", "FUN_00558130", "FUN_00556b10"],
         )]),
         ("slr-boot", "bin:slr-boot", vec![
+            // Complete caller endpoints with the named domain collaborators.
+            // These do not establish production startup or callback admission.
+            ("native_vm_root::tests::source_root_complete_caller_returns_with_explicit_world_and_config_collaborators", vec!["FUN_00427980"]),
+            ("native_vm_root::tests::source_root_complete_world_caller_returns_with_declared_body_entity_collaborators", vec!["FUN_004a5580"]),
             ("native_query::tests::instance_routing_and_registration_match_original_mutating_graphs", vec!["FUN_00426470"]),
             ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
             ("native_car_update::tests::original_active_update_matches_complete_memory_and_call_order", vec!["FUN_00448430", "FUN_0043c520", "FUN_004707d0", "FUN_004479d0"]),

@@ -9,7 +9,7 @@ from fractions import Fraction as F
 from pathlib import Path
 from math import factorial
 import re,json,hashlib
-ROOT=Path(__file__).resolve().parents[2];SOURCE=ROOT/'re/x87probe/experimental/src/intel_trig.rs';text=SOURCE.read_text()
+ROOT=Path(__file__).resolve().parents[2];SOURCE=ROOT/'re/x87probe/model/intel_trig.rs';text=SOURCE.read_text()
 UPSTREAM_PIN='d245c751e6a6fab4bf68e72823598a48001adb3c'
 UPSTREAM_SOURCE_PINS={
  'bochs/cpu/fpu/fsincos.cc':'4544bf8d862188edff834fd88a3186ad00360426d068f0dcecae07ff072c99ff',

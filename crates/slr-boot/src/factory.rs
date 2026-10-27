@@ -26,6 +26,7 @@ struct World {
     template_names: HashMap<u32, String>,
     unload_queue: VecDeque<u32>,
     destroy_queue: VecDeque<u32>,
+    raw_release_nodes: HashMap<u32, u32>,
 }
 
 /// Identity/ownership projection of a headless engine resource. The retained
@@ -115,6 +116,7 @@ pub fn configure(config: Option<u32>, init: Option<u32>) {
             template_names: HashMap::new(),
             unload_queue: VecDeque::new(),
             destroy_queue: VecDeque::new(),
+            raw_release_nodes: HashMap::new(),
             ids,
             library: Root {
                 resource_id: 1,
@@ -210,14 +212,19 @@ fn create(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), String> {
         vm,
         owner_container,
         requested,
-        receiver,
+        InstanceScript::Existing(receiver),
         (&name, &parameters),
         Some(&class_name),
         Some(class),
     )?;
     // 53a2a0 registers callback capabilities before its native wrapper
     // replaces the script's Native.ptr with the newly returned resource link.
-    crate::engine::register_created(vm, instance.container, receiver)?;
+    if !matches!(
+        native_class(instance.container).as_deref(),
+        Some("cursor" | "player")
+    ) {
+        crate::engine::register_created(vm, instance.container, receiver)?;
+    }
     let link = node::bind_existing_script(vm, receiver, instance.container)?;
     println!(
         "BOOT native factory class={class_name} template={:#010x} instance={:#010x} ptr={:#x}",
@@ -232,6 +239,13 @@ pub struct Created {
     pub id: u32,
     pub container: u32,
     pub template: u32,
+}
+
+/// The two original callers have different script-allocation and callback
+/// registration phases. A null existing script cannot select a caller.
+pub enum InstanceScript {
+    Existing(u32),
+    Create,
 }
 
 /// Native descriptor inherited by an instantiated template, if any.
@@ -278,11 +292,16 @@ pub fn instantiate(
     vm: &mut VmHost,
     owner_container: Option<(u32, u32)>,
     requested: u32,
-    script: u32,
+    script: InstanceScript,
     text: (&str, &str),
     default_class_name: Option<&str>,
     default_class: Option<slr_vm::vmclass::ClassId>,
 ) -> Result<Created, String> {
+    let create_script = matches!(script, InstanceScript::Create);
+    let script = match script {
+        InstanceScript::Existing(script) => script,
+        InstanceScript::Create => 0,
+    };
     let (name, parameters) = text;
     // 53a3c5..53a3f7: an unloaded owner is acquired before the new object's
     // native constructor. Reuse the embedding's declared headless load path.
@@ -334,13 +353,24 @@ pub fn instantiate(
             _ => w.game,
         };
         let template = &w.factory.templates[&requested];
-        let configured = template.native_config.clone().map(|path| {
-            (
-                template.native_class.clone().unwrap_or_default(),
+        if create_script && template.class.is_some() && matches!(template.native_class.as_deref(), Some("cursor" | "player")) {
+            return Err("NativeInstanceNewBoundary: script allocation requires original class/object metadata ownership".into());
+        }
+        let configured = if matches!(template.native_class.as_deref(), Some("cursor" | "player")) {
+            Some((
+                template.native_class.clone().expect("matched native class"),
                 template.container,
-                path,
-            )
-        });
+                template.native_config.clone().unwrap_or_default(),
+            ))
+        } else {
+            template.native_config.clone().map(|path| {
+                (
+                    template.native_class.clone().unwrap_or_default(),
+                    template.container,
+                    path,
+                )
+            })
+        };
         Ok::<_, String>((requested, root, configured))
     })?;
     if let Some((class, container, path)) = configured {
@@ -375,14 +405,40 @@ pub fn instantiate(
         let instance = WORLD.with(|world| {
             let mut world = world.borrow_mut();
             let world = world.as_mut().ok_or("factory world is not installed")?;
-            world
-                .factory
-                .allocate_configured_instance(root, requested, script, name, &mut || {
-                    world.ids.allocate()
-                })?
-                .ok_or_else(|| "configured native instance allocation returned zero".to_owned())
+            if matches!(class.as_str(), "cursor" | "player") {
+                world
+                    .factory
+                    .create_instance(root, requested, script, name, &mut || world.ids.allocate())?
+            } else {
+                world.factory.allocate_configured_instance(
+                    root,
+                    requested,
+                    script,
+                    name,
+                    &mut || world.ids.allocate(),
+                )?
+            }
+            .ok_or_else(|| "configured native instance allocation returned zero".to_owned())
         })?;
-        if class == "part" {
+        if matches!(class.as_str(), "cursor" | "player") {
+            if create_script {
+                crate::native_instance_runtime::begin_new(
+                    vm,
+                    prepared,
+                    instance.container,
+                    parameters,
+                    name,
+                )?;
+            } else {
+                crate::native_instance_runtime::begin(
+                    vm,
+                    prepared,
+                    instance.container,
+                    parameters,
+                    name,
+                )?;
+            }
+        } else if class == "part" {
             crate::native_factory::begin_part(vm, prepared, instance.container, parameters)?;
         } else {
             crate::native_factory::begin_car(vm, prepared, instance.container, parameters)?;
@@ -727,6 +783,20 @@ pub fn synchronize_render_template(container: u32, template: u32) -> Result<(), 
 
 /// Original427620/427720 retain a real reference in FIFO deferred queues.
 pub fn schedule_release(container: u32, destroy: bool) -> Result<(), String> {
+    schedule_release_node(container, destroy, None)
+}
+
+/// Pair the raw427620 node with this queue's separately retained identity link.
+/// Cleanup retires that exact raw node even if a prior duplicate invalidates it.
+pub fn schedule_destroy_raw(container: u32, raw_node: u32) -> Result<(), String> {
+    schedule_release_node(container, true, Some(raw_node))
+}
+
+fn schedule_release_node(
+    container: u32,
+    destroy: bool,
+    raw_node: Option<u32>,
+) -> Result<(), String> {
     WORLD.with(|world| {
         let mut world = world.borrow_mut();
         let world = world.as_mut().ok_or("factory world missing")?;
@@ -737,6 +807,9 @@ pub fn schedule_release(container: u32, destroy: bool) -> Result<(), String> {
                 .id;
             Ok::<_, String>(host.add_bound_node(id, container))
         })?;
+        if let Some(raw_node) = raw_node {
+            world.raw_release_nodes.insert(link, raw_node);
+        }
         if destroy {
             world.destroy_queue.push_back(link);
         } else {
@@ -778,6 +851,9 @@ pub fn unload_resource(container: u32) -> Result<(), String> {
             }
             Ok::<_, String>((resource, children))
         })?;
+        if crate::native_body::has_native_body(container) {
+            return Err("NativeBodyBoundary: configured instance requires original53ec20/native class destructor before unload".into());
+        }
         if crate::native_assets::owns_payload(container) {
             return Err("NativeAssetBoundary: loaded render payload requires its original unload/destructor".into());
         }
@@ -826,11 +902,49 @@ pub fn unload_resource(container: u32) -> Result<(), String> {
 /// Deleting resource destructors recycle their actual ID before invalidating
 /// references and recursively deleting children (544700/544e20→5517f0).
 pub fn destroy_resource(container: u32) -> Result<(), String> {
+    // Missing native destructors must fail before recycling an ancestor's ID
+    // or invalidating any references. Forced script unload reaches this path
+    // directly, bypassing unload_resource's payload checks.
+    fn preflight(
+        host: &node::ResHost,
+        container: u32,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> Result<(), String> {
+        if !seen.insert(container) {
+            return Err("ResourceLifecycleBoundary: resource child cycle".into());
+        }
+        let resource = host
+            .container(container)
+            .ok_or("destroy container missing")?;
+        if resource.id >> 16 != 0xffff {
+            return Err("ResourceLifecycleBoundary: fixed package resource destruction".into());
+        }
+        if crate::native_body::has_native_body(container) {
+            return Err("NativeBodyBoundary: configured instance requires original53ec20/native class destructor before unload".into());
+        }
+        if crate::native_assets::owns_payload(container) {
+            return Err("NativeAssetBoundary: loaded render payload requires its original unload/destructor".into());
+        }
+        if resource.type_id == 8 && crate::native_body::has_loaded_template(container) {
+            return Err("NativeTemplateBoundary: configured template unload requires original546c60/native class destructor".into());
+        }
+        let mut child = resource.first_child;
+        while child != 0 && child != resource.children_sentinel {
+            preflight(host, child, seen)?;
+            child = host
+                .container(child)
+                .ok_or("destroy child missing")?
+                .next_sibling;
+        }
+        Ok(())
+    }
+    node::with_res(|host| preflight(host, container, &mut std::collections::HashSet::new()))?;
     fn destroy(
         world: &mut World,
         host: &mut node::ResHost,
         container: u32,
         depth: usize,
+        retired_bindings: &mut Vec<CfgBinding>,
     ) -> Result<(), String> {
         if depth > 256 {
             return Err("ResourceLifecycleBoundary: resource child depth".into());
@@ -868,13 +982,15 @@ pub fn destroy_resource(container: u32) -> Result<(), String> {
                 ("container".into(), container.to_string()),
             ],
         });
+        crate::native_body::invalidate_raw_resource(container)?;
         host.invalidate_container_references(container)?;
         while let Some(child) = host
             .container(container)
             .and_then(|entry| (entry.first_child != 0).then_some(entry.first_child))
         {
-            destroy(world, host, child, depth + 1)?;
+            destroy(world, host, child, depth + 1, retired_bindings)?;
         }
+        retired_bindings.extend(crate::native_body::retire_raw_resource(container)?);
         host.remove_empty_container(container)?;
         world.resources.retain(|entry| entry.container != container);
         world
@@ -890,11 +1006,16 @@ pub fn destroy_resource(container: u32) -> Result<(), String> {
         world.template_names.remove(&container);
         Ok(())
     }
-    WORLD.with(|world| {
+    let mut retired_bindings = vec![];
+    let result = WORLD.with(|world| {
         let mut world = world.borrow_mut();
         let world = world.as_mut().ok_or("factory world missing")?;
-        node::with_res(|host| destroy(world, host, container, 0))
-    })
+        node::with_res(|host| destroy(world, host, container, 0, &mut retired_bindings))
+    });
+    for binding in retired_bindings {
+        release_cfg(binding);
+    }
+    result
 }
 
 /// Original4277f0 drains unload then destroy, repeating for reentrant requests.
@@ -935,6 +1056,17 @@ pub fn cleanup(vm: &mut VmHost) -> Result<(), String> {
                     if destroy {
                         destroy_resource(container)?;
                     }
+                }
+                let raw_node = WORLD.with(|world| {
+                    world
+                        .borrow_mut()
+                        .as_mut()
+                        .and_then(|world| world.raw_release_nodes.remove(&link))
+                });
+                if let Some(raw_node) = raw_node {
+                    crate::native_body::with_world_memory(|m| {
+                        crate::native_message::retire_release_node(m, raw_node)
+                    })?;
                 }
                 node::with_res(|host| host.release_embedded_link(link));
             }
@@ -1069,21 +1201,47 @@ fn game_ref_create_inner(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), Str
         }
         Ok::<_, String>(w.factory.templates[&template_id].class)
     })?;
+    //53a5e0 runs the native constructor before404e20 allocates the script
+    // object. Constructors may synchronously query a parent's script.
+    let created = instantiate(
+        vm,
+        owner_container,
+        template_id,
+        InstanceScript::Create,
+        (&name, &parameters),
+        None,
+        None,
+    )?;
     let script = match class {
         Some(class) if !native_only => vm
             .alloc_object_id(class)
             .map_err(|e| format!("script instance allocation: {e:?}"))?,
         _ => 0,
     };
-    let created = instantiate(
-        vm,
-        owner_container,
-        template_id,
-        script,
-        (&name, &parameters),
-        None,
-        None,
-    )?;
+    WORLD.with(|world| {
+        let mut world = world.borrow_mut();
+        let world = world
+            .as_mut()
+            .ok_or("factory world disappeared during native construction")?;
+        world
+            .factory
+            .instances
+            .get_mut(&created.id)
+            .ok_or("created instance disappeared")?
+            .script = script;
+        node::with_res(|host| {
+            host.container_mut(created.container)
+                .and_then(|c| c.instance.as_mut())
+                .ok_or("created envelope disappeared")?
+                .script = script;
+            Ok::<_, String>(())
+        })
+    })?;
+    crate::native_body::with_world_memory(|m| {
+        let raw = crate::native_body::raw_resource(m, created.container)?;
+        m.w32(raw + 0x128, script);
+        Ok::<_, String>(())
+    })??;
     if script != 0 {
         let node = node::with_res(|h| {
             let n = h.add_bound_node(created.id, created.container);
@@ -1105,7 +1263,12 @@ fn game_ref_create_inner(vm: &mut VmHost, info: &CallInfo<'_>) -> Result<(), Str
             crate::script_stop(vm, &thread, "created instance constructor", e)
         })?;
     }
-    crate::engine::register_created(vm, created.container, script)?;
+    if !matches!(
+        native_class(created.container).as_deref(),
+        Some("cursor" | "player")
+    ) {
+        crate::engine::register_created(vm, created.container, script)?;
+    }
     println!(
         "BOOT created instance template={template_id:#010x} id={:#010x} script={script:#x} native_only={native_only}",
         created.id
@@ -1128,6 +1291,86 @@ pub fn game_ref_create(vm: &mut VmHost, info: &CallInfo<'_>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_mapping_uses_loaded_bit_with_resource_list_membership() {
+        use slr_vm::vmclass::{Class, Field};
+        for (load_state, expected) in [(1, 1), (0x21, 1), (0x61, 1), (0, 0), (0x20, 0)] {
+            configure(None, None);
+            slr_io::input::reset_input();
+            let mut vm = VmHost::new();
+            vm.loader.insert_test_class(Class {
+                kind: 0,
+                name: "java.io.Controller".into(),
+                base: None,
+                interfaces: vec![],
+                fields: vec![Field {
+                    class: "java.io.Controller".into(),
+                    name: "ptr".into(),
+                    ty: "I".into(),
+                    is_static: false,
+                }],
+                methods: vec![],
+                bodies: vec![],
+            });
+            slr_io::input::install(&mut vm);
+            let receiver = vm.alloc_object("java.io.Controller").unwrap();
+            let container = WORLD.with(|world| {
+                let mut world = world.borrow_mut();
+                let world = world.as_mut().unwrap();
+                world
+                    .factory
+                    .install_script_template(0x100, world.library, &ScriptData::default())
+                    .unwrap();
+                world
+                    .factory
+                    .templates
+                    .get_mut(&0x100)
+                    .unwrap()
+                    .native_class = Some("player".into());
+                world
+                    .factory
+                    .create_instance(world.game, 0x100, receiver, "Controller", &mut || {
+                        world.ids.allocate()
+                    })
+                    .unwrap()
+                    .unwrap()
+                    .container
+            });
+            let link = node::with_res(|host| {
+                let id = host.container(container).unwrap().id;
+                let link = host.add_bound_node(id, container);
+                host.bind_object(receiver, link);
+                link
+            });
+            vm.write_field(receiver, "ptr", Value::int(link as i32))
+                .unwrap();
+            node::with_res(|host| host.container_mut(container).unwrap().load_state = load_state);
+            let args = [
+                Value::float(1.),
+                Value::float(0.),
+                Value::float(1.),
+                Value::float(0.),
+                Value::int(200),
+                Value::int(0),
+                Value::int(28),
+                Value::reference(receiver),
+            ];
+            let info = CallInfo {
+                jvm: 0,
+                thread: 0,
+                args: &args,
+                class: "java.io.Controller",
+                name: "user_Add",
+                sig: "(IIIFFFF)I",
+            };
+            assert_eq!(
+                crate::engine::controller_bridge(&mut vm, &info),
+                Some(expected),
+                "load_state={load_state:#x}"
+            );
+        }
+    }
 
     #[test]
     fn original_game_ref_create_keeps_constructor_parameters_and_name_distinct() {
@@ -1318,6 +1561,36 @@ mod tests {
     }
 
     #[test]
+    fn destruction_invalidates_raw_notification_references_and_preserves_other_owners() {
+        configure(None, None);
+        let victim = runtime(1, None, None);
+        let survivor = runtime(1, None, None);
+        let (raw, other, links) = crate::native_body::with_world_memory(|m| {
+            let raw = crate::native_body::raw_resource(m, victim).unwrap();
+            let other = crate::native_body::raw_resource(m, survivor).unwrap();
+            let links = m.alloc(48);
+            for (offset, target) in [(0, raw), (16, other), (32, raw)] {
+                crate::native_part::bind_reference(m, links + offset, target);
+            }
+            (raw, other, links)
+        })
+        .unwrap();
+        destroy_resource(victim).unwrap();
+        crate::native_body::with_world_memory(|m| {
+            assert_eq!(m.r32(raw + 0x48), 0);
+            for offset in [0, 32] {
+                for field in [0, 4, 8, 12] {
+                    assert_eq!(m.r32(links + offset + field), 0);
+                }
+            }
+            assert_eq!(m.r32(other + 0x48), links + 16);
+            assert_eq!(m.r32(links + 28), other);
+            assert_ne!(m.r32(links + 24), 0);
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn render_template_retarget_survives_old_template_destruction_and_can_clear() {
         configure(None, None);
         let old = runtime(14, None, None);
@@ -1373,6 +1646,55 @@ mod tests {
             assert_eq!(host.container(first).unwrap().id, instance_id);
             assert_eq!(host.container(second).unwrap().id, template_id);
             assert_eq!(host.container(first).unwrap().next_sibling, second);
+        });
+    }
+
+    #[test]
+    fn raw_deferred_destroy_nodes_and_duplicate_references_drain_with_logical_queue() {
+        configure(None, None);
+        let resource = runtime(2, None, None);
+        let nodes = crate::native_body::with_world_memory(|m| -> Result<[u32; 2], String> {
+            let raw = crate::native_body::raw_resource(m, resource)?;
+            let template = m.alloc(0x126c);
+            let body = m.alloc(0x130);
+            m.w32(template, 0x5f0f60);
+            m.w32(template + 0x120, 1);
+            m.w32(raw + 0x64, 1);
+            m.w32(raw + 0x68, 1f32.to_bits());
+            m.w32(raw + 0x74, m.r32(0x6200a4));
+            crate::native_part::bind_reference(m, body + 0x1c, raw);
+            let mut nodes = [0; 2];
+            for node in &mut nodes {
+                crate::native_message::query(m, template, body, true, 11, 0)?;
+                *node = m.r32(0x636338 + 0x88);
+            }
+            assert_eq!(m.r32(0x636338 + 0xd4), 2);
+            Ok(nodes)
+        })
+        .unwrap()
+        .unwrap();
+        assert_ne!(nodes[0], nodes[1]);
+        cleanup(&mut VmHost::new()).unwrap();
+        node::with_res(|host| assert!(host.container(resource).is_none()));
+        crate::native_body::with_world_memory(|m| {
+            assert_eq!(m.r32(0x636338 + 0x78), 0x636338 + 0x80);
+            assert_eq!(m.r32(0x636338 + 0x88), 0x636338 + 0x74);
+            assert_eq!(m.r32(0x636338 + 0xd4), 0);
+            for node in nodes {
+                assert_eq!(m.r32(node), 0x5f09ac);
+                for off in [4, 8, 12, 16, 20, 24] {
+                    assert_eq!(m.r32(node + off), 0);
+                }
+            }
+        })
+        .unwrap();
+        WORLD.with(|world| {
+            assert!(world
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .raw_release_nodes
+                .is_empty())
         });
     }
 
@@ -1437,7 +1759,7 @@ mod tests {
             &mut vm,
             None,
             0,
-            7,
+            InstanceScript::Existing(7),
             ("arbitrary instance", ""),
             Some("java.render.SimpleLoadingDialog"),
             slr_vm::vmclass::ClassId::from_raw(17),

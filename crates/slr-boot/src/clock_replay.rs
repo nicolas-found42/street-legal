@@ -439,6 +439,19 @@ impl Replay {
         precision: Precision,
         rounding: Rounding,
     ) -> Result<X87> {
+        self.read_with_inputs(site, context, precision, rounding)
+            .map(|(value, _)| value)
+    }
+    /// Consume one validated request and expose the actual numeric inputs for
+    /// a source interpreter consuming the same request. No second tape read,
+    /// pending/peek admission or clock answer replay is involved.
+    pub fn read_with_inputs(
+        &mut self,
+        site: ClockSite,
+        context: &RequestContext,
+        precision: Precision,
+        rounding: Rounding,
+    ) -> Result<(X87, slr_vm::clock::CounterInput)> {
         if let Some(e) = &self.failure {
             return Err(e.clone());
         }
@@ -494,7 +507,7 @@ impl Replay {
         context: &RequestContext,
         precision: Precision,
         rounding: Rounding,
-    ) -> Result<X87> {
+    ) -> Result<(X87, slr_vm::clock::CounterInput)> {
         if !self.selected {
             return Err(err("select replay segment before reading"));
         }
@@ -566,7 +579,16 @@ impl Replay {
             }
         }
         self.position += 1;
-        Ok(result)
+        Ok((
+            result,
+            slr_vm::clock::CounterInput {
+                ordinal: sample.ordinal,
+                frequency: sample.frequency,
+                counter: sample.counter,
+                baseline: sample.baseline,
+                source_control: sample.cw,
+            },
+        ))
     }
 }
 
@@ -604,6 +626,55 @@ mod tests {
             failure: None,
             source_facts_sha256: String::new(),
         }
+    }
+    #[test]
+    fn consumed_numeric_inputs_are_shared_without_advancing_the_tape_twice() {
+        let mut replay = replay(vec![
+            sample(ClockSite::ThreadEnter, 1, 1000),
+            sample(ClockSite::ThreadExit, 2, 2000),
+        ]);
+        replay.select_start().unwrap();
+        let (value, input) = replay
+            .read_with_inputs(
+                ClockSite::ThreadEnter,
+                &RequestContext::default(),
+                Precision::F32,
+                Rounding::NearestEven,
+            )
+            .unwrap();
+        assert_eq!(value, X87::from_i64(990));
+        assert_eq!(replay.consumed(), 1);
+        assert_eq!(
+            input,
+            slr_vm::clock::CounterInput {
+                ordinal: 1,
+                frequency: 1000,
+                baseline: 10,
+                counter: 1000,
+                source_control: 0x3f
+            }
+        );
+        assert_eq!(replay.pending().unwrap().ordinal, 2);
+        let error = replay
+            .read_with_inputs(
+                ClockSite::ThreadEnter,
+                &RequestContext::default(),
+                Precision::F32,
+                Rounding::NearestEven,
+            )
+            .unwrap_err();
+        assert_eq!(replay.consumed(), 1);
+        assert_eq!(
+            replay
+                .read_with_inputs(
+                    ClockSite::ThreadExit,
+                    &RequestContext::default(),
+                    Precision::F32,
+                    Rounding::NearestEven
+                )
+                .unwrap_err(),
+            error
+        );
     }
     #[test]
     fn computes_from_counter_inputs_and_rejects_exhaustion() {

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use slr_x87::{Precision, Rounding, X87};
 
 /// The original caller whose clock request is currently being evaluated.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub enum ClockSite {
     /// A caller that has not supplied clock metadata.
     #[default]
@@ -98,13 +98,23 @@ impl ClockSite {
 
 /// The actual port interpreter thread and current script location. This is
 /// diagnostic request metadata, never copied from an oracle capture.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ThreadContext {
     pub id: u64,
     pub name: Option<String>,
     pub class: Option<String>,
     pub method: Option<String>,
     pub node_index: Option<u64>,
+}
+/// A successfully validated external counter read. These are numeric QPF/QPC
+/// inputs, never a clock/native answer. Replayers publish only consumed reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CounterInput {
+    pub ordinal: u64,
+    pub frequency: i64,
+    pub counter: i64,
+    pub baseline: i64,
+    pub source_control: u16,
 }
 static NEXT_EPHEMERAL: AtomicU64 = AtomicU64::new(1);
 /// Temporary interpreter identities cannot collide with boot queue identities.
@@ -118,9 +128,34 @@ thread_local! {
     static THREAD_CONTEXT: RefCell<Vec<ThreadContext>> = const { RefCell::new(Vec::new()) };
     static DRIVER_CURSOR: Cell<Option<usize>> = const { Cell::new(None) };
     static CONTROLS: Cell<(Precision,Rounding)> = const { Cell::new((Precision::F32,Rounding::NearestEven)) };
+    static MACHINE:RefCell<Option<crate::machine::Trace>>=const{RefCell::new(None)};
     static SITE: Cell<ClockSite> = const { Cell::new(ClockSite::Unspecified) };
 }
 
+/// Attach the current run's causal stream without sampling a clock. Nested
+/// callbacks restore the previous trace on success, failure and panic.
+pub fn with_machine_trace<R>(trace: crate::machine::Trace, operation: impl FnOnce() -> R) -> R {
+    struct Restore(Option<crate::machine::Trace>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MACHINE.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(MACHINE.with(|slot| slot.replace(Some(trace))));
+    operation()
+}
+pub fn record_counter_input(input: CounterInput) {
+    MACHINE.with(|slot| {
+        if let Some(trace) = slot.borrow().as_ref().filter(|trace| trace.enabled()) {
+            trace.note(crate::machine::Event::ClockInput {
+                site: current_site(),
+                input,
+                thread: current_thread_context(),
+                driver_cursor: current_driver_cursor(),
+            });
+        }
+    });
+}
 /// The requesting site, visible only while its provider is being called.
 #[must_use]
 pub fn current_site() -> ClockSite {
@@ -215,6 +250,51 @@ pub fn read(clock: &mut dyn FnMut() -> X87, site: ClockSite) -> X87 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn counter_input_scope_restores_the_actual_machine_owner_after_unwind() {
+        let outer = crate::machine::Trace::default();
+        outer.start().unwrap();
+        let inner = crate::machine::Trace::default();
+        inner.start().unwrap();
+        let input = |ordinal| CounterInput {
+            ordinal,
+            frequency: 1000000,
+            counter: 1000000 + ordinal as i64,
+            baseline: 1000000,
+            source_control: 0x23f,
+        };
+        with_machine_trace(outer.clone(), || {
+            with_site(ClockSite::ThreadEnter, || {
+                record_counter_input(input(1));
+                let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_machine_trace(inner.clone(), || {
+                        with_site(ClockSite::SystemCurrentTime, || {
+                            record_counter_input(input(2));
+                            panic!("injected source callback failure");
+                        })
+                    })
+                }));
+                assert!(failed.is_err());
+                record_counter_input(input(3));
+            })
+        });
+        record_counter_input(input(4));
+        let events = |trace: &crate::machine::Trace| {
+            trace
+                .pending(usize::MAX)
+                .into_iter()
+                .map(|entry| match entry.event {
+                    crate::machine::Event::ClockInput { site, input, .. } => (site, input.ordinal),
+                    _ => panic!("unexpected owner event"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            events(&outer),
+            [(ClockSite::ThreadEnter, 1), (ClockSite::ThreadEnter, 3)]
+        );
+        assert_eq!(events(&inner), [(ClockSite::SystemCurrentTime, 2)]);
+    }
     use crate::{
         interp::{BodyId, Frame, Host, Pc, Thread},
         sched::{CallbackRun, FinalizerQueues, SchedExit, Scheduler},
