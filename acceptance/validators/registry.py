@@ -43,6 +43,8 @@ class Context:
     boot_bundle: Path | None = None
     live_ids: frozenset[str] = field(default_factory=frozenset)
 
+    options: dict = field(default_factory=dict)
+
     @property
     def id(self) -> str:
         return self.row["id"]
@@ -156,7 +158,7 @@ def checked(rid: str, outcome) -> dict:
     return outcome
 
 
-def evaluate(rows: list[dict], *, boot_bundle: Path | None = None, execute=(), output_root: Path | None = None) -> list[dict]:
+def evaluate(rows: list[dict], *, boot_bundle: Path | None = None, execute=(), output_root: Path | None = None, options: dict | None = None) -> list[dict]:
     """Compute actual results for ``rows``. Only registered validators can pass."""
     registry = load_all()
     execute = frozenset(execute)
@@ -172,7 +174,7 @@ def evaluate(rows: list[dict], *, boot_bundle: Path | None = None, execute=(), o
     by_id = {entry["id"]: entry for entry in results}
     rows_by_id = {row["id"]: row for row in rows}
     for rid in order([rid for rid in by_id if rid in registry]):
-        context = Context(rows_by_id[rid], by_id, execute, output_root, boot_bundle, live)
+        context = Context(rows_by_id[rid], by_id, execute, output_root, boot_bundle, live, dict(options or {}))
         try:
             outcome = checked(rid, registry[rid].fn(context))
         except Exception as error:  # fail closed: a crashing validator is a failed row

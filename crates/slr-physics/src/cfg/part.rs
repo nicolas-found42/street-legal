@@ -1172,8 +1172,8 @@ pub fn lods2(c: &mut Ctx, line: &[u8]) {
     c.w(e + 12, y);
 }
 
-/// `skinned a b c`: three floats into `K+0x11bc/0x11c0/0x11c4` and the flag at
-/// `K+0x11b8 = 1`.
+/// `skinned a b c`: three floats scanned straight into `K+0x11bc/0x11c0/0x11c4` (a value that
+/// does not convert leaves its cell untouched) and the flag at `K+0x11b8 = 1`.
 ///
 /// exe: FUN_0046d840
 pub fn skinned(c: &mut Ctx, line: &[u8]) {
@@ -1181,9 +1181,9 @@ pub fn skinned(c: &mut Ctx, line: &[u8]) {
         return;
     }
     let s = scan(line, "%f %f %f");
-    c.w(c.k + 0x11bc, s.fb(0).unwrap_or(0));
-    c.w(c.k + 0x11c0, s.fb(1).unwrap_or(0));
-    c.w(c.k + 0x11c4, s.fb(2).unwrap_or(0));
+    c.put(c.k + 0x11bc, s.fb(0));
+    c.put(c.k + 0x11c0, s.fb(1));
+    c.put(c.k + 0x11c4, s.fb(2));
     c.kw(0x11b8, 1);
 }
 
@@ -1228,6 +1228,23 @@ mod tests {
         let mut host = NoCalls;
         let mut c = Ctx::new(m, &mut host, k);
         h(&mut c, line);
+    }
+
+    /// `skinned` scans straight into the car object: a value that does not convert leaves its
+    /// cell as it was (the Unicorn leaf vectors found the port zeroing it), and the flag is set
+    /// regardless.
+    #[test]
+    fn skinned_leaves_unconverted_cells_untouched() {
+        let mut m = Space::new();
+        let k = car(&mut m);
+        for (cell, value) in [(0x11bc, 0x1111), (0x11c0, 0x2222), (0x11c4, 0x3333)] {
+            m.w32(k + cell, value);
+        }
+        run(&mut m, k, skinned, b"skinned\x001 nan 2.5");
+        assert_eq!(m.r32(k + 0x11bc), 1.0f32.to_bits());
+        assert_eq!(m.r32(k + 0x11c0), 0x2222);
+        assert_eq!(m.r32(k + 0x11c4), 0x3333);
+        assert_eq!(m.r32(k + 0x11b8), 1);
     }
 
     /// `K + 0xfa8` counts body records of `0x74` bytes starting at `K+0x128`; the "current

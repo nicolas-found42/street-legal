@@ -280,6 +280,7 @@ fn leaf_handler(addr: u32) -> Option<Handler> {
         0x46d400 => logo,
         0x46d470 => mesh2,
         0x46d7a0 => lods2,
+        0x46d840 => skinned,
         0x46da30 => stockpart2,
         _ => return None,
     };
@@ -312,10 +313,11 @@ fn cfg_leaves_match_unicorn_vectors() {
     // the second group onwards sees the previous group's allocations.
     let groups: Vec<(String, serde_json::Value)> = ["leaves_car.jsonl", "leaves_part.jsonl"]
         .iter()
-        .filter_map(|name| {
-            std::fs::read_to_string(dir.join(name))
-                .ok()
-                .map(|text| (name.to_string(), text))
+        .map(|name| {
+            let text = std::fs::read_to_string(dir.join(name))
+                .unwrap_or_else(|_| panic!("incomplete cfg leaf fixtures: {name}"));
+            assert!(!text.trim().is_empty(), "empty cfg leaf fixtures: {name}");
+            (name.to_string(), text)
         })
         .flat_map(|(name, text)| {
             text.lines()
@@ -525,4 +527,22 @@ fn cfg_leaves_direct_match_unicorn_vectors() {
         bad.len(),
         &bad[..bad.len().min(5)]
     );
+}
+
+#[test]
+fn incomplete_leaf_fixture_cannot_report_a_passing_comparison() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("slr-incomplete-leaves-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("init.json"), "{}").unwrap();
+    std::fs::write(dir.join("leaves_car.jsonl"), "{}\n").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["cfg_leaves_match_unicorn_vectors", "--exact", "--nocapture"])
+        .env("SLR_CFG_HANDLER_VECTORS", &dir)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(!output.status.success(), "partial leaf capture passed");
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("incomplete cfg leaf fixtures: leaves_part.jsonl"));
 }
