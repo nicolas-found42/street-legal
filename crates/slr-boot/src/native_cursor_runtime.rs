@@ -80,7 +80,7 @@ impl native_cursor::Host for Runtime<'_> {
         native_install_runtime::query_reference(m, self.vm, reference, message, argument)
     }
     fn pick(&mut self, m: &mut Space, arguments: [u32; 10]) -> Result<u32, String> {
-        crate::native_cursor_pick::pick(m, arguments, &mut WorldRay)
+        pick_memory(m, arguments)
     }
     fn place(
         &mut self,
@@ -127,9 +127,15 @@ impl native_cursor::Host for Runtime<'_> {
     }
 }
 
+/// The same live48d450 adapter used by the cursor host, with caller-owned
+/// native memory and real resource loading. No captured results are consulted.
+pub(crate) fn pick_memory(m: &mut Space, arguments: [u32; 10]) -> Result<u32, String> {
+    crate::native_cursor_pick::pick(m, arguments, &mut WorldRay)
+}
+
 /// Picking traverses the actual retained renderer/camera lists before asking
-/// the world for a ray hit. Original49e3d0 runs; its nonempty49e710 tree
-/// collaborator retains an explicit boundary until implemented.
+/// the world for a ray hit. Original49e3d0 and its nonempty49e710 resource tree run through the
+/// live resource loader and the original sphere/box/mesh ray kernels.
 struct WorldRay;
 impl crate::native_cursor_pick::Host for WorldRay {
     fn ray(
@@ -139,6 +145,8 @@ impl crate::native_cursor_pick::Host for WorldRay {
         selection: u32,
         limit: &mut u32,
     ) -> Result<u32, String> {
+        #[cfg(test)]
+        crate::native_ray_test_support::record_query(m.r32(0x617650), ray, selection, *limit);
         crate::native_world_ray::query(
             m,
             m.r32(0x617650),
@@ -150,9 +158,19 @@ impl crate::native_cursor_pick::Host for WorldRay {
     }
 }
 struct WorldTree;
+impl crate::native_world_tree::Host for WorldTree {
+    fn data(
+        &mut self,
+        m: &mut Space,
+        resource: u32,
+        args: crate::native_resource_load::Access,
+    ) -> Result<u32, String> {
+        crate::native_assets::access(m, resource, args)
+    }
+}
 impl crate::native_world_ray::Host for WorldTree {
-    fn traverse(&mut self, _m: &mut Space, _world: u32, _tree: u32) -> Result<u32, String> {
-        Err("NativeCursorPickBoundary: original49e710 nonempty world tree traversal is not implemented".into())
+    fn traverse(&mut self, m: &mut Space, world: u32, tree: u32) -> Result<u32, String> {
+        crate::native_world_tree::tree_query(m, world, tree, self)
     }
 }
 

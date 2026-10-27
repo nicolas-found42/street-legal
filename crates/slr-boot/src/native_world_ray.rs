@@ -1,6 +1,6 @@
 //! Original49e3d0 ray setup, hit-global ownership and hit-point conversion.
-//! The49e710 tree traversal is a live collaborator; an unimplemented nonempty
-//! tree must return an error rather than manufacture a no-hit observation.
+//! Resource-tree selection is a live collaborator; its loading/kernel failures
+//! propagate instead of manufacturing a no-hit observation.
 use slr_physics::space::Space;
 use slr_x87::{Precision, Rounding, X87};
 const PC: Precision = Precision::F32;
@@ -398,7 +398,7 @@ mod genuine_tests {
         }
     }
     #[test]
-    fn missing_nonempty_tree_implementation_is_an_error() {
+    fn tree_host_errors_propagate_without_fake_no_hit() {
         let mut m = Space::new();
         let selection = 0x20000100;
         m.w32(selection + 12, 0x20000200);
