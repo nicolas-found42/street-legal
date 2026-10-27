@@ -343,7 +343,10 @@
         "D"
       ],
       "status": "open",
-      "evidence": []
+      "evidence": [
+        "crates/slr-fmt-video/src/player.rs",
+        "docs/window.md"
+      ]
     },
     {
       "id": "G1",
@@ -421,7 +424,10 @@
       "kind": "gate",
       "title": "Audio (D): DirectSound-equivalent call streams equal original logs; human listening per item",
       "status": "open",
-      "evidence": []
+      "evidence": [
+        "docs/audio.md",
+        "re/oracle/dsound_capture.py"
+      ]
     },
     {
       "id": "G8",
@@ -520,8 +526,14 @@
       "id": "S6",
       "kind": "supporting",
       "title": "DirectSound call stream and listening protocol",
-      "status": "open",
-      "evidence": []
+      "status": "partial",
+      "evidence": [
+        "acceptance/listening/README.md",
+        "crates/slr-audio/src/device.rs",
+        "crates/slr-audio/src/diff.rs",
+        "crates/slr-audio/src/stream.rs",
+        "docs/audio.md"
+      ]
     },
     {
       "id": "S7",
@@ -547,8 +559,13 @@
       "id": "S9",
       "kind": "supporting",
       "title": "Real window/display path (windowed and fullscreen) on macOS arm64",
-      "status": "open",
-      "evidence": []
+      "status": "partial",
+      "evidence": [
+        "acceptance/window.py",
+        "crates/slr-d3d9/examples/display_probe.rs",
+        "crates/slr-d3d9/src/display.rs",
+        "docs/window.md"
+      ]
     },
     {
       "id": "S10",

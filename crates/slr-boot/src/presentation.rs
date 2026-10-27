@@ -921,7 +921,7 @@ pub fn frame(vm: &VmHost, menu: bool, output: &Path) -> Result<(), String> {
             let started=std::time::Instant::now();
             let id=frame.id;let input_id=frame.input_id;
             slr_telemetry::journal::emit("frame-enqueue",serde_json::json!({"frame_id":id,"input_id":input_id,"recipe_sha256":recipe}))?;
-            sender.send(Message::Frame(frame)).map_err(|e|e.to_string())?;
+            sender.send(Message::Frame(Box::new(frame))).map_err(|e|e.to_string())?;
             slr_telemetry::journal::emit("frame-submitted",serde_json::json!({"frame_id":id,"input_id":input_id,"recipe_sha256":recipe,"send_ns":started.elapsed().as_nanos()}))?;
         }
         s.presented=true;Ok(())
