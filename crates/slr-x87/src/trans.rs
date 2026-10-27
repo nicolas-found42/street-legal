@@ -86,6 +86,14 @@ pub mod tolerance {
     pub const FYL2X_ULP: u64 = 1 << 14;
 }
 
+/// A special-operand result fixed exactly by the SDM tables (zero error claimed).
+fn exact(value: X87) -> Approx {
+    Approx {
+        value,
+        ulp_err_64: 0,
+    }
+}
+
 fn widen(v: f64) -> X87 {
     // Exact: every f64 is exactly representable in 80-bit.
     X87::from_f64(v)
@@ -99,6 +107,9 @@ fn widen(v: f64) -> X87 {
 /// return a quiet NaN and make NO tolerance claim (hardware raises invalid;
 /// flag parity is out of scope — docs/x87.md open item 2).
 pub fn approx_sin(a: X87) -> Approx {
+    if let Some(value) = crate::special::sin_cos(a, false) {
+        return exact(value);
+    }
     Approx {
         value: widen(sin_cos_80(a, false)),
         ulp_err_64: tolerance::SIN_COS_ULP,
@@ -107,6 +118,9 @@ pub fn approx_sin(a: X87) -> Approx {
 
 /// `FCOS`: `cos(self)` approximately. Same contract as [`approx_sin`].
 pub fn approx_cos(a: X87) -> Approx {
+    if let Some(value) = crate::special::sin_cos(a, true) {
+        return exact(value);
+    }
     Approx {
         value: widen(sin_cos_80(a, true)),
         ulp_err_64: tolerance::SIN_COS_ULP,
@@ -186,6 +200,9 @@ fn sin_cos_large(a: X87, cos: bool) -> f64 {
 /// `atan2` table only qualitatively here (sign/quadrant correct, exact
 /// encoding NOT claimed).
 pub fn approx_patan(y: X87, x: X87) -> Approx {
+    if let Some(value) = crate::special::patan(y, x) {
+        return exact(value);
+    }
     let r = widen(libm::atan2(x87_to_f64_clamped(y), x87_to_f64_clamped(x)));
     Approx {
         value: r,
@@ -201,6 +218,9 @@ pub fn approx_patan(y: X87, x: X87) -> Approx {
 /// probe suite excludes them from comparison rather than feeding them to the
 /// reference); they return quiet NaN here.
 pub fn approx_f2xm1(a: X87) -> Approx {
+    if let Some(value) = crate::special::f2xm1(a) {
+        return exact(value);
+    }
     // Evaluated as expm1(x·ln2) in f64; accurate for |x| ≤ 1 (|result| ≤ 1,
     // no overflow possible). Denormal results flush through the exact
     // widener; sub-f64 results saturate to signed zero, matching hardware
@@ -224,6 +244,9 @@ pub fn approx_f2xm1(a: X87) -> Approx {
 /// which this implementation honors: `y·0` preserves the product sign).
 /// Non-positive `x`, infinite operands and NaNs make NO tolerance claim.
 pub fn approx_fyl2x(x: X87, y: X87) -> Approx {
+    if let Some(value) = crate::special::fyl2x(x, y) {
+        return exact(value);
+    }
     // x == 0 (finite y): hardware returns signed infinity (divide-by-zero
     // case, y·log2(0) = y·(−∞)); the sign follows y. Only x < 0, NaN, or
     // infinite operands are no-claim (NaN here).

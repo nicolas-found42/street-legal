@@ -1867,6 +1867,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "slr-fmt-cfg",
+ "slr-x87",
 ]
 
 [[package]]
