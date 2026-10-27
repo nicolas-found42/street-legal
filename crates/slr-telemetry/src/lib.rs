@@ -18,9 +18,15 @@
 //!   write, seek, close and directory search.
 //! * `environment.json` — the host and build environment the run saw.
 //! * `capture.json` / `capture-end.json` — liveness and completion markers.
-//! * `failure.json`, `divergence.json`, `crash.json` — targeted artifacts.
+//! * `failure.json`, `divergence.json`, `crash.json` — targeted artifacts. A
+//!   panic writes `failure.json` itself (message, location, backtrace and the
+//!   last events); a later state snapshot of the same failure then lands in
+//!   `failure-state.json` instead of colliding with it.
+//! * `session-*.jsonl` — the interactive journal, which also carries the
+//!   leveled structured events of [`log`].
 
 pub mod journal;
+pub mod log;
 
 use serde_json::{json, Value};
 use slr_calllog::{LogRecord, LogWriter};
@@ -98,6 +104,13 @@ thread_local! {
 }
 /// Set once the runner has published the completion marker.
 static FINISHED: AtomicBool = AtomicBool::new(false);
+/// The open capture's directory, readable from a panic hook even when the
+/// per-thread state is mid-update (and so cannot be borrowed).
+static ACTIVE_OUTPUT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// Events a panic report keeps from the retained ring.
+const PANIC_EVENTS: usize = 64;
+/// Longest backtrace text stored in `failure.json`.
+const BACKTRACE_BYTES: usize = 64 * 1024;
 
 fn create(path: &Path) -> Result<File, String> {
     OpenOptions::new()
@@ -186,6 +199,9 @@ pub fn configure(
         last_sequence: None,
     };
     STATE.with(|slot| *slot.borrow_mut() = Some(state));
+    if let Ok(mut active) = ACTIVE_OUTPUT.lock() {
+        *active = Some(output.to_owned());
+    }
     diagnostics::configure(run_id.into(), capacity, Some(event));
     slr_calllog::headless::configure_stream(Some(native), false);
     let mut marker = create(&output.join("capture.json"))?;
@@ -206,6 +222,12 @@ pub fn configure(
     install_fatal_handler(&output.join("capture.json"));
     detail("capture-start", vec![("run_id".into(), run_id.into())]);
     Ok(())
+}
+
+/// True once the completion marker has been written; later events would land
+/// after `capture-end` and break the timeline's closing proof.
+pub fn finished() -> bool {
+    FINISHED.load(Ordering::Relaxed)
 }
 
 /// True while a capture is open on this thread.
@@ -278,6 +300,16 @@ pub fn write_state(value: &Value) -> Result<(), String> {
         }
         state.events.sync_data().map_err(|e| e.to_string())
     })
+}
+
+/// Write the failure snapshot as `failure.json`, or as `failure-state.json` when
+/// a panic hook already published its own `failure.json` for this run.
+pub fn write_failure(value: &Value) -> Result<(), String> {
+    let name = match output() {
+        Some(output) if output.join("failure.json").exists() => "failure-state.json",
+        _ => "failure.json",
+    };
+    write_artifact(name, value)
 }
 
 /// Write a one-shot artifact (`failure.json`, `divergence.json`, `crash.json`).
@@ -492,6 +524,92 @@ pub fn crash(snapshot: impl FnOnce() -> Value) -> Result<(), String> {
     ))
 }
 
+/// Environment variables that name the agent session that started a run, first
+/// match wins. Only name and value are kept: no host or user names.
+const SESSION_ENVIRONMENT: [&str; 5] = [
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "SLR_SESSION_ORIGIN",
+];
+
+/// Where this build's source came from: the same `provenance` block the Python
+/// runners write. Never fails and never leaves the commit null: when git cannot
+/// resolve `HEAD` in `directory` the commit is `"unknown"` with the reason.
+#[must_use]
+pub fn source_provenance_in(directory: &Path) -> Value {
+    use sha2::{Digest, Sha256};
+    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            // A git hook exports these and they would override `directory`.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    };
+    let text =
+        |args: &[&str]| git(args).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
+    let (commit, reason) = match text(&["rev-parse", "HEAD"]) {
+        Ok(commit) if !commit.is_empty() => (commit, None),
+        Ok(_) => (
+            "unknown".to_owned(),
+            Some("git printed no commit".to_owned()),
+        ),
+        Err(error) => (
+            "unknown".to_owned(),
+            Some(format!("git could not resolve HEAD: {error}")),
+        ),
+    };
+    let branch = text(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|branch| branch != "HEAD");
+    let session = SESSION_ENVIRONMENT.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| json!({"env": name, "id": value}))
+    });
+    let known = commit != "unknown";
+    let dirty = known
+        .then(|| {
+            text(&["status", "--porcelain"])
+                .ok()
+                .map(|status| !status.is_empty())
+        })
+        .flatten();
+    let diff = known
+        .then(|| git(&["diff", "HEAD", "--binary"]).ok())
+        .flatten()
+        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
+    json!({
+        "schema_version": 1,
+        "source_commit": commit,
+        "source_commit_reason": reason,
+        "branch": branch,
+        "worktree": text(&["rev-parse", "--show-toplevel"]).ok(),
+        "session": session,
+        "dirty": dirty,
+        "source_diff_sha256": diff,
+        "source_dirty_sha256": null,
+    })
+}
+
+/// [`source_provenance_in`] for the process's working directory.
+#[must_use]
+pub fn source_provenance() -> Value {
+    source_provenance_in(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 /// Write the bundle's `manifest.json`, the file every archive tool reads.
 ///
 /// The headless runner writes a richer manifest itself (source identity, input
@@ -529,6 +647,7 @@ pub fn write_manifest(extra: Value) -> Result<(), String> {
     object.insert("run_id".into(), json!(run_id));
     object.insert("artifacts".into(), json!(artifacts));
     object.insert("environment".into(), environment());
+    object.entry("provenance").or_insert_with(source_provenance);
     // Rewritten as the run progresses (running, then completed), so publish it
     // atomically: a reader never sees a truncated manifest.
     let path = output.join("manifest.json");
@@ -549,45 +668,105 @@ pub fn write_manifest(extra: Value) -> Result<(), String> {
     std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
 }
 
-/// What a panicking process can still report: the last retained event and the
-/// stream counters. Safe while unwinding: no script or app state is touched.
+/// What a panicking process can still report: the last retained events and the
+/// stream counters. Safe while unwinding: no script or app state is touched,
+/// and a ring caught mid-update yields nulls instead of a second panic.
 pub fn crash_context() -> Value {
+    let recent = diagnostics::try_recent(PANIC_EVENTS);
     json!({
         "schema_version": 1,
-        "run_id": run_id(),
+        "run_id": STATE.with(|slot| slot.try_borrow().ok().and_then(|slot| slot.as_ref().map(|state| state.run_id.clone()))),
         "wall_ns": monotonic_ns(),
         "unix_ns": unix_ns(),
-        "last_event": diagnostics::recent().last().cloned(),
-        "diagnostics": diagnostics::stats(),
+        "last_event": recent.as_ref().and_then(|events| events.last().cloned()),
+        "recent_events": recent,
+        "diagnostics": diagnostics::try_stats(),
     })
 }
 
-/// Install a panic hook that publishes a crash artifact before the process
-/// aborts. The previous hook still runs, so backtraces are unchanged.
+/// Create `name` in `directory` exactly once. The first writer wins: an
+/// existing file is evidence and is never replaced.
+fn write_new(directory: &Path, name: &str, value: &Value) -> Result<(), String> {
+    let mut file = create(&directory.join(name))?;
+    line(&mut file, value)?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+/// Longest prefix of `text` that is at most `limit` bytes, on a char boundary.
+fn clip(mut text: String, limit: usize) -> String {
+    if text.len() > limit {
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n...[backtrace truncated]");
+    }
+    text
+}
+
+/// The `failure.json` a panic publishes: `snapshot` plus the panic message,
+/// location, thread, a forced backtrace and the last retained events.
+fn panic_report(
+    mut value: Value,
+    info: &std::panic::PanicHookInfo<'_>,
+    backtrace: String,
+    recent: Option<Vec<diagnostics::Event>>,
+    stats: Option<Stats>,
+) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("message".into(), json!(info.to_string()));
+        let thread = std::thread::current();
+        object.insert(
+            "thread".into(),
+            json!({"name": thread.name(), "id": format!("{:?}", thread.id())}),
+        );
+        object.insert(
+            "location".into(),
+            json!(info.location().map(|location| format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            ))),
+        );
+        object.insert("wall_ns".into(), json!(monotonic_ns()));
+        object.insert("phase".into(), json!("panic"));
+        object.insert("backtrace".into(), json!(clip(backtrace, BACKTRACE_BYTES)));
+        object
+            .entry("recent_events")
+            .or_insert_with(|| json!(recent));
+        object.entry("diagnostics").or_insert_with(|| json!(stats));
+    }
+    value
+}
+
+/// Install a panic hook that publishes `failure.json` and `crash.json` into the
+/// active bundle and flushes the journal before the process unwinds or aborts.
+/// The previous hook still runs, so the stderr message and backtrace behaviour
+/// are unchanged. It cannot itself panic: every borrow it takes is a `try_`.
 pub fn install_panic_hook(snapshot: fn() -> Value) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if enabled() {
-            let mut value = snapshot();
-            if let Some(object) = value.as_object_mut() {
-                object.insert("message".into(), json!(info.to_string()));
-                let thread = std::thread::current();
-                object.insert(
-                    "thread".into(),
-                    json!({"name": thread.name(), "id": format!("{:?}", thread.id())}),
-                );
-                object.insert(
-                    "location".into(),
-                    json!(info.location().map(|location| format!(
-                        "{}:{}:{}",
-                        location.file(),
-                        location.line(),
-                        location.column()
-                    ))),
-                );
-                object.insert("wall_ns".into(), json!(monotonic_ns()));
+        let output = ACTIVE_OUTPUT
+            .try_lock()
+            .ok()
+            .and_then(|active| active.clone());
+        if let Some(output) = output {
+            let report = panic_report(
+                snapshot(),
+                info,
+                std::backtrace::Backtrace::force_capture().to_string(),
+                diagnostics::try_recent(PANIC_EVENTS),
+                diagnostics::try_stats(),
+            );
+            let _ = write_new(&output, "failure.json", &report);
+            journal::panic_flush(report["message"].as_str().unwrap_or("panic"));
+            // The completion marker needs the capture state; skip it only if
+            // the panic fired while that state was mid-update.
+            if STATE.with(|slot| slot.try_borrow().is_ok_and(|slot| slot.is_some())) {
+                let _ = crash(|| report);
             }
-            let _ = crash(|| value);
         }
         previous(info);
     }));
@@ -808,6 +987,37 @@ mod tests {
         .unwrap();
         assert_eq!(end["file_io_written"], 1);
         assert_eq!(end["status"], "completed");
+    }
+
+    #[test]
+    fn provenance_is_never_null_and_says_why_when_git_cannot_answer() {
+        let directory = scratch("not-a-repository");
+        let value = source_provenance_in(&directory);
+        assert_eq!(value["source_commit"], "unknown");
+        assert!(value["source_commit_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("HEAD")));
+        assert!(value["dirty"].is_null() && value["branch"].is_null());
+        std::fs::remove_dir_all(directory).unwrap();
+        // This crate lives in a git checkout: the commit resolves, no reason.
+        let here = source_provenance_in(Path::new(env!("CARGO_MANIFEST_DIR")));
+        if here["source_commit"] != "unknown" {
+            assert_eq!(here["source_commit"].as_str().unwrap().len(), 40);
+            assert!(here["source_commit_reason"].is_null());
+            assert!(here["dirty"].is_boolean());
+        }
+    }
+
+    #[test]
+    fn manifest_records_provenance() {
+        let output = scratch("manifest");
+        configure(&output, "run", 16, false, false, false).unwrap();
+        write_manifest(json!({"embedding":"test","status":"running"})).unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(output.join("manifest.json")).unwrap())
+                .unwrap();
+        assert!(manifest["provenance"]["source_commit"].is_string());
+        assert_eq!(manifest["provenance"]["schema_version"], 1);
     }
 
     #[test]

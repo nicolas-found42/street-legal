@@ -60,6 +60,8 @@ jobs:
           python3 re/boot-diagnose.py list --runs-root "$RUNNER_TEMP/runs"
           python3 re/boot-diagnose.py status --runs-root "$RUNNER_TEMP/runs"
           python3 re/boot-diagnose.py index --runs-root "$RUNNER_TEMP/runs"
+          # A fixture-free checkout reports every fixture missing and still exits 0.
+          python3 re/boot-diagnose.py fixtures status
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4

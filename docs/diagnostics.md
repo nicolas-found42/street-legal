@@ -198,6 +198,138 @@ the record is marked `reconstructed` — those runs are the ones most worth
 finding. Records without a recorded start fall back to the bundle directory's
 mtime, so `status` still means "newest" rather than "last appended".
 
+## Archive root, provenance and progress
+
+**One permanent root.** Bundles no longer live inside whichever worktree ran them
+(a deleted worktree took its index paths with it). `SLR_RUNS_ROOT` names the
+archive base and defaults to `$XDG_DATA_HOME/street-legal`, else
+`~/.local/share/street-legal`. Under it: `boot/runs/<run_id>/` (boot parity runs
+and `kind: hook` records), `menu/runs/` (window sessions), each with
+`runs-index.jsonl` and `inputs-store/` beside `runs/`. `--runs-root PATH` still
+selects a runs directory directly; `SLR_RUNS_ROOT=$PWD/re/out` reproduces the old
+repository-local layout. Read-only commands (`list`, `query`, `status`, `index`,
+`digest`) fall back to a repository-local `re/out/boot/runs` (this checkout or the
+main checkout) when the permanent archive holds no runs yet.
+
+New index records store `bundle` **relative to the runs root**. Readers accept
+both forms: a legacy absolute path that no longer exists falls back to
+`<runs-root>/<run_id>`, then to the repository-local roots, and `list` shows the
+resolved directory as `bundle_path`.
+
+**One-time rebuild.** `index --rebuild` rewrites the index from the bundles on
+disk, safely: it copies the old index to `runs-index.jsonl.bak-<UTC>` (kept),
+writes the rebuilt index to a *new* file, verifies the counts, that every record
+resolves and that no previously indexed run was lost, and only then swaps it in
+with an atomic rename. Bundles are only read. Old records whose bundle is gone
+are carried over flagged `bundle_missing`. `--dry-run` stops before the swap.
+`--source LEGACY_RUNS_DIR` adopts an existing archive into a new `--runs-root`
+without writing to the legacy one:
+
+```sh
+python3 re/boot-diagnose.py index --rebuild --dry-run --source re/out/boot/runs --runs-root "$SLR_RUNS_ROOT/boot/runs"
+python3 re/boot-diagnose.py index --rebuild           --source re/out/boot/runs --runs-root "$SLR_RUNS_ROOT/boot/runs"
+```
+
+**Provenance.** Every manifest has a `provenance` block and every index record
+carries `source_commit` (never null: `unknown` plus `source_commit_reason` when
+git cannot resolve it), `branch`, `worktree`, `session` (the
+`CLAUDE_SESSION_ID`/`CLAUDE_CODE_SESSION_ID`/`CODEX_THREAD_ID`/`CODEX_SESSION_ID`/
+`SLR_SESSION_ORIGIN` variable and value, else null; no host names),
+`source_dirty` and `source_diff_sha256` (the hash of the saved `source.diff`). When
+re-indexing an old bundle the commit is backfilled only from its manifest's
+`source.commit`, or a replay's source commit when the replay recorded its source
+as unchanged (`source_commit_basis` says which); `source.diff` alone cannot name a
+commit, so otherwise it stays `unknown` with the reason.
+
+**Progress, not just failure.** Each record has `matched_prefix` and
+`records_total` for the filtered and unfiltered comparisons, `case_sha256` (the
+configuration plus input hashes, so only like runs are compared) and
+`first_mismatch_signature`: a hash of where the first mismatch happened (comparison,
+kind, ordinal), the native identity on both sides and the interpreter thread and
+script location. It excludes run IDs and native call IDs, so the same failure has
+the same signature across runs; `first_mismatch_values_signature` also covers the
+compared values. `status` (`--text` for lines) shows the best/latest matched prefix
+per commit and flags a run whose prefix is shorter than the best earlier run of the
+same case at an ancestor commit as `REGRESSION` (same-commit comparisons need both
+runs clean; unknown commits are never compared). `--check-regression` additionally
+records `prior_matched_prefix`, `matched_prefix` and `regressed` in the report.
+
+## Digest: the one entry point for agents
+
+```sh
+python3 re/boot-diagnose.py digest RUN_ID_OR_BUNDLE --json
+```
+
+Accepts a bundle path, a run ID or a unique prefix, reads only, and works on
+complete, failed, killed and unfinished bundles. The answer is bounded
+(`--max-bytes`, default 48 KiB; `--chain`, default 20 events): status, provenance,
+matched-prefix counts, the first mismatch with its correlated native call, the last
+~20 events of the causal chain, the failure ring (`failure.json`) with its capacity,
+retained/evicted counts and `ring_truncated`, the exact `--replay-from` and
+`--check-regression` commands, and `truncated` flags for every cut (chain, strings,
+bytes scanned, ring, output). `errors` lists sections that could not be read.
+
+## Hook records and fixture provenance
+
+`.githooks/pre-commit` still runs, in order and with identical flags,
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+and `cargo test --workspace`; a failing step fails the hook. It now runs them through
+`re/hook-run.py`, which adds only evidence and fixture guards (and falls back to the
+three plain commands if python3 or the script is missing):
+
+* each step's combined output and exit status, the commit, branch, staged tree,
+  duration and fixture state are archived as a `kind: hook` bundle and appended to
+  the boot `runs-index.jsonl` (`status` reports hooks separately; `prune` only
+  touches `--kind hook` when asked);
+* **preflight**: `fixtures status` is evaluated first; a `stale` or `changed`
+  fixture stops the hook in seconds with the one-line reason and regeneration
+  command, instead of failing after the ~22-minute test run (exit 3);
+* **guard**: the watched fixtures are hashed before and after the run; one that
+  changed mid-run fails the hook and names the files (exit 4), whichever way the
+  tests went. Recording is best effort and never changes a verdict.
+
+`re/fixtures-manifest.json` (tracked, data-free) lists the `re/out` fixtures the
+tests consume: producer script, regeneration command and the other fixtures a
+fixture was built from (`inputs`, globs allowed). Fixtures whose producer is not
+yet mapped are absent. `re/out/fixtures-lock.json` (local) records the SHA-256s and
+generation time of a known-good state:
+
+```sh
+python3 re/boot-diagnose.py fixtures status   # one line per missing/stale/changed/unlocked fixture
+python3 re/boot-diagnose.py fixtures lock     # after regenerating: record the known-good state
+```
+
+States: `missing` (reported, never fatal: tests skip), `stale` (producer changed,
+an embedded `producer_sources` hash no longer matches, or an input was regenerated
+after the fixture, e.g. `inputs: ["re/out/snapshots/install-part-queue.*"]` for a
+fixture that digests those snapshots), `changed` (file differs from the lock),
+`unlocked` (no lock record; informational). Only `stale` and `changed` block the
+hook. `SLR_FIXTURES_LOCK` overrides the lock path.
+
+## Crashes, flakes and structured logging
+
+* A panic hook (`slr_telemetry::install_panic_hook`, installed by `slr-boot` and
+  `slr-game` when a capture is open) writes `failure.json` into the bundle —
+  message, location, thread, a forced backtrace, `diagnostics` counters and the last
+  64 events — plus `crash.json` and the failed `capture-end.json`, and flushes the
+  session journal with a `panic` row. The previous hook still prints the usual
+  stderr text. If the later state snapshot of the same failure finds `failure.json`
+  already there it is written as `failure-state.json`.
+* `--flake-check N` (opt-in) runs the case N times, compares first-mismatch
+  signatures and records the summary (`first_mismatch_signatures`,
+  `signature_stable`, `values_stable`, `nondeterministic`) in every record; it exits
+  3 when runs disagree. `--repeat N` records the same summary without the exit code.
+* `slr_telemetry::log` is a leveled structured event API (`error`..`trace`,
+  `SLR_LOG`, default `info`). `log::event` records only; `log::eprintln` prints its
+  text to stderr byte for byte as `eprintln!` would and records the same event as a
+  `log` row in the session journal (`session-*.jsonl`) and, while a capture is open,
+  as a `log` event. Text the runner, tests or comparison tooling parse
+  (`STOP animate frame N: ...`, `NativeFrameBoundary: ...`) is unchanged and pinned
+  by tests. Window sessions (`slr-boot --window`, supervised by `menu-diagnose.py`)
+  therefore leave durable records under `<runs-root>` (`menu/runs/` of the archive)
+  and register in the same index. Sites still using bare `eprintln!` are listed in
+  the pull request that introduced this.
+
 ## Retention and disk
 
 Bundles are still local and explicit, but they are no longer unbounded:

@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("boot_diagnostics", REPO / "re/boot-diagnose.py")
 boot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boot)
-DEFAULT_ROOT = REPO / "re/out/menu/runs"
+DEFAULT_ROOT = boot.archive.default_runs_root("menu")
 
 
 def records(bundle, tolerate_tail=False):
@@ -196,8 +196,9 @@ def capture(args, arguments, prior=None):
              "environment": boot.environment_identity(REPO), "comparisons": None,
              "supervisor": {"pid":os.getpid(),"identity":process_identity(os.getpid())}}
     if prior: value["source_run"] = {"run_id": manifest(prior)["run_id"], "bundle": str(prior)}
+    value["provenance"] = boot.archive.provenance(REPO)
     boot.dump(bundle / "manifest.json", value)
-    boot.append_index(root, boot.index_record(bundle, value, {}))
+    boot.append_index(root, boot.index_record(bundle, value, {}, root))
     print(json.dumps({"bundle": str(bundle), "status": "running"}), flush=True)
     report = {"comparisons": {}, "parity": "not-evaluated"}
     exit_code = 1
@@ -207,6 +208,7 @@ def capture(args, arguments, prior=None):
             (inputs / "expect.json").write_text(json.dumps(expectation,indent=2)+"\n")
             value["expectation"]=expectation
         value["source"], diff = boot.git_identity(REPO, (root, bundle, boot.index_path(root), boot.archive_root(root) / "inputs-store"))
+        value["provenance"] = boot.archive.provenance(REPO, value["source"])
         (bundle / "source.diff").write_bytes(diff)
         value["source_untracked"] = boot.archive_untracked_sources(REPO, bundle, value["source"])
         binary = Path(args.binary).resolve(strict=True)
@@ -299,7 +301,7 @@ def capture(args, arguments, prior=None):
         compress(bundle)
         value["artifacts"] = inventory(bundle)
         boot.dump(bundle / "manifest.json", value)
-        boot.append_index(root, boot.index_record(bundle, value, report))
+        boot.append_index(root, boot.index_record(bundle, value, report, root))
     return exit_code, bundle
 
 
@@ -313,7 +315,7 @@ def recover(root):
     """A killed supervisor is discoverable without inventing successful evidence."""
     results = []
     root = root.resolve()
-    paths = {Path(row["bundle"]).resolve() for row in boot.read_index(root)}
+    paths = {Path(row["bundle_path"]).resolve() for row in boot.read_index(root) if row.get("bundle_path")}
     if root.exists(): paths.update(path.resolve() for path in root.iterdir() if path.is_dir())
     for bundle in paths:
         if not (bundle / "manifest.json").is_file(): continue
