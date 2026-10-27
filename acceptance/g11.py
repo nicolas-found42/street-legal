@@ -42,11 +42,12 @@ REQUIRED = {
     "fucom": ("game", "probe"), "fucomi": ("game", "probe"),
     "fsin": ("game", "stream"), "fcos": ("game", "stream"), "fpatan": ("game", "stream"),
     "f2xm1": ("game", "stream"), "fscale": ("game", "stream"), "frndint": ("game", "stream"),
+    "fsincos": ("game", "stream"),
     "fyl2x": ("crt", "stream"), "fptan": ("crt", "stream"), "fprem": ("crt", "probe-pair"),
     "fxam": ("crt", "unprobed"), "ftst": ("crt", "unprobed"),
 }
 STREAM_OPS = {"fsin": "fsin", "fcos": "fcos", "fpatan": "fpatan", "f2xm1": "f2xm1",
-              "fscale": "fscale", "frndint": "frndint", "fyl2x": "fyl2x", "fptan": "fptan"}
+              "fscale": "fscale", "frndint": "frndint", "fyl2x": "fyl2x", "fptan": "fptan", "fsincos": "fsincos"}
 # frndint and fscale are RC-sensitive; PC is checked through the control words below.
 CONTROL_WORDS = ("007f", "047f", "087f", "0c7f", "027f", "037f")
 
@@ -313,7 +314,7 @@ def g11_result(output_root: Path, bochs: Path | None, hardware: Path | None = No
                              bundle=str(bundle), trust_table=summary, blocked={row["op"]: row["reason"] for row in blocked},
                              hardware_observed=hardware_identity is not None)
         else:
-            verdict = result("passed", "Every required x87 operation is pinned bit-exact across independent legs, slr-x87 and the supplied Intel observation.",
+            verdict = result("passed", "Every required x87 operation is pinned bit-exact across independent legs, slr-x87 and any supplied Intel observation.",
                              bundle=str(bundle), trust_table=summary, hardware_observed=hardware_identity is not None)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         verdict = result("failed", str(error), bundle=str(bundle))

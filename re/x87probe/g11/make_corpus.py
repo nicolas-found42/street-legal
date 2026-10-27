@@ -43,7 +43,7 @@ def build(n):
         first = len(out) // 21
         for a in pts:
             if name in C.BINARY:
-                for b in pts[:12]:
+                for b in pts:
                     out += bytes([opc]) + a + b
             else:
                 out += bytes([opc]) + a + bytes(10)

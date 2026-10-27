@@ -77,3 +77,66 @@ class G11Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             rows = acceptance_check.evaluate(copy.deepcopy(BASE["rows"]), output_root=Path(tmp))
         self.assertEqual({r["id"]: r["result"] for r in rows}["G11"], "not_run")
+
+
+class OperatorOptionsTests(unittest.TestCase):
+    def test_registry_passes_hardware_options_only_to_live_gate(self):
+        bochs = Path("/operator/bochs")
+        hardware = Path("/operator/intel")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(g11, "g11_result", return_value={"result": "blocked", "reason": "fixture control"}) as run:
+            output = Path(tmp)
+            options = {"bochs": bochs, "intel_observation": hardware}
+            acceptance_check.evaluate(copy.deepcopy(BASE["rows"]), output_root=output, options=options)
+            run.assert_not_called()
+            results = acceptance_check.evaluate(copy.deepcopy(BASE["rows"]), execute=["G11"], output_root=output, options=options)
+            run.assert_called_once_with(output, bochs, hardware)
+        self.assertEqual(next(r for r in results if r["id"] == "G11")["result"], "blocked")
+
+
+class StreamTrustTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import struct
+        cls.struct = struct
+        cls.adjudicate = g11.load_module("test_g11_adjudicate", g11.G11_DIR / "adjudicate.py")
+
+    def compare(self, op, operand, r0, r1a, r1b):
+        meta = {"rows": 1, "index": [{"op": op, "spec": "authored", "first": 0, "rows": 1}]}
+        corpus = b"\0" + operand + bytes(10)
+        legs = {"bochs": [r0 + r1a + bytes(2)], "rosetta": [r0 + r1b + bytes(2)]}
+        return self.adjudicate.compare(meta, corpus, legs)["by_op"]
+
+    def value(self, sign, exponent, significand=1 << 63):
+        return self.struct.pack("<QH", significand, (sign << 15) | exponent)
+
+    def test_both_results_of_two_result_operations_must_match(self):
+        one, two = self.value(0, 0x3fff), self.value(0, 0x4000)
+        for op in ("fptan", "fsincos"):
+            with self.subTest(op=op):
+                counts = self.compare(op, one, one, one, two)[op]
+                self.assertEqual(counts["bochs==rosetta:ext80"], 0)
+                self.assertEqual(counts["bochs==rosetta:f32"], 0)
+                self.assertEqual(g11.transcendental_verdict(op, counts, ["bochs", "rosetta"])["verdict"], "unpinned")
+
+    def test_defined_exceptional_operands_cannot_leave_denominator(self):
+        one, two = self.value(0, 0x3fff), self.value(0, 0x4000)
+        for operand in (self.value(1, 0x3fff), self.value(0, 0x7fff), self.value(1, 0x7fff), self.value(0, 0x7fff, 0xc000000000000001)):
+            with self.subTest(operand=operand.hex()):
+                counts = self.compare("fyl2x", operand, one, one, two)
+                self.assertIn("fyl2x", counts)
+        nan = self.value(0, 0x7fff, 0xc000000000000001)
+        self.assertIn("f2xm1", self.compare("f2xm1", nan, one, one, one))
+        self.assertIn("f2xm1:out-of-domain", self.compare("f2xm1", two, one, one, one))
+
+    def test_fsincos_is_a_required_game_operation(self):
+        self.assertEqual(g11.REQUIRED["fsincos"], ("game", "stream"))
+        self.assertEqual(g11.STREAM_OPS["fsincos"], "fsincos")
+
+    def test_binary_edge_corpus_includes_special_second_operands(self):
+        make = g11.load_module("test_g11_make_corpus", g11.G11_DIR / "make_corpus.py")
+        corpus, _ = make.build(0)
+        records = {corpus[i:i + 21] for i in range(0, len(corpus), 21)}
+        one = self.value(0, 0x3fff)
+        nan = self.value(0, 0x7fff, 0xc000000000000000)
+        for op in make.C.BINARY:
+            self.assertIn(bytes([make.C.OPS[op]]) + one + nan, records)

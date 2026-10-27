@@ -17,6 +17,7 @@ separately from transcendental-dependent ones, so G11 progress moves exactly the
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import re
 import subprocess
@@ -25,6 +26,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from observations import rust_test_observation
+from validators.core import ORIGINAL_EXE
 from validators import ROOT, boot_tools, candidate_source_matches, digest, result
 
 # Classes whose natives drive the vehicle/world simulation (docs/physics.md sections 8-9). `Math`
@@ -46,6 +48,35 @@ def physics_natives(native_api: str) -> list[dict]:
         raise ValueError("native registration table must hold exactly 353 complete rows")
     return [{"class": cls, "name": name, "signature": sig, "address": addr}
             for cls, name, sig, addr in rows if cls in PHYSICS_CLASSES]
+
+
+def verified_physics_natives(native_api: str, executable: Path) -> list[dict]:
+    """Bind the complete denominator to the extraction-verified original bytes."""
+    if digest(executable) != ORIGINAL_EXE:
+        raise ValueError("original executable identity mismatch")
+    spec = importlib.util.spec_from_file_location("g4_registration", ROOT / "re/build_native_table.py")
+    extraction = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(extraction)
+    binary = executable.read_bytes()
+    image_base, _, sections = extraction.parse_pe(binary)
+    expected = []
+    for site, cls, name, signature, implementation in extraction.binary_rows(binary):
+        if site not in extraction.CONTROLLER_SITES:
+            expected.append((*(extraction.cstr(binary, sections, image_base, word) for word in (cls, name, signature)), implementation))
+    validate_native_rows(native_api, expected)
+    return physics_natives(native_api)
+
+
+def validate_native_rows(native_api: str, expected: list[tuple]) -> None:
+    """Every registered row, including its class, signature and address must match."""
+    actual = []
+    for line in native_api.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4 or not re.fullmatch(r"(?:FUN|LAB)_[0-9a-f]{8}", fields[3]):
+            raise ValueError("malformed native registration row")
+        actual.append((*fields[:3], int(fields[3][4:], 16)))
+    if len(expected) != 353 or len(set(expected)) != 353 or actual != expected:
+        raise ValueError("native registration table differs from the verified original executable")
 
 
 def ledger_rows(fidelity: str) -> dict[str, dict]:
@@ -146,7 +177,9 @@ def g4_result(output_root: Path) -> dict:
         context["source"], patch = tool.git_identity(ROOT)
         (bundle / "source.diff").write_bytes(patch)
         native_api = ROOT / "re/out/native_api.tsv"
-        natives = physics_natives(native_api.read_text())
+        executable = ROOT / "reference/raw/StreetLegal_Redline.bak.exe"
+        natives = verified_physics_natives(native_api.read_text(), executable)
+        context["original_exe_sha256"] = digest(executable)
         context["native_api_sha256"] = digest(native_api)
         fidelity = (ROOT / "docs/fidelity.md").read_text()
         ledger = ledger_rows(fidelity)
@@ -195,7 +228,7 @@ def g4_result(output_root: Path) -> dict:
         context["functions"] = verdicts
         (bundle / "functions.json").write_text(json.dumps(verdicts, indent=1))
         summary = summarize(verdicts)
-        if not candidate_source_matches(context["source"]):
+        if digest(native_api) != context["native_api_sha256"] or digest(executable) != context["original_exe_sha256"] or not candidate_source_matches(context["source"]):
             verdict = result("stale", "Candidate changed during G4 validation.", bundle=str(bundle))
         elif counts["passing"] == len(verdicts):
             verdict = result("passed", "Every physics native and physics port function passed its fresh differential test.", bundle=str(bundle), counts=dict(counts))

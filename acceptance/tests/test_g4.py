@@ -64,3 +64,22 @@ class G4Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             rows = acceptance_check.evaluate(copy.deepcopy(BASE["rows"]), output_root=Path(tmp))
         self.assertEqual({r["id"]: r["result"] for r in rows}["G4"], "not_run")
+
+class NativeIdentityTests(unittest.TestCase):
+    def test_same_count_changed_and_duplicate_native_rows_are_rejected(self):
+        expected = [("physics.Class", f"method{i}", "()V", 0x400000 + i) for i in range(353)]
+        lines = [f"{c}\t{n}\t{s}\tFUN_{a:08x}" for c, n, s, a in expected]
+        g4.validate_native_rows("\n".join(lines), expected)
+        altered = [line.replace("physics.Class", "nonphysics.Class") for line in lines]
+        duplicate = lines.copy()
+        duplicate[-1] = duplicate[0]
+        for bad in (altered, duplicate):
+            with self.assertRaisesRegex(ValueError, "differs from the verified original"):
+                g4.validate_native_rows("\n".join(bad), expected)
+
+    def test_unverified_original_executable_cannot_supply_denominator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "original.exe"
+            executable.write_bytes(b"wrong executable")
+            with self.assertRaisesRegex(ValueError, "executable identity mismatch"):
+                g4.verified_physics_natives("", executable)

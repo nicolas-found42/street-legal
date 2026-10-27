@@ -55,9 +55,12 @@ def compare(meta, corpus, legs):
         op = spec["op"]
         for k in range(spec["first"], spec["first"] + spec["rows"]):
             a_sig, a_se = struct.unpack("<QH", corpus[k * 21 + 1:k * 21 + 11])
-            # SDM-undefined operand domain: F2XM1 needs |x| <= 1, FYL2X needs x > 0. Reported apart.
-            ood = (op == "f2xm1" and (a_se & 0x7FFF) >= 0x3FFF and (a_se & 0x7FFF, a_sig) != (0x3FFF, 1 << 63)) \
-                or (op in ("fyl2x",) and (a_se >> 15 or a_se & 0x7FFF == 0x7FFF))
+            # Only F2XM1's finite |x| > 1 and infinities are undefined. NaN
+            # handling is defined. FYL2X negative finite inputs raise invalid;
+            # zeros, infinities and NaNs also stay in the compared denominator.
+            exponent = a_se & 0x7FFF
+            nan = exponent == 0x7FFF and (a_sig & ((1 << 63) - 1)) != 0
+            ood = op == "f2xm1" and exponent >= 0x3FFF and (exponent, a_sig) != (0x3FFF, 1 << 63) and not nan
             cell = report.setdefault(op + (":out-of-domain" if ood else ""), collections.Counter())
             cell["rows"] += 1
             spec_cell = by_spec.setdefault(spec["spec"] + (":out-of-domain" if ood else ""), collections.Counter())
@@ -66,8 +69,9 @@ def compare(meta, corpus, legs):
                 x, y = legs[a][k], legs[b][k]
                 c2 = (x[20] | x[21] << 8) & 0x400 == (y[20] | y[21] << 8) & 0x400
                 for tgt in (cell, spec_cell):
-                    tgt[f"{a}=={b}:ext80"] += x[:10] == y[:10]
-                    tgt[f"{a}=={b}:f32"] += to_f32_bits(x) == to_f32_bits(y)
+                    width = 20 if op in ("fsincos", "fptan") else 10
+                    tgt[f"{a}=={b}:ext80"] += x[:width] == y[:width]
+                    tgt[f"{a}=={b}:f32"] += all(to_f32_bits(x[slot:]) == to_f32_bits(y[slot:]) for slot in range(0, width, 10))
                     tgt[f"{a}=={b}:c2"] += c2
     return {"by_op": {op: dict(c) for op, c in report.items()},
             "by_spec": {k: dict(c) for k, c in by_spec.items()}}

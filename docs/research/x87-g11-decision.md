@@ -25,7 +25,7 @@ game-code range `0x401000..0x59f000`):
 All transcendentals execute at x87 control word `0x007F` (PC24, round-to-nearest) per ADR 0007;
 the SDM says PC does not apply to them (Rosetta and Bochs both confirm PC-independence here).
 
-## Evidence gathered this session
+## Historical evidence from the original investigation
 
 Harnesses are in `re/x87probe/g11/` (tooling only, outside the workspace). Three result sources
 run over one deterministic, synthetic corpus (no original data): `corpus.in`, 1,043,510 records,
@@ -55,7 +55,7 @@ Raw outputs: `/Users/nicolas/Documents/street-legal-evidence/x87-g11-20261026T22
 
 C2 agrees on every row. Out-of-domain operands (`F2XM1` with \|x\| > 1, `FYL2X` with x <= 0) are
 SDM-undefined and reported separately by the tool; Bochs returns the operand, Rosetta computes.
-`FYL2XP1`, `FPTAN` and `FSINCOS` (not used by game code) also differ; see `adjudicate.json`.
+`FYL2XP1`, `FPTAN` and `FSINCOS` also differ; see `adjudicate.json`.
 
 So the two non-silicon references are **not** the same implementation: 5-9% of 80-bit results
 differ, by a few ulp of the 64-bit significand. They agree after the f32 rounding in all
@@ -147,3 +147,14 @@ The same kit measures any other candidate implementation: write its results in t
 disagree on 15 of 70 probe rows; SoftFloat implements FPREM1), hardware observation, any change to `slr-x87` transcendentals (still `APPROX`), flag/exception
 parity for transcendentals, PC/RC profiles other than `0x007F`, and original-consumer parity for
 the 84 + 83 + 50 + 5 call sites.
+
+
+## Integration review corrections (2026-10-27)
+
+G11 now requires `FSINCOS`, which is present in the original library routines,
+and compares both defined outputs of `FSINCOS` and `FPTAN`. Defined exceptional
+`FYL2X` operands and `F2XM1` NaNs remain in the trust denominator; only genuinely
+undefined `F2XM1` operands are reported separately. Binary edge cases now cover
+special values in either operand. These corrections supersede the historical
+corpus and counts above; fresh integration receipts remain local. They do not
+resolve the disagreement between reference models or permit approximate results.
