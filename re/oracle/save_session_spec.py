@@ -32,7 +32,10 @@ OPTIONS_TYPE = 0xFEDCBA98
 VEHICLE_TYPE = 0x88664422
 CONTROLS_TYPE = 0x4C525443  # "CTRL"
 
-KINDS = {"3": "data/cars.rpk", "4": "data/parts.rpk", "6": "system/sys.rpk"}
+# The manager's initial descriptor array is dense. Unused slots are authored
+# profile inputs, rather than holes whose names/registration state are guessed.
+KINDS = {"0": "declared/seed0.rpk", "1": "declared/seed1.rpk", "2": "declared/seed2.rpk",
+         "3": "data/cars.rpk", "4": "data/parts.rpk", "5": "declared/seed5.rpk", "6": "system/sys.rpk"}
 
 
 def f(x: float) -> int:
@@ -206,6 +209,19 @@ def build():
                       "ops": [opn("g", path, 0)] + [{"op": "read_int", "file": "g"}] * 6 +
                       [{"op": "read_res_id", "file": "g"}, {"op": "read_int", "file": "g"}, cls("g")],
                       "stock": True})
+    # A read-only authored SDAT with unseen archive names, case reuse and a
+    # reopen: no writer-side manager state can supply the expected mapping.
+    footer = bytearray(struct.pack("<II", 0, 3))
+    for index, path in enumerate(("new/UNKNOWN.rpk", "NEW/unknown.rpk", "new/other.rpk"), 1):
+        raw = path.encode() + b"\0"
+        footer.extend(struct.pack("<II", index, len(raw)) + raw)
+    raw = bytes.fromhex("5344415400010200") + struct.pack("<III", 0x10007, 0x20009, 0x3000B)
+    raw += footer + struct.pack("<I", len(footer))
+    name = "save/cars/unseen_s8"
+    unknown = {"id": "unseen_archives", "seed": {name: {"from": "hex", "hex": raw.hex()}}, "ops": []}
+    for _ in range(2):
+        unknown["ops"] += [opn("g", name, 0)] + [{"op": "read_res_id", "file": "g"}] * 3 + [cls("g")]
+    stock.append(unknown)
     out = []
     for s in sessions + reads + stock:
         s = {k: v for k, v in s.items() if not k.startswith("_")}

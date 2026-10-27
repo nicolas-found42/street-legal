@@ -24,8 +24,12 @@ vehicle saves.
 | port | `cargo run -p slr-io --example save_session` | `FileHost` over a scratch root |
 
 The original's boundary replacements are listed in `save_session.py`'s docstring
-(file layer, object fields, resource-manager lookups, texture loaders, allocator,
-interner, log sink); the file layer's own path conversion and CRT slot table are
+(file layer, object fields, texture loaders, allocator, interner, log sink).
+Resource registration (`0x538380`), descriptor lookup (`0x5383f0`) and the
+already-loaded header fast path execute the original instructions. The initial
+dense package table and loaded flags are declared profile inputs; newly read
+archive names are registered by the original, not answered by a Python map.
+The file layer's own path conversion and CRT slot table are
 covered by `filelayer_vectors.py`. The comparison covers every operation's
 result, the native struct, the rebuilt resource/slot tables, the companion/blob
 load requests, the log, every file's bytes, and cross-loading: the original reads
@@ -53,6 +57,19 @@ other spec/executable, malformed SDAT or empty read. It needs the oracle venv
   original hits (original vehicle saves could not cross-load). `slr-io` now walks
   `[slot count][slot triples][resource count][entries]` like the exe; a loaded
   slot row carries `res_id` 0, matching the original.
+
+### Unseen archive registration control
+
+The authored `unseen_archives` session reads three footer resource paths absent
+from the initial manager, including two names differing only in case, and
+reopens the file. Both original and port must assign kinds 7, 7 and 8 and return
+the corresponding resource IDs without registering duplicates on reopen.
+The old lookup-only oracle hook returned zero for unseen paths and mirrored a
+port defect; it was removed rather than taught to reproduce the port.
+
+A fresh native-level run covers 26 sessions, 542 operations and 10 written
+files, with seven cross-load sessions. These counts do not accept G9's
+script-level or JPEG-companion requirements.
 
 ### Fixture provenance and regeneration
 

@@ -11,8 +11,9 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 The user resumed end-to-end implementation with full-send authorization. The
 completion contract is unchanged: every P01–P30 feature and every G/S gate must
-pass its executable requirements. The current inventory accepts **0 of 54**;
-component tests and collected function evidence do not close those obligations.
+pass its executable requirements. No P01–P30 feature is accepted. A default
+report-only run is not an acceptance run; bounded supporting results such as S8
+do not close the feature or whole-game obligations.
 The old stopped-state checkpoint below is historical, not the current frontier.
 
 Integrated foundations on `main`:
@@ -38,7 +39,7 @@ worktree remains preserved.
 | Frontier | Current source / state | Next implementation boundary |
 |---|---|---|
 | Native VM / strict boot (#110, #40; S1/G3/P01) | `claude/native-vm-raw-runtime-f0ad55` at `242fbc8`, clean, one commit beyond its remote; no PR. Its branch reports 7,001/9,209 unfiltered and 4,892/6,508 filtered records; this campaign has not reproduced that replay. Raw runtime remains unwired. | Integrate diagnostics and this canonical handoff, reproduce strict clock replay, then finish car drive `0x454500` and the remaining native graph. A menu smoke is not strict boot equality. |
-| Saves/config (#71/#72; S8/G9) | #123 merged; #127 (`claude/saves-sdat-e2e-c4b04b`) retains native-session tooling. Its old original-manager hook reproduced the port's lookup-only bug. | Execute real original package registration in the harness, migrate S8/G9 to the registry, rerun byte/cross-load comparisons. Keep script-level sessions/JPEG companions blocked until implemented. |
+| Saves/config (#71/#72; S8/G9) | #123 merged; #127 (`claude/saves-sdat-e2e-c4b04b`) supplies registry-based S8/G9 and unhooked original manager registration/descriptor lookup. Fresh native-level S8 proof compares 26 sessions / 542 operations / 10 files with seven cross-load sessions. | Finish original-script career/config sessions and JPEG companion production/byte comparisons. G9 remains blocked; the native-level result closes no P-row. |
 | Input (#70; S7/G8/P29) | #128 publishes the device component. Its capture encoder now preserves original negative zero; tests reject dropped/extra/mispaired captured rows and mark missing captures unexecuted. | Wire the layer into host/device input and unchanged ControlSet scripts, add live S7/G8 validators and physical-device observations. |
 | Physics / float (G4/G11) | #122 at `4a2ab4b` plus preserved uncommitted tyre/transcendental work. | Migrate validators onto #126; keep approximate Pacejka diagnostics separate from exact passing evidence. Resolve untrusted operations, remaining natives and all-car/part scenarios without tolerance-based approval. |
 | Render (S5/G6) | `claude/render-d3d9-stream-d4e159` has preserved uncommitted capture/canonicalization/comparison work. | Migrate validators; integrate stream emission before the window branch; finish missing transform/material/state behavior and named-scene comparisons. |

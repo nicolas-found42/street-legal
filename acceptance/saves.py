@@ -49,7 +49,7 @@ REQUIRED_NATIVES = {
 REQUIRED_SESSIONS = {
     "options_write", "options_read", "controls_write", "controls_read", "vehicle_write",
     "vehicle_read", "float_edge_write", "float_edge_read", "string_edge_write",
-    "string_edge_read", "interleaved_write", "native_arms", "stock_options_read",
+    "string_edge_read", "interleaved_write", "native_arms", "stock_options_read", "unseen_archives",
 } | {f"stock_vehicle_{car}_read" for car in (
     "ROC_SS_1", "ROC_GT2_1", "ROC_ST_1", "ROC_MC_1", "ROC_DS_1", "ROC_GT3_1", "ROC_SD_1", "ROC_DS_2")}
 STOCK_OPTIONS_TYPE = 0xFEDCBA98

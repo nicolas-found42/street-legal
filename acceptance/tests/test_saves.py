@@ -1,12 +1,22 @@
 """Native save comparison and cross-load controls, without licensed data."""
 from tests.support import *
 import saves
+from validators import registry
 
 
 class SavesTests(unittest.TestCase):
     """S8/G9 comparison over synthetic complete runs (data-free)."""
 
     EXE = "e" * 64
+
+    def test_g9_executes_s8_but_cannot_accept_script_parity(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+                saves, "saves_result", return_value=saves.result("passed", "synthetic dependency control")) as run:
+            results = registry.evaluate(BASE["rows"], execute=("G9",), output_root=Path(tmp))
+        run.assert_called_once()
+        by_id = {row["id"]: row for row in results}
+        self.assertEqual(by_id["S8"]["result"], "passed")
+        self.assertEqual(by_id["G9"]["result"], "blocked")
 
     def footer(self, body=b"\0\0\0\0"):
         # [slot count 0][resource count 0][total 8]

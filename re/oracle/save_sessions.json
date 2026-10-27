@@ -1,7 +1,11 @@
 {
  "kinds": {
+  "0": "declared/seed0.rpk",
+  "1": "declared/seed1.rpk",
+  "2": "declared/seed2.rpk",
   "3": "data/cars.rpk",
   "4": "data/parts.rpk",
+  "5": "declared/seed5.rpk",
   "6": "system/sys.rpk"
  },
  "schema": 1,
@@ -2637,6 +2641,61 @@
     }
    },
    "stock": true
+  },
+  {
+   "id": "unseen_archives",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/unseen_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    },
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/unseen_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/cars/unseen_s8": {
+     "from": "hex",
+     "hex": "534441540001020007000100090002000b000300000000000300000001000000100000006e65772f554e4b4e4f574e2e72706b0002000000100000004e45572f756e6b6e6f776e2e72706b00030000000e0000006e65772f6f746865722e72706b004e000000"
+    }
+   }
   }
  ]
 }

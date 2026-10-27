@@ -427,9 +427,10 @@
       "kind": "gate",
       "title": "Saves/config (E): byte-identical SDAT/config from the same scripted session, cross-loading both ways",
       "status": "partial",
-      "note": "SDAT readers/writers and file natives have vectors; no end-to-end byte-identical session.",
+      "note": "Native-level S8 sessions compare equal; original-script career/config sessions and JPEG companion byte identity remain blocked on VM/render integration.",
       "evidence": [
-        "docs/acceptance-inventory.md"
+        "docs/acceptance-inventory.md",
+        "docs/saves-e2e.md"
       ]
     },
     {
@@ -519,8 +520,10 @@
       "title": "SDAT/config end-to-end byte-identity and cross-load",
       "status": "partial",
       "evidence": [
-        "docs/acceptance-inventory.md"
-      ]
+        "docs/acceptance-inventory.md",
+        "docs/saves-e2e.md"
+      ],
+      "note": "Fresh native-level original/port sessions compare SDAT bytes and cross-loading (26 sessions, 542 operations, 10 files); original manager registration executes unhooked. Script-level and JPEG requirements remain with G9."
     },
     {
       "id": "S9",

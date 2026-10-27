@@ -21,8 +21,9 @@ Boundaries replaced by Python (everything else is the real exe code):
   and CRT slot table are covered by `filelayer_vectors.py`);
 - object field plumbing `0x42a690` / `0x42ab50` / `0x42a9e0`: a per-object
   `name` string and a stateful handle field;
-- the resource manager lookups `0x5383f0` (kind -> descriptor) and `0x538380`
-  (archive path -> kind), from the session's `kinds` table;
+- initial resource-manager package names are declared by the session's dense
+  `kinds` table and marked already loaded. Registration `0x538380`, descriptor
+  lookup `0x5383f0` and the loaded-header fast path execute the real code;
 - the companion/texture loaders `0x539080` (JPEG companion by name) and
   `0x539170` (inline blob), which return a fresh zeroed object and log the
   request; `0x419860` (never reached without a slot object);
@@ -114,14 +115,23 @@ class SessionWorld(iov.World):
         super().__init__(exe)
         o = self.o
         self.vfs = vfs
-        for kind, path in kinds.items():
-            self.res_paths[int(kind)] = path.encode()
-        self.kinds = {int(k): v for k, v in kinds.items()}
         self.objects = {}        # object address -> {"name_obj", "handle"}
         self.name_objs = {}      # name string address -> object address
         self.interned = []       # interned byte strings; word = index + 0x1000
         self.loads = []          # companion / blob load requests, in order
         self.logs = []
+        # Allocate the manager's inline descriptor table for all 16-bit package
+        # indices. The profile supplies already-loaded initial packages; paths
+        # encountered in SDAT footers are registered by the original itself.
+        self.manager = o.alloc(0xFFE94 + 0x10000 * 0x70)
+        o.write_u32(0x618D48, self.manager)
+        del o.hooks[0x5383F0]
+        for expected, path in sorted((int(kind), path) for kind, path in kinds.items()):
+            result = o.call(0x538380, [_alloc_cstr(o, path.encode())],
+                            convention="thiscall", this=self.manager)
+            if result.eax != expected:
+                raise ValueError("initial kinds must declare a dense, case-insensitively unique manager table")
+            o.write_u32(self.manager + 0xFFE94 + expected * 0x70 + 0x50, 2)
         # the lists are built by the real `0x429350` and the slot run by the
         # real `0x485190`
         del o.hooks[0x429350]
@@ -133,7 +143,6 @@ class SessionWorld(iov.World):
         o.hook(0x54CE40, self._seek, "cdecl", 3)
         o.hook(0x54CCA0, lambda oc, a: 0, "cdecl", 1)
         o.hook(0x4174A0, self._intern, "thiscall", 1)
-        o.hook(0x538380, self._path_kind, "thiscall", 1)
         o.hook(0x539080, self._load_companion, "cdecl", 2)
         o.hook(0x539170, self._load_blob, "cdecl", 3)
         o.hook(0x419860, lambda oc, a: None, "thiscall", 4)
@@ -215,13 +224,6 @@ class SessionWorld(iov.World):
     def _intern(self, oc, a):
         self.interned.append(oc.read_cstr(a[0]))
         return 0x1000 + len(self.interned) - 1
-
-    def _path_kind(self, oc, a):
-        path = oc.read_cstr(a[0]).decode()
-        for kind, p in self.kinds.items():
-            if p == path:
-                return kind
-        return 0
 
     def _fake_object(self):
         return self.o.alloc(0x100)
