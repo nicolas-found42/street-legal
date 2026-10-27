@@ -1,13 +1,14 @@
 //! `INVO` mesh container (`*.scx`, `*.scy`).
 //!
-//! Version 4 (2,587 of 3,028 shipped files) is a chunk table followed by contiguous chunks:
+//! Version 4 (2,531 stock files) is a chunk table followed by contiguous chunks:
 //!
 //! ```text
-//! 0x00 "INVO"  u32 version(=4)  u32 chunk_count  u32 0
-//! 0x10 chunk_count * { u32 offset, u32 tag }      (chunks are contiguous, last ends at EOF)
-//! tag 5 (vertex buffer): u32 ?, u32 chunk_len, u32 vertex_count, u32 fvf_flags, vertices...
-//! tag 0 (index buffer) : u32 ?, u32 chunk_len, u32 index_count, u16 indices...  (triangle list)
-//! tags 1/2/3/4        : material / object metadata, kept opaque here
+//! 0x00 "INVO"  u32 version(=4)  u32 chunk_count
+//! 0x0c chunk_count * { u32 tag, u32 offset }    (last chunk ends at EOF)
+//! tag 0 (material): u32 tag, u32 chunk_len, material payload...
+//! tags 1/2/3: u32 tag, u32 chunk_len, object metadata...
+//! tag 4 (vertices): u32 tag, u32 chunk_len, u32 vertex_count, u32 fvf_flags, vertices...
+//! tag 5 (indices): u32 tag, u32 chunk_len, u32 index_count, u16 indices...
 //! ```
 //!
 //! Vertex stride is `(chunk_len - 16) / vertex_count`; the FVF flags (0x1 position,
@@ -42,6 +43,8 @@
 //! vertices and zero faces; their payload is the named surface-type table
 //! (`Material::name`, e.g. `"aszfalt"`, `"szalagkorlat"`, `"Material #0"`).
 //! The collision geometry itself is not in these files.
+
+pub mod material;
 
 use slr_fmt_core::reader::{latin1_cstr, Reader};
 use slr_fmt_core::{FormatError, Result};
@@ -104,11 +107,25 @@ impl V3Group {
     }
 }
 
+/// Tag 1/2/3 chunk: an object descriptor whose ids the exe feeds to the
+/// object's `+0x3c` method (`FUN_00502de0` cases 1..3). Word 0 of the payload
+/// is never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    pub kind: u32,
+    pub ids: Vec<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Scx {
     V4 {
         meshes: Vec<Mesh>,
+        /// Inner tag of each chunk in file order.
         chunk_tags: Vec<u32>,
+        /// Tag 0 chunks, in file order.
+        materials: Vec<material::Material>,
+        /// Tag 1/2/3 chunks, in file order.
+        objects: Vec<Object>,
     },
     V3 {
         groups: Vec<V3Group>,
@@ -264,38 +281,81 @@ fn parse_v3(data: &[u8]) -> Result<Scx> {
     }
 }
 
+/// Version 4, as the exe walks it (`FUN_00502de0`): `count` chunks follow
+/// the `(tag, offset)` table, each `u32 tag, u32 size` (size includes these
+/// two words) plus payload; the table repeats each chunk's tag and offset and
+/// the last chunk ends exactly at EOF.
+///
+/// exe: FUN_00502de0
 fn parse_v4(data: &[u8]) -> Result<Scx> {
     let mut r = Reader::at(data, 8);
     let count = r.u32()? as usize;
-    let _zero = if r.remaining() >= 4 { r.u32()? } else { 0 };
-    let mut table = Vec::with_capacity(count);
+    let mut table = Vec::new();
     for _ in 0..count {
-        let off = r.u32()? as usize;
         let tag = r.u32()?;
-        table.push((off, tag));
+        let off = r.u32()? as usize;
+        table.push((tag, off));
     }
     let mut meshes = Vec::new();
+    let mut materials = Vec::new();
+    let mut objects = Vec::new();
     let mut pending: Option<Mesh> = None;
-    for (i, &(off, tag)) in table.iter().enumerate() {
-        let end = table.get(i + 1).map(|t| t.0).unwrap_or(data.len());
-        if off > end || end > data.len() {
+    let mut cursor = r.pos;
+    let mut chunk_tags = Vec::with_capacity(count);
+    for (i, &(table_tag, table_off)) in table.iter().enumerate() {
+        let mut h = Reader::at(data, cursor);
+        let tag = h.u32()?;
+        let size = h.u32()? as usize;
+        if tag != table_tag || cursor != table_off || size < 8 || cursor + size > data.len() {
             return Err(FormatError::Inconsistent {
                 what: "scx chunk range",
-                detail: format!("chunk {i} {off}..{end} in {} bytes", data.len()),
+                detail: format!(
+                    "chunk {i} tag {tag} at {cursor} size {size}; table says tag {table_tag} at {table_off}"
+                ),
             });
         }
-        let chunk = &data[off..end];
+        chunk_tags.push(tag);
+        let chunk = &data[cursor..cursor + size];
+        let payload = &chunk[8..];
         match tag {
-            5 => {
-                let mut c = Reader::new(chunk);
-                let _a = c.u32()?;
-                let len = c.u32()? as usize;
+            0 => materials.push(material::parse(payload)?),
+            1 => objects.push(Object {
+                kind: 1,
+                ids: Vec::new(),
+            }),
+            2 => {
+                let mut c = Reader::new(payload);
+                let _reserved = c.u32()?;
+                objects.push(Object {
+                    kind: 2,
+                    ids: vec![c.u32()?, c.u32()?],
+                });
+            }
+            3 => {
+                let mut c = Reader::new(payload);
+                let _reserved = c.u32()?;
+                let n = c.u32()? as usize;
+                if payload.len() != 8 + 4 * n {
+                    return Err(FormatError::Inconsistent {
+                        what: "scx object chunk",
+                        detail: format!("{n} ids in {} payload bytes", payload.len()),
+                    });
+                }
+                let mut ids = Vec::with_capacity(n);
+                for _ in 0..n {
+                    ids.push(c.u32()?);
+                }
+                objects.push(Object { kind: 3, ids });
+            }
+            4 => {
+                let mut c = Reader::new(payload);
                 let n = c.u32()? as usize;
                 let flags = c.u32()?;
-                if len != chunk.len() || n == 0 || !(len - 16).is_multiple_of(n) {
+                let len = size;
+                if n == 0 || !(len - 16).is_multiple_of(n) {
                     return Err(FormatError::Inconsistent {
                         what: "scx vertex chunk",
-                        detail: format!("len {len} chunk {} verts {n}", chunk.len()),
+                        detail: format!("len {len} verts {n}"),
                     });
                 }
                 let stride = (len - 16) / n;
@@ -316,10 +376,9 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     ..Default::default()
                 };
                 for v in 0..n {
-                    let base = 16 + v * stride;
-                    let mut vr = Reader::at(chunk, base);
+                    let mut vr = Reader::at(chunk, 16 + v * stride);
                     m.positions.push([vr.f32()?, vr.f32()?, vr.f32()?]);
-                    if flags & 0x40 != 0 && stride >= 24 {
+                    if flags & 0x40 != 0 {
                         m.normals.push([vr.f32()?, vr.f32()?, vr.f32()?]);
                     }
                     // Custom FVF: packed diffuse/specular words follow normals.
@@ -330,7 +389,7 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     if flags & 0x100 != 0 {
                         vr.u32()?;
                     }
-                    if flags & 0x200 != 0 && stride >= 32 {
+                    if flags & 0x200 != 0 {
                         m.uvs.push([vr.f32()?, vr.f32()?]);
                     }
                 }
@@ -338,15 +397,13 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     meshes.push(p);
                 }
             }
-            0 => {
-                let mut c = Reader::new(chunk);
-                let _a = c.u32()?;
-                let len = c.u32()? as usize;
+            5 => {
+                let mut c = Reader::new(payload);
                 let n = c.u32()? as usize;
-                if len != chunk.len() || len != 12 + 2 * n {
+                if size != 12 + 2 * n {
                     return Err(FormatError::Inconsistent {
                         what: "scx index chunk",
-                        detail: format!("len {len} chunk {} indices {n}", chunk.len()),
+                        detail: format!("len {size} indices {n}"),
                     });
                 }
                 let mut idx = Vec::with_capacity(n);
@@ -365,14 +422,25 @@ fn parse_v4(data: &[u8]) -> Result<Scx> {
                     meshes.push(m);
                 }
             }
+            // The exe's switch has no default arm: an unknown chunk is skipped
+            // by its size word.
             _ => {}
         }
+        cursor += size;
+    }
+    if cursor != data.len() {
+        return Err(FormatError::Inconsistent {
+            what: "scx trailing bytes",
+            detail: format!("{} bytes after the last chunk", data.len() - cursor),
+        });
     }
     if let Some(p) = pending.take() {
         meshes.push(p);
     }
     Ok(Scx::V4 {
         meshes,
-        chunk_tags: table.iter().map(|t| t.1).collect(),
+        chunk_tags,
+        materials,
+        objects,
     })
 }

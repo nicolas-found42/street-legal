@@ -13,6 +13,10 @@ slr-fmt-sdat = { path = "../slr-fmt-sdat" }
 slr-fmt-pedestrian = { path = "../slr-fmt-pedestrian" }
 slr-fmt-scx = { path = "../slr-fmt-scx" }
 slr-fmt-skeleton = { path = "../slr-fmt-skeleton" }
+slr-fmt-sound = { path = "../slr-fmt-sound" }
 slr-fmt-spline = { path = "../slr-fmt-spline" }
+slr-fmt-texture = { path = "../slr-fmt-texture" }
 slr-fmt-traffic = { path = "../slr-fmt-traffic" }
 slr-fmt-tufa = { path = "../slr-fmt-tufa" }
+slr-fmt-video = { path = "../slr-fmt-video" }
+serde_json = "1"
