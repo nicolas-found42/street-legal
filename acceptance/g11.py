@@ -11,6 +11,7 @@ must equal the other legs, otherwise the operation stays unpinned.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -73,9 +74,18 @@ def validate_hardware_observation(stderr: str, output: bytes, rows: int) -> dict
     if len(lines) != 1:
         raise ValueError("hardware observation stderr must hold exactly one probe identity line")
     identity = json.loads(lines[0])
-    if identity.get("sysctl_proc_translated") != 0 or identity.get("sysctl_status") != 0:
+    if not isinstance(identity, dict):
+        raise ValueError("hardware observation identity is not an object")
+    translated, status = identity.get("sysctl_proc_translated"), identity.get("sysctl_status")
+    query_errno = identity.get("sysctl_errno", 0 if status == 0 else None)
+    # Apple's processIsTranslated example treats ENOENT as native execution.
+    # Preserve the raw query failure; do not accept other errors or translation.
+    query_native = (status == 0 and query_errno == 0) or (status == -1 and query_errno == errno.ENOENT)
+    if (type(translated) is not int or translated != 0 or type(status) is not int
+            or type(query_errno) is not int or not query_native):
         raise ValueError("hardware observation was translated or the translation query failed")
-    if identity.get("cpu_vendor") != "GenuineIntel" or not identity.get("cpu_brand", "").strip():
+    brand = identity.get("cpu_brand")
+    if identity.get("cpu_vendor") != "GenuineIntel" or not isinstance(brand, str) or not brand.strip() or brand.strip() == "?":
         raise ValueError("hardware observation is not from a named GenuineIntel CPU")
     if len(output) != rows * 22:
         raise ValueError(f"hardware observation has {len(output) / 22} records, expected {rows}")
