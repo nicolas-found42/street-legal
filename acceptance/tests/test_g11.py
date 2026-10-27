@@ -52,6 +52,33 @@ class G11Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             g11.validate_hardware_observation(good, bytes(22 * 2), 3)
 
+    def test_native_intel_allows_only_documented_missing_translation_flag(self):
+        import errno
+        identity = {"sysctl_proc_translated": 0, "sysctl_status": -1,
+                    "sysctl_errno": errno.ENOENT, "cpu_brand": "Intel test CPU",
+                    "cpu_vendor": "GenuineIntel"}
+        def read(value):
+            return g11.validate_hardware_observation(json.dumps(value), bytes(22), 1)
+        self.assertEqual(read(identity), identity)
+        mutations = [
+            {"sysctl_errno": errno.EACCES}, {"sysctl_errno": errno.EIO},
+            {"sysctl_errno": 0}, {"sysctl_errno": None},
+            {"sysctl_status": -2}, {"sysctl_status": False},
+            {"sysctl_proc_translated": 1}, {"sysctl_proc_translated": False},
+            {"cpu_vendor": "AuthenticAMD"}, {"cpu_vendor": "Apple"},
+            {"cpu_brand": ""}, {"cpu_brand": 123}, {"cpu_brand": "?"},
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                read(identity | mutation)
+        failed_without_errno = dict(identity)
+        del failed_without_errno["sysctl_errno"]
+        with self.assertRaises(ValueError):
+            read(failed_without_errno)
+        with self.assertRaises(ValueError):
+            read(identity | {"sysctl_status": 0})
+        self.assertEqual(read(identity | {"sysctl_status": 0, "sysctl_errno": 0})["sysctl_status"], 0)
+
     def test_probe_mismatch_or_missing_cells_cannot_pin(self):
         text = "  fadd   pc=24 rc=0 match=   10 mismatch=   0 skipped=   1 quirk-negzero=0\n  fadd   pc=64 rc=0 match=    5 mismatch=   1 skipped=   0 quirk-negzero=0\n"
         totals = g11.probe_totals(text)

@@ -4,6 +4,7 @@
  * Control word 0x007F by default (PC24, RC nearest, all masked); argv[1] hex overrides.
  * For fptan the second result is the pushed 1.0 (ST0), the first is the tangent (ST1).
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,14 +13,16 @@
 int main(int argc, char **argv) {
     int translated = 0;
     size_t length = sizeof translated;
+    errno = 0;
     int status = sysctlbyname("sysctl.proc_translated", &translated, &length, NULL, 0);
+    int query_errno = status == -1 ? errno : 0;
     char brand[128] = "?";
     size_t blen = sizeof brand;
     sysctlbyname("machdep.cpu.brand_string", brand, &blen, NULL, 0);
     char vendor[64] = "?";
     size_t vlen = sizeof vendor;
     sysctlbyname("machdep.cpu.vendor", vendor, &vlen, NULL, 0);
-    fprintf(stderr, "{\"sysctl_proc_translated\":%d,\"sysctl_status\":%d,\"cpu_brand\":\"%s\",\"cpu_vendor\":\"%s\"}\n", translated, status, brand, vendor);
+    fprintf(stderr, "{\"sysctl_proc_translated\":%d,\"sysctl_status\":%d,\"sysctl_errno\":%d,\"cpu_brand\":\"%s\",\"cpu_vendor\":\"%s\"}\n", translated, status, query_errno, brand, vendor);
     unsigned short cw = argc > 1 ? (unsigned short)strtoul(argv[1], 0, 16) : 0x007f;
     unsigned char in[21], out[22];
     while (fread(in, 1, 21, stdin) == 21) {

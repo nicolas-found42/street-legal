@@ -158,3 +158,17 @@ undefined `F2XM1` operands are reported separately. Binary edge cases now cover
 special values in either operand. These corrections supersede the historical
 corpus and counts above; fresh integration receipts remain local. They do not
 resolve the disagreement between reference models or permit approximate results.
+
+
+## Native process detection (2026-10-27)
+
+The probe retains the raw `sysctl.proc_translated` return status and captures
+`errno` immediately, before querying the CPU brand/vendor. Apple’s
+[translation detection example](https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment)
+classifies an absent flag (`ENOENT`) as native execution. G11 therefore accepts
+that precise query outcome with `sysctl_proc_translated=0`, or an ordinary
+successful native query. Other query failures, translated execution, missing
+error metadata for a failed query and non-Intel identities remain rejected.
+Existing successful observations without an errno field remain readable.
+This corrects observation admission; it supplies no hardware capture and
+promotes no x87 operation.
