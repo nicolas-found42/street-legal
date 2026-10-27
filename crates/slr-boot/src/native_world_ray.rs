@@ -117,6 +117,81 @@ pub fn query(
     Ok(1)
 }
 
+// These branches test AH's C0/C3 bits directly. Unordered comparisons set
+// both bits; replacing them with ordered Rust <=/< changes the original path.
+fn ray_lt(a: X87, b: X87) -> bool {
+    a.fcom(b).0.c0
+}
+fn ray_le(a: X87, b: X87) -> bool {
+    let flags = a.fcom(b).0;
+    flags.c0 || flags.c3
+}
+fn ray_neg(a: X87) -> X87 {
+    let mut bytes = a.to_bytes();
+    bytes[9] ^= 0x80;
+    X87::from_bytes(bytes)
+}
+fn slab_interval(start: u32, end: u32, extent: u32, axis: usize) -> (X87, X87) {
+    let delta = value(start).sub(value(end), PC, RC);
+    //49830f retains X in ST0; Y/Z spill at498317/498321.
+    let delta = if axis == 0 {
+        delta
+    } else {
+        value(store(delta))
+    };
+    if delta.fcom(value(0)).0.c3 {
+        return (value(0), value(0x3f800000));
+    }
+    let sign = value(if ray_lt(delta, value(0)) {
+        0xbf800000
+    } else {
+        0x3f800000
+    });
+    let boundary = sign.mul(value(extent), PC, RC);
+    let near = value(store(
+        ray_neg(boundary).sub(value(end), PC, RC).div(delta, PC, RC),
+    ));
+    let far = boundary.sub(value(end), PC, RC).div(delta, PC, RC);
+    //498499/4984ac leave Z's far result live until final interval selection.
+    (near, if axis == 2 { far } else { value(store(far)) })
+}
+
+/// Original498240. Retain its directed comparisons and single-precision local
+/// stores; the returned value is the actual loaded x87 value, not a tolerance.
+/// CPU exception/status side effects and its native scratch ABI are separate.
+/// exe: FUN_00498240
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn segment_box(start: [u32; 3], end: [u32; 3], extents: [u32; 3]) -> X87 {
+    let [a, b, e] = [start.map(value), end.map(value), extents.map(value)];
+    let miss = value(0xbf800000);
+    for axis in 0..3 {
+        if !(ray_le(a[axis], e[axis]) || ray_le(b[axis], e[axis]))
+            || !(ray_le(ray_neg(e[axis]), a[axis]) || ray_le(ray_neg(e[axis]), b[axis]))
+        {
+            return miss;
+        }
+    }
+    let intervals = [0, 1, 2].map(|i| slab_interval(start[i], end[i], extents[i], i));
+    let [(nx, fx), (ny, fy), (nz, fz)] = intervals;
+    let xy_far = if ray_lt(fx, fy) { fx } else { fy };
+    let far = if ray_lt(xy_far, fz) { xy_far } else { fz };
+    let xy_near = if ray_le(nx, ny) { ny } else { nx };
+    let near = if ray_le(xy_near, nz) {
+        nz
+    } else if ray_le(nx, ny) {
+        ny
+    } else {
+        nx
+    };
+    if ray_lt(far, near) {
+        miss
+    } else if ray_le(near, value(0)) {
+        value(0)
+    } else {
+        near
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +319,65 @@ mod tests {
                 "row {index} globals"
             );
         }
+    }
+    #[test]
+    fn original_segment_box_returns_match_all_80_bits() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join("re/out/boot/native-ray-box-original.json");
+        let Some(path) = crate::oracle_fixture::file(&path) else {
+            return;
+        };
+        let capture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(capture["schema"], 1);
+        assert_eq!(capture["control_word"], 0x7f);
+        assert_eq!(
+            capture["exe_sha256"],
+            "7d77466a8c1a34d16a59d9ccf2e8059664dff1bfb421338074a461a932e8edde"
+        );
+        let sources = capture["sources"].as_object().unwrap();
+        assert_eq!(sources.len(), 2);
+        for path in ["re/oracle/native_ray_box_probe.py", "re/oracle/oracle.py"] {
+            assert_eq!(
+                sources[path],
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(root.join(path)).unwrap())
+                )
+            );
+        }
+        const INPUT_SHA: &str = "83e542fde8672f4d43a1ca0e851bed31a5c0846c323389dbbff2cbb340b7b3a6";
+        assert_eq!(capture["input_sha256"], INPUT_SHA);
+        let rows = capture["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 658);
+        let mut input_digest = Sha256::new();
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row["id"], index);
+            assert_eq!(row["input_unchanged"], true);
+            let input = words(&row["words"]);
+            assert_eq!(input.len(), 9);
+            for value in &input {
+                input_digest.update(value.to_le_bytes());
+            }
+            let actual = segment_box(
+                input[..3].try_into().unwrap(),
+                input[3..6].try_into().unwrap(),
+                input[6..].try_into().unwrap(),
+            );
+            let actual = actual
+                .to_bytes()
+                .into_iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(
+                actual, row["st0"],
+                "original segment/AABB case {index}: {input:x?}"
+            );
+        }
+        assert_eq!(
+            format!("{:x}", input_digest.finalize()),
+            INPUT_SHA,
+            "authored corpus rows changed or duplicated"
+        );
     }
 }
 

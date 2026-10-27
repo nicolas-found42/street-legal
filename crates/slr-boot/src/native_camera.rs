@@ -1,7 +1,7 @@
 //! Camera attachment and render transform records from48b940 and its callees.
 use slr_physics::{cfg::PHYSICS_WORLD as WORLD, space::Space};
 use slr_x87::{Precision, Rounding, X87};
-fn single_list(m: &mut Space, p: u32) {
+pub(crate) fn single_list(m: &mut Space, p: u32) {
     m.w32(p, 0x5f09a8);
     for off in [4, 0x10] {
         m.w32(p + off, 0x5f09ac);
@@ -11,7 +11,7 @@ fn single_list(m: &mut Space, p: u32) {
     m.w32(p + 0x14, 0);
     m.w32(p + 0x18, p + 4);
 }
-fn double_list(m: &mut Space, p: u32) {
+pub(crate) fn double_list(m: &mut Space, p: u32) {
     m.w32(p, 0x5f2af4);
     for off in [4, 0x18] {
         m.w32(p + off, 0x5f2af8);

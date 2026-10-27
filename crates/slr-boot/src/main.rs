@@ -60,6 +60,8 @@ mod native_render_graph;
 mod native_render_lod;
 mod native_render_resource;
 mod native_render_type;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_renderer;
 mod native_resource_base;
 // Raw manager lookup is currently exercised by the snapshot adapter; the
 // production installation host still uses the live typed manager projection.
