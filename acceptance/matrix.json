@@ -363,6 +363,10 @@
       "status": "partial",
       "note": "Ledger corpus rows exist per format; no single corpus-count report over all 7,858 files; writer coverage partial.",
       "evidence": [
+        "acceptance/formats.py",
+        "acceptance/g2-census-stock.json",
+        "crates/slr-fmt-scx/src/material.rs",
+        "crates/slr-formats/src/census.rs",
         "docs/acceptance-inventory.md",
         "docs/fidelity.md"
       ]

@@ -1,0 +1,293 @@
+{
+  "bytes": 458923903,
+  "decoders": {
+    "avi": {
+      "bytes": 35999816,
+      "class": "game",
+      "files": 3,
+      "units": {
+        "frames": 1511
+      }
+    },
+    "bon": {
+      "bytes": 89412,
+      "class": "game",
+      "files": 19,
+      "units": {
+        "bones": 433
+      }
+    },
+    "cd_signature": {
+      "bytes": 76,
+      "class": "install-artifact",
+      "files": 1,
+      "units": {
+        "words": 19
+      }
+    },
+    "cfg": {
+      "bytes": 1089252,
+      "class": "game",
+      "files": 1012,
+      "units": {
+        "directives": 22248,
+        "particle_actions": 40,
+        "skid_files": 4
+      }
+    },
+    "class": {
+      "bytes": 3798384,
+      "class": "game",
+      "files": 1452,
+      "units": {
+        "modules": 1502
+      }
+    },
+    "dds": {
+      "bytes": 118632000,
+      "class": "game",
+      "files": 1462,
+      "units": {
+        "mips": 8076
+      }
+    },
+    "exe": {
+      "bytes": 4816896,
+      "class": "install-artifact",
+      "files": 2,
+      "units": {
+        "bytes": 4816896
+      }
+    },
+    "exe_log": {
+      "bytes": 181,
+      "class": "install-artifact",
+      "files": 2,
+      "units": {}
+    },
+    "glyph_table": {
+      "bytes": 171,
+      "class": "install-artifact",
+      "files": 3,
+      "units": {
+        "glyphs": 171
+      }
+    },
+    "install_log": {
+      "bytes": 2885,
+      "class": "install-artifact",
+      "files": 1,
+      "units": {}
+    },
+    "manual_gif": {
+      "bytes": 1389143,
+      "class": "documentation",
+      "files": 14,
+      "units": {
+        "pixels": 3748638
+      }
+    },
+    "manual_htm": {
+      "bytes": 83124,
+      "class": "documentation",
+      "files": 7,
+      "units": {
+        "bytes": 83124
+      }
+    },
+    "manual_jpg": {
+      "bytes": 173567,
+      "class": "documentation",
+      "files": 10,
+      "units": {
+        "pixels": 1236422
+      }
+    },
+    "manual_xml": {
+      "bytes": 1326,
+      "class": "documentation",
+      "files": 4,
+      "units": {
+        "bytes": 1326
+      }
+    },
+    "matrixdata": {
+      "bytes": 306486,
+      "class": "game",
+      "files": 17,
+      "units": {
+        "keys": 9337
+      }
+    },
+    "mp3": {
+      "bytes": 95318572,
+      "class": "game",
+      "files": 15,
+      "units": {
+        "frames": 168618
+      }
+    },
+    "png": {
+      "bytes": 13530260,
+      "class": "game",
+      "files": 370,
+      "units": {
+        "pixels": 38825804
+      }
+    },
+    "ptx": {
+      "bytes": 3529952,
+      "class": "game",
+      "files": 127,
+      "units": {
+        "alpha_mips": 238,
+        "mips": 336
+      }
+    },
+    "readme_ico": {
+      "bytes": 1078,
+      "class": "install-artifact",
+      "files": 1,
+      "units": {
+        "images": 2
+      }
+    },
+    "readme_txt": {
+      "bytes": 18492,
+      "class": "install-artifact",
+      "files": 1,
+      "units": {}
+    },
+    "rest": {
+      "bytes": 55573,
+      "class": "game",
+      "files": 1,
+      "units": {
+        "lines": 755
+      }
+    },
+    "rpk": {
+      "bytes": 97742226,
+      "class": "game",
+      "files": 61,
+      "units": {
+        "entries": 10863,
+        "links": 288
+      }
+    },
+    "scm": {
+      "bytes": 4218,
+      "class": "game",
+      "files": 2,
+      "units": {
+        "materials": 183
+      }
+    },
+    "scx": {
+      "bytes": 53334058,
+      "class": "game",
+      "files": 2921,
+      "units": {
+        "v3_files": 390,
+        "v3_groups": 585,
+        "v3_triangles": 70247,
+        "v3_vertices": 178473,
+        "v4_files": 2531,
+        "v4_meshes": 4315,
+        "v4_triangles": 1056287
+      }
+    },
+    "scy": {
+      "bytes": 52168,
+      "class": "game",
+      "files": 13,
+      "units": {
+        "v3_files": 13,
+        "v3_groups": 376,
+        "v3_triangles": 0,
+        "v3_vertices": 0
+      }
+    },
+    "sdat": {
+      "bytes": 37597,
+      "class": "game",
+      "files": 9,
+      "units": {
+        "roundtrip_files": 9
+      }
+    },
+    "sdat_companion_jpeg": {
+      "bytes": 2589949,
+      "class": "companion",
+      "files": 131,
+      "units": {
+        "pixels": 8585216
+      }
+    },
+    "skl": {
+      "bytes": 88317,
+      "class": "game",
+      "files": 17,
+      "units": {
+        "bones": 429
+      }
+    },
+    "spl": {
+      "bytes": 40552,
+      "class": "game",
+      "files": 9,
+      "units": {
+        "points": 453
+      }
+    },
+    "tga": {
+      "bytes": 988448,
+      "class": "game",
+      "files": 12,
+      "units": {
+        "pixels": 976772
+      }
+    },
+    "thumbs_db": {
+      "bytes": 219136,
+      "class": "documentation",
+      "files": 8,
+      "units": {}
+    },
+    "trc": {
+      "bytes": 843301,
+      "class": "game",
+      "files": 1,
+      "units": {
+        "lane_items": 4864,
+        "lanes": 1473
+      }
+    },
+    "url_shortcut": {
+      "bytes": 182,
+      "class": "install-artifact",
+      "files": 2,
+      "units": {}
+    },
+    "walk": {
+      "bytes": 992240,
+      "class": "game",
+      "files": 1,
+      "units": {
+        "leaf_indices": 3718,
+        "lines": 1799
+      }
+    },
+    "wav": {
+      "bytes": 23154865,
+      "class": "game",
+      "files": 147,
+      "units": {
+        "frames": 9519875
+      }
+    }
+  },
+  "files": 7858,
+  "schema": 1,
+  "unexplained": []
+}

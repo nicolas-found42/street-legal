@@ -377,3 +377,23 @@ super index (`indx`) and `ixNN` chunk bodies are not interpreted (none in the
 shipped files). The exe's string table also names `Data\FMV\StreetLegal.avi`,
 which is not shipped (stock has `Prime.avi` instead); decoder-independent, for
 the parity tickets (P01, P30). Decoder: `crates/slr-fmt-video`.
+
+## Whole-install census and v4 materials
+
+`cargo run --locked -p slr-formats --bin slr-census -- stock` routes every
+stock file to a decoder or an explicit install/document rule. The checked-in
+aggregate contains 7,858 files and 458,923,903 bytes; unknown or malformed files
+remain unexplained and fail the census. Counts establish coverage, not original
+loader equivalence. `python3 acceptance/check.py --execute G2` retains fresh
+source-bound census and loader observations and keeps G2 partial while loader
+gaps remain, including the unidentified WAV and MP3 loader paths.
+
+The SCX v4 table begins immediately after the chunk count: `(tag, offset)`
+pairs, followed by matching `(tag, size)` chunks. The earlier parser consumed
+the first tag as padding and shifted the table. Vertex and index chunks are
+tags 4 and 5; material chunks are tag 0. Material records preserve their raw
+tags, typed payloads and unused trailing bytes. The stock v4 corpus has 2,531
+files, 4,165 materials, 4,315 meshes and 1,056,287 triangles. A separate table
+walk confirms the triangle count; the earlier exploratory aggregate of
+1,041,423 was stale. Material and geometry corpus counts do not establish
+`FUN_00502de0` / device-loader differential parity, which remains a G2 gap.
