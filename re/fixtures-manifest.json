@@ -61,6 +61,18 @@
    "regenerate": "~/slr-oracle-venv/bin/python re/oracle/input_device_vectors.py gen"
   },
   {
+   "path": "re/out/boot/native-body-ray-original.json",
+   "producer": "re/oracle/native_body_ray_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_world_tree.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_body_ray_probe.py",
+   "inputs": [
+    "re/oracle/native_body_ray_probe.py",
+    "re/oracle/oracle.py"
+   ]
+  },
+  {
    "consumed_by": [
     "crates/slr-boot/src/native_camera.rs"
    ],
@@ -139,6 +151,27 @@
    "path": "re/out/boot/native-compound-original.json",
    "producer": "re/oracle/native_compound_probe.py",
    "regenerate": "python3 re/oracle/native_compound_probe.py"
+  },
+  {
+   "path": "re/out/boot/native-cursor-pick-nonempty-original.json",
+   "producer": "re/oracle/native_cursor_pick_nonempty_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_world_tree_genuine_tests.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_cursor_pick_nonempty_probe.py",
+   "inputs": [
+    "re/oracle/native_cursor_pick_nonempty_probe.py",
+    "re/oracle/oracle.py",
+    "re/oracle/snapshot_replay.py",
+    "re/oracle/headless_snapshot.py",
+    "acceptance/validators/core.py",
+    "re/headless/*.py",
+    "re/out/snapshots/gui-cursor-pick-nonempty.*",
+    "re/out/headless/hypothetical-cd-toc.json",
+    "re/out/headless/boot/graphics-profile.json",
+    "re/out/headless/boot/platform-profile.json",
+    "re/out/headless/window-transcript-native/hypothetical-seven-notifications-declared-handle-profile.json"
+   ]
   },
   {
    "consumed_by": [
@@ -262,6 +295,55 @@
    "regenerate": "python3 re/oracle/native_postparse_probe.py"
   },
   {
+   "path": "re/out/boot/native-ray-box-original.json",
+   "producer": "re/oracle/native_ray_box_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_world_ray.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_ray_box_probe.py",
+   "inputs": [
+    "re/oracle/native_ray_box_probe.py",
+    "re/oracle/oracle.py"
+   ]
+  },
+  {
+   "path": "re/out/boot/native-ray-game-triangle-original.json",
+   "producer": "re/oracle/native_ray_game_triangle_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_ray_kernels.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_ray_game_triangle_probe.py",
+   "inputs": [
+    "re/oracle/native_ray_game_triangle_probe.py",
+    "re/oracle/oracle.py"
+   ]
+  },
+  {
+   "path": "re/out/boot/native-ray-mesh-triangle-original.json",
+   "producer": "re/oracle/native_ray_mesh_triangle_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_ray_kernels.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_ray_mesh_triangle_probe.py",
+   "inputs": [
+    "re/oracle/native_ray_mesh_triangle_probe.py",
+    "re/oracle/oracle.py",
+    "re/oracle/native_ray_game_triangle_probe.py"
+   ]
+  },
+  {
+   "path": "re/out/boot/native-ray-sphere-original.json",
+   "producer": "re/oracle/native_ray_sphere_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_ray_kernels.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_ray_sphere_probe.py",
+   "inputs": [
+    "re/oracle/native_ray_sphere_probe.py",
+    "re/oracle/oracle.py"
+   ]
+  },
+  {
    "consumed_by": [
     "crates/slr-boot/src/native_render_lod.rs"
    ],
@@ -300,6 +382,18 @@
    "path": "re/out/boot/native-render-type-original.json",
    "producer": "re/oracle/native_render_type_probe.py",
    "regenerate": "python3 re/oracle/native_render_type_probe.py"
+  },
+  {
+   "path": "re/out/boot/native-renderer-original.json",
+   "producer": "re/oracle/native_renderer_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_renderer.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_renderer_probe.py",
+   "inputs": [
+    "re/oracle/native_renderer_probe.py",
+    "re/oracle/oracle.py"
+   ]
   },
   {
    "consumed_by": [
@@ -420,6 +514,18 @@
    "path": "re/out/boot/native-world-original.json",
    "producer": "re/oracle/native_world_probe.py",
    "regenerate": "python3 re/oracle/native_world_probe.py"
+  },
+  {
+   "path": "re/out/boot/native-world-tree-original.json",
+   "producer": "re/oracle/native_world_tree_probe.py",
+   "consumed_by": [
+    "crates/slr-boot/src/native_world_tree.rs"
+   ],
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/native_world_tree_probe.py",
+   "inputs": [
+    "re/oracle/native_world_tree_probe.py",
+    "re/oracle/oracle.py"
+   ]
   },
   {
    "consumed_by": [

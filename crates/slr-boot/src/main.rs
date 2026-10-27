@@ -44,7 +44,11 @@ mod native_nested;
 mod native_notifications;
 mod native_part;
 mod native_player;
+mod native_ray_kernels;
+#[cfg(test)]
+mod native_ray_test_support;
 mod native_world_ray;
+mod native_world_tree;
 // Unwired raw-runtime modules (#110): oracle-tested, but production does not
 // yet install the raw Runtime, so only tests reach most of their items. Each
 // allow goes when its caller is wired; see docs/boot-status.md (2026-10-26).

@@ -224,6 +224,23 @@ pub fn logical_resource(raw: u32) -> Option<u32> {
     })
 }
 
+/// Genuine raw caller pages are legal test inputs. Bind their input identities
+/// to a temporary host arena so tests exercise the real synchronization path.
+/// This facility is absent from production builds and restores prior bindings.
+#[cfg(test)]
+pub(crate) fn with_test_raw_resources<R>(bindings: Vec<(u32, u32)>, run: impl FnOnce() -> R) -> R {
+    struct Restore(Option<HashMap<u32, u32>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RAW_RESOURCES.with(|map| *map.borrow_mut() = self.0.take().unwrap());
+        }
+    }
+    let saved = RAW_RESOURCES
+        .with(|map| std::mem::replace(&mut *map.borrow_mut(), bindings.into_iter().collect()));
+    let _restore = Restore(Some(saved));
+    run()
+}
+
 /// Publish native parent changes in raw sibling order before the VM observes
 /// them. Unmaterialized host children remain in their existing order.
 pub fn synchronize_topology(memory: &Space) -> Result<(), String> {
