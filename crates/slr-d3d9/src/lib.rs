@@ -1,6 +1,7 @@
 //! Tier-D textured triangle presentation on wgpu. The full D3D9 fixed-function
 //! state emulator remains unfinished; this backend presents script-selected world
 //! geometry with depth and perspective textures, then the script OSD.
+pub mod stream;
 use serde_json::json;
 use slr_telemetry::journal;
 use std::{
@@ -47,6 +48,10 @@ pub struct Frame {
     pub world_draws: Vec<(String, Vec<WorldVertex>)>,
     pub labels: Vec<String>,
     pub text_bounds: HashMap<String, [f32; 4]>,
+    /// The exact D3D9 call sequence of this frame, in submission order, when the
+    /// producer models the device itself (see `stream::emit`). When empty the
+    /// emitter states what the translator's passes imply instead.
+    pub calls: Vec<stream::emit::Call>,
 }
 impl Frame {
     /// Stable image recipe hash, excluding host timing, frame IDs and GPU state.
@@ -520,6 +525,7 @@ impl Gpu {
     }
 }
 pub fn capture(frame: &Frame, path: &Path) -> Result<(), String> {
+    stream::emit::record_frame(frame)?;
     pollster::block_on(async {
         let instance = wgpu::Instance::new(&Default::default());
         let mut gpu = Gpu::new(&instance, None, wgpu::TextureFormat::Rgba8Unorm).await?;
@@ -687,6 +693,9 @@ impl ApplicationHandler for App {
                         Message::Frame(frame) => {
                             self.last_received = std::time::Instant::now();
                             self.stalled = false;
+                            if let Err(e) = stream::emit::record_frame(&frame) {
+                                self.error = Some(e);
+                            }
                             if let Some(gpu) = &mut self.gpu {
                                 gpu.upload(&frame);
                             }

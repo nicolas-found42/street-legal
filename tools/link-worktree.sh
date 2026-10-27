@@ -5,7 +5,7 @@
 # checkout. This links them READ-ONLY by convention: stock/ and reference/ are
 # symlinked whole; re/out/ becomes a worktree-local directory whose entries are
 # symlinks to the main checkout's entries, except that the directories named in
-# LOCAL_OUT (default: boot menu acceptance) are real worktree-local directories.
+# LOCAL_OUT (default: boot menu acceptance headless) are real worktree-local directories.
 # Their fixtures are linked, but run directories and indexes are kept local.
 # Historical archives remain in the main checkout; inspect them explicitly
 # with --runs-root instead of making new run writes follow a shared symlink.
@@ -21,7 +21,7 @@ for d in stock reference; do
 done
 [ ! -L "$here/re" ] && [ ! -L "$here/re/out" ] || { echo "refusing shared output ancestor: $here/re/out" >&2; exit 2; }
 mkdir -p "$here/re/out"
-local_out=${LOCAL_OUT:-boot menu acceptance}
+local_out=${LOCAL_OUT:-boot menu acceptance headless}
 for e in "$main"/re/out/*; do
   [ -e "$e" ] || continue
   n=$(basename "$e")
@@ -29,14 +29,14 @@ for e in "$main"/re/out/*; do
     *" $n "*)
       [ ! -L "$here/re/out/$n" ] || { echo "refusing shared output directory: $here/re/out/$n" >&2; exit 2; }
       mkdir -p "$here/re/out/$n"
-      for mutable in runs test-runs inputs-store runs-index.jsonl; do
+      for mutable in runs test-runs inputs-store runs-index.jsonl d3d9-stream snapshot-run; do
         [ ! -L "$here/re/out/$n/$mutable" ] || { echo "refusing shared output path: $here/re/out/$n/$mutable" >&2; exit 2; }
       done
       mkdir -p "$here/re/out/$n/runs" "$here/re/out/$n/test-runs" "$here/re/out/$n/inputs-store"
       for s in "$e"/*; do
         [ -e "$s" ] || continue
         sn=$(basename "$s")
-        case "$sn" in runs|test-runs|inputs-store|runs-index.jsonl|runs-index.jsonl.*) continue ;; esac
+        case "$sn" in runs|test-runs|inputs-store|runs-index.jsonl|runs-index.jsonl.*|d3d9-stream|snapshot-run) continue ;; esac
         [ -e "$here/re/out/$n/$sn" ] || [ -L "$here/re/out/$n/$sn" ] || ln -s "$s" "$here/re/out/$n/$sn"
       done ;;
     *) [ -e "$here/re/out/$n" ] || [ -L "$here/re/out/$n" ] || ln -s "$e" "$here/re/out/$n" ;;
