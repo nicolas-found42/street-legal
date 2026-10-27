@@ -164,7 +164,7 @@ impl Snapshot {
         let mut producers = vec![
             "re/oracle/headless_snapshot.py".to_string(),
             "re/oracle/oracle.py".to_string(),
-            "acceptance/validators.py".to_string(),
+            "acceptance/validators/core.py".to_string(),
         ];
         for file in std::fs::read_dir(source.join("re/headless")).map_err(|e| e.to_string())? {
             let path = file.map_err(|e| e.to_string())?.path();

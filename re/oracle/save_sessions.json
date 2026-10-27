@@ -1,0 +1,2701 @@
+{
+ "kinds": {
+  "0": "declared/seed0.rpk",
+  "1": "declared/seed1.rpk",
+  "2": "declared/seed2.rpk",
+  "3": "data/cars.rpk",
+  "4": "data/parts.rpk",
+  "5": "declared/seed5.rpk",
+  "6": "system/sys.rpk"
+ },
+ "schema": 1,
+ "sessions": [
+  {
+   "id": "options_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/options_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4275878552
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 12
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2654435761
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1013904226
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3
+    },
+    {
+     "bits": 1056964608,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 387276917
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 6
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1401181143
+    },
+    {
+     "bits": 1080033280,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 9
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 774553834
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3428989595
+    },
+    {
+     "bits": 1145569280,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 147926525
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2802362286
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 15
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2175734977
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 18
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3189639203
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 21
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2563011894
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 922480359
+    },
+    {
+     "bits": 1056964608,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1936384585
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 295853050
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 27
+    },
+    {
+     "bits": 1080033280,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3964193037
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 30
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 683129967
+    },
+    {
+     "bits": 1145569280,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 33
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 56502658
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2710938419
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "controls_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/controls_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1280463939
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 16
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2
+    },
+    {
+     "file": "f",
+     "hex": "4b6579626f617264",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "4d6f757365202855534229",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 10
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "bits": 3212836864,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1028443341,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 11
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3
+    },
+    {
+     "bits": 3212836864,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1028443341,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 12
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 6
+    },
+    {
+     "bits": 3212836864,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1028443341,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 13
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 9
+    },
+    {
+     "bits": 3212836864,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1120403456,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1028443341,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 1
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1056964608,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1069547520,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1073741824,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2
+    },
+    {
+     "bits": 1056964608,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1065353216,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1069547520,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1073741824,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1075838976,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "vehicle_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/cars/car_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2288403490
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 5
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3
+    },
+    {
+     "file": "f",
+     "hex": "5465737420436172",
+     "op": "write_string"
+    },
+    {
+     "bits": 1150963712,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 196615,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 196617,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 262145,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 3735928559
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 4294901767,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 4294901768,
+      "kind": 7
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 4294901767,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 393218,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 196615,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 0,
+      "kind": 5
+     }
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": null
+    },
+    {
+     "file": "f",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 4294901769,
+      "kind": 3
+     }
+    },
+    {
+     "bits": 2147483648,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 2139095040,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2288403490
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "float_edge_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/floats_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4275878552
+    },
+    {
+     "bits": 0,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 2147483648,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 1,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 8388607,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 8388608,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 2139095039,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 2139095040,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 4286578688,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 2143289344,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 4290847557,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4294967295
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 2147483648
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 0
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "snan_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/snan_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4275878552
+    },
+    {
+     "bits": 2139095041,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "bits": 4290772991,
+     "file": "f",
+     "op": "write_float"
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "string_edge_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/strings_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "write_int",
+     "value": 4275878552
+    },
+    {
+     "file": "f",
+     "hex": "",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "61",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "80fffe2068696768206279746573",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "736176652f67616d652f6f7074696f6e73",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "hex": "6e616d65207769746820737061636573",
+     "op": "write_string"
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "empty_write",
+   "ops": [
+    {
+     "file": "f",
+     "mode": 1,
+     "name": "save/game/empty_s8",
+     "op": "open"
+    },
+    {
+     "file": "f",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "interleaved_write",
+   "ops": [
+    {
+     "file": "a",
+     "mode": 1,
+     "name": "save/game/a_s8",
+     "op": "open"
+    },
+    {
+     "file": "b",
+     "mode": 1,
+     "name": "save/game/b_s8",
+     "op": "open"
+    },
+    {
+     "file": "a",
+     "op": "write_int",
+     "value": 1
+    },
+    {
+     "file": "b",
+     "op": "write_int",
+     "value": 2
+    },
+    {
+     "file": "a",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 196609,
+      "kind": 5
+     }
+    },
+    {
+     "file": "b",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 262145,
+      "kind": 5
+     }
+    },
+    {
+     "file": "a",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 4294901761,
+      "kind": 5
+     }
+    },
+    {
+     "bits": 1075838976,
+     "file": "b",
+     "op": "write_float"
+    },
+    {
+     "file": "b",
+     "op": "close"
+    },
+    {
+     "file": "a",
+     "op": "write_int",
+     "value": 3
+    },
+    {
+     "file": "a",
+     "op": "close"
+    },
+    {
+     "file": "a",
+     "mode": 1,
+     "name": "save/game/a_s8",
+     "op": "open"
+    },
+    {
+     "file": "a",
+     "op": "write_int",
+     "value": 99
+    },
+    {
+     "file": "a",
+     "op": "close"
+    }
+   ]
+  },
+  {
+   "id": "native_arms",
+   "ops": [
+    {
+     "file": "u",
+     "op": "write_int",
+     "value": 1
+    },
+    {
+     "bits": 1065353216,
+     "file": "u",
+     "op": "write_float"
+    },
+    {
+     "file": "u",
+     "hex": "78",
+     "op": "write_string"
+    },
+    {
+     "file": "u",
+     "op": "write_res_ref",
+     "ref": {
+      "id": 196609,
+      "kind": 5
+     }
+    },
+    {
+     "file": "u",
+     "op": "read_int"
+    },
+    {
+     "file": "u",
+     "op": "read_string"
+    },
+    {
+     "file": "u",
+     "op": "read_res_id"
+    },
+    {
+     "file": "u",
+     "op": "close"
+    },
+    {
+     "file": "m",
+     "mode": 7,
+     "name": "save/game/arm_s8",
+     "op": "open"
+    },
+    {
+     "file": "m",
+     "mode": 1,
+     "name": "save/game/arm_s8",
+     "op": "open"
+    },
+    {
+     "file": "m",
+     "op": "close"
+    },
+    {
+     "file": "m",
+     "op": "write_int",
+     "value": 5
+    },
+    {
+     "file": "m",
+     "mode": 1,
+     "name": "save/game/arm_s8",
+     "op": "open"
+    },
+    {
+     "file": "m",
+     "op": "write_int",
+     "value": 5
+    },
+    {
+     "file": "m",
+     "op": "close"
+    },
+    {
+     "file": "m",
+     "mode": 0,
+     "name": "save/game/arm_s8",
+     "op": "open"
+    },
+    {
+     "file": "m",
+     "op": "close"
+    },
+    {
+     "file": "n",
+     "mode": 0,
+     "name": "save/game/does_not_exist_s8",
+     "op": "open"
+    }
+   ]
+  },
+  {
+   "cross": true,
+   "id": "snan_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/snan_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/snan_s8": {
+     "from": "session",
+     "name": "save/game/snan_s8",
+     "session": "snan_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "options_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/options_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/options_s8": {
+     "from": "session",
+     "name": "save/game/options_s8",
+     "session": "options_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "controls_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/controls_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/controls_s8": {
+     "from": "session",
+     "name": "save/game/controls_s8",
+     "session": "controls_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "vehicle_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/car_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/cars/car_s8": {
+     "from": "session",
+     "name": "save/cars/car_s8",
+     "session": "vehicle_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "float_edge_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/floats_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/floats_s8": {
+     "from": "session",
+     "name": "save/game/floats_s8",
+     "session": "float_edge_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "string_edge_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/strings_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/strings_s8": {
+     "from": "session",
+     "name": "save/game/strings_s8",
+     "session": "string_edge_write"
+    }
+   }
+  },
+  {
+   "cross": true,
+   "id": "vehicle_overread",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/car_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_string"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/cars/car_s8": {
+     "from": "session",
+     "name": "save/cars/car_s8",
+     "session": "vehicle_write"
+    }
+   }
+  },
+  {
+   "id": "stock_options_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/options",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    },
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/game/options",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "read_float"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/game/options": {
+     "from": "stock",
+     "path": "save/game/options"
+    }
+   }
+  },
+  {
+   "id": "stock_vehicle_ROC_SS_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_SS_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_SS_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_SS_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_GT2_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_GT2_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_GT2_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_GT2_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_ST_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_ST_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_ST_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_ST_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_MC_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_MC_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_MC_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_MC_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_DS_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_DS_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_DS_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_DS_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_GT3_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_GT3_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_GT3_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_GT3_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_SD_1_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_SD_1",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_SD_1": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_SD_1"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "stock_vehicle_ROC_DS_2_read",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "cars/racers/ROC_cars/ROC_DS_2",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_int"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "cars/racers/ROC_cars/ROC_DS_2": {
+     "from": "stock",
+     "path": "cars/racers/ROC_cars/ROC_DS_2"
+    }
+   },
+   "stock": true
+  },
+  {
+   "id": "unseen_archives",
+   "ops": [
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/unseen_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    },
+    {
+     "file": "g",
+     "mode": 0,
+     "name": "save/cars/unseen_s8",
+     "op": "open"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "read_res_id"
+    },
+    {
+     "file": "g",
+     "op": "close"
+    }
+   ],
+   "seed": {
+    "save/cars/unseen_s8": {
+     "from": "hex",
+     "hex": "534441540001020007000100090002000b000300000000000300000001000000100000006e65772f554e4b4e4f574e2e72706b0002000000100000004e45572f756e6b6e6f776e2e72706b00030000000e0000006e65772f6f746865722e72706b004e000000"
+    }
+   }
+  }
+ ]
+}

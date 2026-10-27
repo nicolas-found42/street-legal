@@ -1,0 +1,658 @@
+{
+ "description": "Data-free registry of the local re/out fixtures the workspace tests consume. Fixtures hold licensed-derived captures and are never committed; this file only names them, their producer scripts and regeneration commands. `python3 re/boot-diagnose.py fixtures status` compares it with what is on disk; `fixtures lock` records known-good hashes in re/out/fixtures-lock.json after a regeneration. Fixtures whose producer is not yet mapped are simply absent here.",
+ "fixtures": [
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car_update.rs"
+   ],
+   "path": "re/out/boot/car-update-active-original.json",
+   "producer": "re/oracle/car_update_active_probe.py",
+   "regenerate": "python3 re/oracle/car_update_active_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car_update.rs"
+   ],
+   "path": "re/out/boot/car-update-wrapper-original.json",
+   "producer": "re/oracle/car_update_wrapper_probe.py",
+   "regenerate": "python3 re/oracle/car_update_wrapper_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/src/input.rs"
+   ],
+   "path": "re/out/boot/controller-mapping.json",
+   "producer": "re/oracle/controller_mapping_probe.py",
+   "regenerate": "python3 re/oracle/controller_mapping_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/factory.rs"
+   ],
+   "path": "re/out/boot/game-ref-create-arguments-original.json",
+   "producer": "re/oracle/game_ref_create_arguments_probe.py",
+   "regenerate": "python3 re/oracle/game_ref_create_arguments_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-resource/tests/create_link_oracle.rs"
+   ],
+   "path": "re/out/boot/game-ref-create-link-original.json",
+   "producer": "re/oracle/game_ref_create_link_probe.py",
+   "regenerate": "python3 re/oracle/game_ref_create_link_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-resource/tests/factory.rs"
+   ],
+   "path": "re/out/boot/gametype-lod-original.json",
+   "producer": "re/oracle/gametype_lod_probe.py",
+   "regenerate": "python3 re/oracle/gametype_lod_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-input/tests/device_oracle.rs"
+   ],
+   "inputs": [
+    "re/oracle/input_device_rig.py"
+   ],
+   "path": "re/out/boot/input-device.jsonl",
+   "producer": "re/oracle/input_device_vectors.py",
+   "regenerate": "~/slr-oracle-venv/bin/python re/oracle/input_device_vectors.py gen"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_camera.rs"
+   ],
+   "path": "re/out/boot/native-camera-original.json",
+   "producer": "re/oracle/native_camera_probe.py",
+   "regenerate": "python3 re/oracle/native_camera_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-clone-original.json",
+   "producer": "re/oracle/native_car_clone_probe.py",
+   "regenerate": "python3 re/oracle/native_car_clone_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car_command.rs"
+   ],
+   "path": "re/out/boot/native-car-command-original.json",
+   "producer": "re/oracle/native_car_command_probe.py",
+   "regenerate": "python3 re/oracle/native_car_command_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-finalize-original.json",
+   "producer": "re/oracle/native_car_finalize_probe.py",
+   "regenerate": "python3 re/oracle/native_car_finalize_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-layout-original.json",
+   "producer": "re/oracle/native_car_layout_probe.py",
+   "regenerate": "python3 re/oracle/native_car_layout_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-original.json",
+   "producer": "re/oracle/native_car_probe.py",
+   "regenerate": "python3 re/oracle/native_car_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-point-original.json",
+   "producer": "re/oracle/native_car_point_probe.py",
+   "regenerate": "python3 re/oracle/native_car_point_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_car.rs"
+   ],
+   "path": "re/out/boot/native-car-reparent-original.json",
+   "producer": "re/oracle/native_car_reparent_probe.py",
+   "regenerate": "python3 re/oracle/native_car_reparent_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_message.rs"
+   ],
+   "path": "re/out/boot/native-class-query-original.json",
+   "producer": "re/oracle/native_class_query_probe.py",
+   "regenerate": "python3 re/oracle/native_class_query_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_entity.rs"
+   ],
+   "path": "re/out/boot/native-compound-original.json",
+   "producer": "re/oracle/native_compound_probe.py",
+   "regenerate": "python3 re/oracle/native_compound_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_body.rs",
+    "crates/slr-boot/src/native_defaults.rs"
+   ],
+   "path": "re/out/boot/native-defaults-original.json",
+   "producer": "re/oracle/native_defaults_probe.py",
+   "regenerate": "python3 re/oracle/native_defaults_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_definition.rs"
+   ],
+   "path": "re/out/boot/native-definition-original.json",
+   "producer": "re/oracle/native_definition_probe.py",
+   "regenerate": "python3 re/oracle/native_definition_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_dynamics.rs"
+   ],
+   "path": "re/out/boot/native-dynamics-original.json",
+   "producer": "re/oracle/native_dynamics_probe.py",
+   "regenerate": "python3 re/oracle/native_dynamics_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_entity.rs"
+   ],
+   "path": "re/out/boot/native-entity-original.json",
+   "producer": "re/oracle/native_entity_probe.py",
+   "regenerate": "python3 re/oracle/native_entity_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_file.rs"
+   ],
+   "path": "re/out/boot/native-file-original.json",
+   "producer": "re/oracle/native_file_probe.py",
+   "regenerate": "python3 re/oracle/native_file_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_file.rs"
+   ],
+   "path": "re/out/boot/native-file-range-original.json",
+   "producer": "re/oracle/native_file_range_probe.py",
+   "regenerate": "python3 re/oracle/native_file_range_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_file.rs"
+   ],
+   "path": "re/out/boot/native-file-worker-original.json",
+   "producer": "re/oracle/native_file_worker_probe.py",
+   "regenerate": "python3 re/oracle/native_file_worker_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_geometry.rs"
+   ],
+   "path": "re/out/boot/native-geometry-original.json",
+   "producer": "re/oracle/native_geometry_probe.py",
+   "regenerate": "python3 re/oracle/native_geometry_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_mesh_resource.rs"
+   ],
+   "path": "re/out/boot/native-mesh-resource-original.json",
+   "producer": "re/oracle/native_mesh_resource_probe.py",
+   "regenerate": "python3 re/oracle/native_mesh_resource_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_message.rs"
+   ],
+   "path": "re/out/boot/native-message-original.json",
+   "producer": "re/oracle/native_message_probe.py",
+   "regenerate": "python3 re/oracle/native_message_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_part.rs"
+   ],
+   "path": "re/out/boot/native-part-original.json",
+   "producer": "re/oracle/native_part_probe.py",
+   "regenerate": "python3 re/oracle/native_part_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_part.rs"
+   ],
+   "path": "re/out/boot/native-part-physics-original.json",
+   "producer": "re/oracle/native_part_physics_probe.py",
+   "regenerate": "python3 re/oracle/native_part_physics_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/part_render.rs"
+   ],
+   "path": "re/out/boot/native-part-render-original.json",
+   "producer": "re/oracle/native_part_render_probe.py",
+   "regenerate": "python3 re/oracle/native_part_render_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_part.rs"
+   ],
+   "path": "re/out/boot/native-part-slots-original.json",
+   "producer": "re/oracle/native_part_slots_probe.py",
+   "regenerate": "python3 re/oracle/native_part_slots_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_postparse.rs"
+   ],
+   "path": "re/out/boot/native-postparse-original.json",
+   "producer": "re/oracle/native_postparse_probe.py",
+   "regenerate": "python3 re/oracle/native_postparse_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_render_lod.rs"
+   ],
+   "path": "re/out/boot/native-render-lod-original.json",
+   "producer": "re/oracle/native_render_lod_probe.py",
+   "regenerate": "python3 re/oracle/native_render_lod_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_render_resource.rs"
+   ],
+   "path": "re/out/boot/native-render-minimum-original.json",
+   "producer": "re/oracle/native_render_minimum_probe.py",
+   "regenerate": "python3 re/oracle/native_render_minimum_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_render_type.rs"
+   ],
+   "path": "re/out/boot/native-render-replace-original.json",
+   "producer": "re/oracle/native_render_replace_probe.py",
+   "regenerate": "python3 re/oracle/native_render_replace_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_render_resource.rs"
+   ],
+   "path": "re/out/boot/native-render-resource-original.json",
+   "producer": "re/oracle/native_render_resource_probe.py",
+   "regenerate": "python3 re/oracle/native_render_resource_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_render_type.rs"
+   ],
+   "path": "re/out/boot/native-render-type-original.json",
+   "producer": "re/oracle/native_render_type_probe.py",
+   "regenerate": "python3 re/oracle/native_render_type_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_resource_load.rs"
+   ],
+   "path": "re/out/boot/native-resource-access-original.json",
+   "producer": "re/oracle/native_resource_access_probe.py",
+   "regenerate": "python3 re/oracle/native_resource_access_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_resource_base.rs"
+   ],
+   "path": "re/out/boot/native-resource-base-original.json",
+   "producer": "re/oracle/native_resource_base_probe.py",
+   "regenerate": "python3 re/oracle/native_resource_base_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_resource_load.rs"
+   ],
+   "path": "re/out/boot/native-resource-clone-original.json",
+   "producer": "re/oracle/native_resource_clone_probe.py",
+   "regenerate": "python3 re/oracle/native_resource_clone_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_resource_load.rs"
+   ],
+   "path": "re/out/boot/native-resource-load-original.json",
+   "producer": "re/oracle/native_resource_load_probe.py",
+   "regenerate": "python3 re/oracle/native_resource_load_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_resource_manager.rs"
+   ],
+   "path": "re/out/boot/native-resource-manager-original.json",
+   "producer": "re/oracle/native_resource_manager_probe.py",
+   "regenerate": "python3 re/oracle/native_resource_manager_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_shape.rs"
+   ],
+   "path": "re/out/boot/native-shape-original.json",
+   "producer": "re/oracle/native_shape_probe.py",
+   "regenerate": "python3 re/oracle/native_shape_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_shape.rs"
+   ],
+   "path": "re/out/boot/native-shape-sync-original.json",
+   "producer": "re/oracle/native_shape_sync_probe.py",
+   "regenerate": "python3 re/oracle/native_shape_sync_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_shape_v4.rs"
+   ],
+   "path": "re/out/boot/native-shape-v4-original.json",
+   "producer": "re/oracle/native_shape_v4_probe.py",
+   "regenerate": "python3 re/oracle/native_shape_v4_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spatial.rs"
+   ],
+   "path": "re/out/boot/native-spatial-index-original.json",
+   "producer": "re/oracle/native_spatial_index_probe.py",
+   "regenerate": "python3 re/oracle/native_spatial_index_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spatial.rs"
+   ],
+   "path": "re/out/boot/native-spatial-original.json",
+   "producer": "re/oracle/native_spatial_probe.py",
+   "regenerate": "python3 re/oracle/native_spatial_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spatial.rs"
+   ],
+   "path": "re/out/boot/native-spatial-queue-original.json",
+   "producer": "re/oracle/native_spatial_queue_probe.py",
+   "regenerate": "python3 re/oracle/native_spatial_queue_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spatial.rs"
+   ],
+   "path": "re/out/boot/native-spatial-request-original.json",
+   "producer": "re/oracle/native_spatial_request_probe.py",
+   "regenerate": "python3 re/oracle/native_spatial_request_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spring.rs"
+   ],
+   "path": "re/out/boot/native-spring-original.json",
+   "producer": "re/oracle/native_spring_probe.py",
+   "regenerate": "python3 re/oracle/native_spring_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_spring.rs"
+   ],
+   "path": "re/out/boot/native-spring-step-original.json",
+   "producer": "re/oracle/native_spring_step_probe.py",
+   "regenerate": "python3 re/oracle/native_spring_step_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_world.rs"
+   ],
+   "path": "re/out/boot/native-world-original.json",
+   "producer": "re/oracle/native_world_probe.py",
+   "regenerate": "python3 re/oracle/native_world_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/main.rs"
+   ],
+   "path": "re/out/boot/openlib-header.json",
+   "producer": "re/oracle/openlib_header_probe.py",
+   "regenerate": "python3 re/oracle/openlib_header_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/parts.rs"
+   ],
+   "path": "re/out/boot/part-original.json",
+   "producer": "re/oracle/part_probe.py",
+   "regenerate": "python3 re/oracle/part_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/viewport.rs"
+   ],
+   "path": "re/out/boot/viewport-create.jsonl",
+   "producer": "re/oracle/viewport_create_probe.py",
+   "regenerate": "python3 re/oracle/viewport_create_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/wheel.rs"
+   ],
+   "path": "re/out/boot/wheel-original.json",
+   "producer": "re/oracle/wheel_probe.py",
+   "regenerate": "python3 re/oracle/wheel_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/clock_oracle.rs"
+   ],
+   "path": "re/out/counter-clock/clock.jsonl",
+   "producer": "re/oracle/clock_vectors.py",
+   "regenerate": "python3 re/oracle/clock_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/clock_init_oracle.rs"
+   ],
+   "path": "re/out/counter-clock/clock_init.jsonl",
+   "producer": "re/oracle/clock_init_vectors.py",
+   "regenerate": "python3 re/oracle/clock_init_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/filelayer_oracle.rs"
+   ],
+   "path": "re/out/io/filelayer.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/io_oracle.rs"
+   ],
+   "path": "re/out/io/findfile.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/io_oracle.rs"
+   ],
+   "path": "re/out/io/input.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/io_oracle.rs"
+   ],
+   "path": "re/out/io/open_close.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/io_oracle.rs"
+   ],
+   "path": "re/out/io/path.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/path_native.rs",
+    "crates/slr-io/tests/support/file_path_oracle.py"
+   ],
+   "path": "re/out/io/path_native.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-io/tests/io_oracle.rs"
+   ],
+   "path": "re/out/io/resid.jsonl",
+   "producer": "re/oracle/io_vectors.py",
+   "regenerate": "python3 re/oracle/io_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/langmath_oracle.rs"
+   ],
+   "path": "re/out/langmath/langmath.jsonl",
+   "producer": "re/oracle/langmath_vectors.py",
+   "regenerate": "python3 re/oracle/langmath_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/engine_oracle.rs"
+   ],
+   "path": "re/out/langobj/engine.jsonl",
+   "producer": "re/oracle/langobj_vectors.py",
+   "regenerate": "python3 re/oracle/langobj_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/langobj_oracle.rs"
+   ],
+   "path": "re/out/langobj/objects.jsonl",
+   "producer": "re/oracle/langobj_vectors.py",
+   "regenerate": "python3 re/oracle/langobj_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-lang/tests/vector_oracle.rs"
+   ],
+   "path": "re/out/langvec/langvec.jsonl",
+   "producer": "re/oracle/langvec_vectors.py",
+   "regenerate": "python3 re/oracle/langvec_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-boot/src/native_query.rs"
+   ],
+   "path": "re/out/oracle/instance_query.jsonl",
+   "producer": "re/oracle/instance_query_vectors.py",
+   "regenerate": "python3 re/oracle/instance_query_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-fmt-texture/tests/ptx_oracle.rs"
+   ],
+   "path": "re/out/ptx/ptx_vectors.jsonl",
+   "producer": "re/oracle/ptx_vectors.py",
+   "regenerate": "python3 re/oracle/ptx_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-render-natives/tests/render_oracle.rs"
+   ],
+   "path": "re/out/render/render.jsonl",
+   "producer": "re/oracle/render_vectors.py",
+   "regenerate": "python3 re/oracle/render_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-resource/src/handles.rs"
+   ],
+   "path": "re/out/res/res_handles_render_light.jsonl",
+   "producer": "re/oracle/res_vectors.py",
+   "regenerate": "python3 re/oracle/res_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-resource/tests/resnode_oracle.rs"
+   ],
+   "path": "re/out/res/resnode.jsonl",
+   "producer": "re/oracle/res_vectors.py",
+   "regenerate": "python3 re/oracle/res_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-vm/tests/sched_oracle.rs"
+   ],
+   "path": "re/out/sched/sched_vectors.jsonl",
+   "producer": "re/oracle/sched_vectors.py",
+   "regenerate": "python3 re/oracle/sched_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-sound/tests/sound_oracle.rs"
+   ],
+   "path": "re/out/sound/sound.jsonl",
+   "producer": "re/oracle/sound_vectors.py",
+   "regenerate": "python3 re/oracle/sound_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-vm/tests/thread_oracle.rs"
+   ],
+   "path": "re/out/thread/thread_run.jsonl",
+   "producer": "re/oracle/thread_vectors.py",
+   "regenerate": "python3 re/oracle/thread_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-vm/tests/cell_identity.rs"
+   ],
+   "path": "re/out/vm-cell-identity-original.json",
+   "producer": "re/oracle/vm_cell_identity_probe.py",
+   "regenerate": "python3 re/oracle/vm_cell_identity_probe.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-vm/tests/instance_this_chronology.rs"
+   ],
+   "path": "re/out/vmexec/vm_instance_this_chronology.json",
+   "producer": "re/oracle/vmexec_vectors.py",
+   "regenerate": "python3 re/oracle/vmexec_vectors.py"
+  },
+  {
+   "consumed_by": [
+    "crates/slr-vm/tests/parameter_chronology.rs"
+   ],
+   "path": "re/out/vmexec/vm_parameter_chronology.json",
+   "producer": "re/oracle/vmexec_vectors.py",
+   "regenerate": "python3 re/oracle/vmexec_vectors.py"
+  }
+ ],
+ "lock": "re/out/fixtures-lock.json",
+ "producer_dirs": [
+  "re/oracle",
+  "re/headless",
+  "re",
+  "acceptance"
+ ],
+ "schema_version": 1
+}

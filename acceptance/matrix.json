@@ -385,10 +385,11 @@
       "kind": "gate",
       "title": "Physics level 1 (C): every physics native differential-tested over random and edge vectors, 0 ulp on trusted operations",
       "status": "partial",
-      "note": "slr-physics cfg vectors pass; several cfg rows still ported (no test yet).",
+      "note": "All 117 slr-physics cfg ledger rows pass (corpus plus synthetic leaf vectors; the skinned handler bug they found is fixed). acceptance/g4.py (--execute G4) classifies every physics native: of 250 functions 124 pass, 4 have no test (PhysicsRef.create/createBox/createSphere, Chassis.forceUpdate) and 122 natives (WheelRef, Part, Chassis, GroundRef, DynoData, SfxTable, Vehicle) are not ported yet (slr-boot capture-only). Vec3/Ypr natives that call APPROX transcendentals report blocked_by_g11.",
       "evidence": [
         "docs/acceptance-inventory.md",
-        "docs/fidelity.md"
+        "docs/fidelity.md",
+        "docs/physics.md"
       ]
     },
     {
@@ -427,9 +428,10 @@
       "kind": "gate",
       "title": "Saves/config (E): byte-identical SDAT/config from the same scripted session, cross-loading both ways",
       "status": "partial",
-      "note": "SDAT readers/writers and file natives have vectors; no end-to-end byte-identical session.",
+      "note": "Native-level S8 sessions compare equal; original-script career/config sessions and JPEG companion byte identity remain blocked on VM/render integration.",
       "evidence": [
-        "docs/acceptance-inventory.md"
+        "docs/acceptance-inventory.md",
+        "docs/saves-e2e.md"
       ]
     },
     {
@@ -448,10 +450,11 @@
       "kind": "gate",
       "title": "Float parity (ADR 0007/0008): bit-exact x87 transcendentals pinned to a documented implementation, no tolerance-based approval",
       "status": "partial",
-      "note": "SoftFloat vendored; Unicorn capture regenerated after the negative-zero encoder fix; Rosetta assessment pending.",
+      "note": "Per-operation trust table is machine-derived by acceptance/g11.py (--execute G11): arithmetic, compares, fistp, fld/fst, fscale and frndint pinned bit-exact; fsin/fcos/fpatan/f2xm1/fyl2x/fptan unpinned (Bochs and Rosetta differ on 5-9% of 80-bit results, no Intel silicon observation), fprem partial reductions, fxam/ftst unprobed. Blocked on a user decision and Intel x87 device access; see docs/research/x87-g11-decision.md.",
       "evidence": [
         "docs/acceptance-inventory.md",
-        "docs/x87.md"
+        "docs/x87.md",
+        "docs/research/x87-g11-decision.md"
       ]
     },
     {
@@ -519,8 +522,10 @@
       "title": "SDAT/config end-to-end byte-identity and cross-load",
       "status": "partial",
       "evidence": [
-        "docs/acceptance-inventory.md"
-      ]
+        "docs/acceptance-inventory.md",
+        "docs/saves-e2e.md"
+      ],
+      "note": "Fresh native-level original/port sessions compare SDAT bytes and cross-loading (26 sessions, 542 operations, 10 files); original manager registration executes unhooked. Script-level and JPEG requirements remain with G9."
     },
     {
       "id": "S9",

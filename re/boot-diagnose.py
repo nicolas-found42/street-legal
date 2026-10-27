@@ -25,7 +25,10 @@ import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "re/headless"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import calllog
+import diag_archive as archive
+import diag_fixtures as fixtures
 
 SCHEMA = 1
 MASK_POLICY = {"reference_arguments_and_results": True,
@@ -159,23 +162,45 @@ def load_records(path):
     return reader.records()
 
 
-def native_prefix(path):
+def native_prefix(path, scan_bytes=None):
     """Diagnostic only: retain decoded complete records before a crash tail."""
     if not path.exists(): return {"missing":True,"valid_records":0}
-    data = path.read_bytes()
-    records, offset, error = [], 8, None
+    total = path.stat().st_size
+    budget = total if scan_bytes is None else min(total, scan_bytes)
+    records, count, offset, scanned, error, truncated = [], 0, 8, 0, None, False
     try:
-        calllog.Reader(data)
-        while offset < len(data):
-            if offset + 5 > len(data): raise ValueError("truncated record header")
-            tag, size = struct.unpack_from("<BI",data,offset)
-            if size > calllog.MAX_BODY or offset + 5 + size > len(data): raise ValueError("truncated or oversized record")
-            decoded = calllog.Reader(data[:8] + data[offset:offset+5+size]).records()
-            records.extend(decoded)
-            offset += 5 + size
+        with path.open("rb") as source:
+            header = source.read(min(8, budget))
+            scanned = len(header)
+            if budget < 8 and total >= 8:
+                truncated = True
+            else:
+                calllog.Reader(header)
+                while offset < total:
+                    if budget - scanned < 5:
+                        truncated = budget < total
+                        if not truncated: raise ValueError("truncated record header")
+                        break
+                    frame = source.read(5)
+                    scanned += len(frame)
+                    if len(frame) != 5: raise ValueError("truncated record header")
+                    _, size = struct.unpack("<BI", frame)
+                    if size > calllog.MAX_BODY or offset + 5 + size > total:
+                        raise ValueError("truncated or oversized record")
+                    if size > budget - scanned:
+                        truncated = True
+                        break
+                    body = source.read(size)
+                    scanned += len(body)
+                    if len(body) != size: raise ValueError("truncated or oversized record")
+                    decoded = calllog.Reader(header + frame + body).records()
+                    count += len(decoded)
+                    records = (records + decoded)[-12:]
+                    offset += 5 + size
     except Exception as exception: error = str(exception)
-    return {"valid_records":len(records),"valid_bytes":offset,"total_bytes":len(data),
-        "tail_error":error,"tail_error_offset":offset if error else None,"recent_records":records[-12:],"acceptance_evidence":False}
+    return {"valid_records":count,"valid_bytes":offset,"total_bytes":total,
+        "tail_error":error,"tail_error_offset":offset if error else None,"recent_records":records,
+        "scanned_bytes":scanned,"truncated":truncated,"acceptance_evidence":False}
 
 
 def descriptor(signature):
@@ -459,7 +484,7 @@ def archive_root(runs_root):
     Tests and `analyze` treat every `runs/` child as a bundle, so nothing else
     may appear there.
     """
-    return Path(runs_root).resolve().parent
+    return archive.archive_root(runs_root)
 
 
 def store_path(runs_root, digest):
@@ -508,7 +533,12 @@ def snapshot(path, directory, label, runs_root=None):
 
 
 def index_path(runs_root):
-    return archive_root(runs_root) / "runs-index.jsonl"
+    return archive.index_path(runs_root)
+
+
+def resolve_record(record, runs_root):
+    """A record's bundle directory (relative, legacy-absolute or moved), or None."""
+    return archive.resolve_bundle(record, runs_root, REPO)
 
 
 def append_index(runs_root, record):
@@ -527,11 +557,17 @@ def append_index(runs_root, record):
         os.fsync(output.fileno())
 
 
-def index_record(bundle, manifest, report):
-    """The searchable summary of one bundle."""
-    comparisons = report.get("comparisons", {})
+def index_record(bundle, manifest, report, runs_root=None):
+    """The searchable summary of one bundle.
+
+    With `runs_root`, `bundle` is stored relative to it so the record survives
+    the checkout or worktree that produced it; without, it stays absolute.
+    """
+    comparisons = report.get("comparisons") or {}
     first = next(({"comparison": label, **value} for label, value in comparisons.items()
                   if value.get("equal") is False), None)
+    origin = archive.record_provenance(manifest, bundle)
+    signature, values_signature = archive.mismatch_signature({**report, "comparisons": comparisons})
     # A frontend bundle has no native comparison: it is neither passing nor
     # failing parity, and must not be read as either.
     artifacts = manifest.get("artifacts", {})
@@ -542,23 +578,35 @@ def index_record(bundle, manifest, report):
     return {
         "schema_version": 1,
         "run_id": manifest.get("run_id"),
-        "bundle": str(bundle),
+        "bundle": archive.relative_bundle(bundle, runs_root) if runs_root is not None else str(bundle),
+        "kind": manifest.get("kind", "run"),
         "embedding": manifest.get("embedding", "slr-boot"),
         "started": manifest.get("started"),
         "finished": manifest.get("finished"),
         "status": manifest.get("status"),
         "error": report.get("error"),
-        "source_commit": (manifest.get("source") or {}).get("commit"),
-        "source_dirty": (manifest.get("source") or {}).get("dirty"),
+        "source_commit": origin["source_commit"],
+        "source_commit_reason": origin["source_commit_reason"],
+        "source_commit_basis": origin["source_commit_basis"],
+        "branch": origin["branch"],
+        "worktree": origin["worktree"],
+        "session": origin["session"],
+        "source_dirty": origin["source_dirty"],
+        "source_diff_sha256": origin["source_diff_sha256"],
         "source_run": (manifest.get("source_run") or {}).get("run_id"),
         "binary_sha256": (manifest.get("binary") or {}).get("sha256"),
+        "case_sha256": archive.case_signature(manifest),
         "configuration": {key: (manifest.get("configuration") or {}).get(key) for key in
                           ("frames", "trace_level", "event_ring", "clock_mask", "stock")},
         "comparisons": {label: {"equal": value.get("equal"), "record": value.get("record"),
-                                "kind": value.get("kind"), "expected_records": value.get("expected_records"),
+                                "kind": value.get("kind"), "records": value.get("records"),
+                                "expected_records": value.get("expected_records"),
                                 "actual_records": value.get("actual_records")}
                         for label, value in comparisons.items()},
+        **archive.progress(comparisons),
         "first_mismatch": first,
+        "first_mismatch_signature": signature,
+        "first_mismatch_values_signature": values_signature,
         "native_call_id": (report.get("divergence_context") or {}).get("event", {}).get("context", {}).get("native", {}).get("call_id"),
         "targeted_rerun": {key: (report.get("targeted_rerun") or {}).get(key)
                            for key in ("identical_full_traces", "snapshot_valid")},
@@ -574,8 +622,12 @@ def index_record(bundle, manifest, report):
     }
 
 
-def prune(runs_root, keep, dry_run=False):
-    """Delete the oldest bundles, newest `keep` retained.
+def prune(runs_root, keep, dry_run=False, kind="run"):
+    """Delete the oldest bundles of one `kind`, newest `keep` retained.
+
+    Only `kind` bundles are candidates (default: runs); hook records share the
+    archive but never displace parity runs from retention, and are pruned with
+    `--kind hook`.
 
     A `running` bundle is never removed: its writer may still be appending.
     The index is left intact, so pruning is visible in the history.
@@ -591,8 +643,10 @@ def prune(runs_root, keep, dry_run=False):
             manifest = json.loads((child / "manifest.json").read_text())
         except Exception:
             continue
+        if manifest.get("kind", "run") != kind:
+            continue
         bundles.append((manifest.get("started") or "", child, manifest))
-    bundles.sort()
+    bundles.sort(key=lambda item: item[0])
     removed, retained = [], []
     for started, child, manifest in bundles[:-keep] if len(bundles) > keep else []:
         if manifest.get("status") == "running":
@@ -643,13 +697,28 @@ def environment_identity(repository):
     }
 
 
-def flake_summary(statuses):
-    """Failure rate over repeated identical executions of one case."""
+def flake_summary(statuses, signatures=None, values_signatures=None):
+    """Failure rate and first-mismatch agreement over repeated executions of one case.
+
+    `signatures` are the runs' first-mismatch signatures (None for a run with no
+    mismatch). Identical failures are deterministic; the case is nondeterministic
+    when outcomes are mixed or the runs fail at different places or with
+    different values.
+    """
     total = len(statuses)
     failed = sum(1 for status in statuses if status != "completed")
-    return {"iterations": total, "failed": failed, "completed": total - failed,
-            "rate": (failed / total) if total else 0.0, "statuses": list(statuses),
-            "nondeterministic": 0 < failed < total}
+    summary = {"iterations": total, "failed": failed, "completed": total - failed,
+               "rate": (failed / total) if total else 0.0, "statuses": list(statuses),
+               "nondeterministic": 0 < failed < total}
+    if signatures is not None:
+        distinct = {signature for signature in signatures}
+        values = {signature for signature in (values_signatures or signatures)}
+        summary.update({"first_mismatch_signatures": list(signatures),
+                        "distinct_signatures": len(distinct),
+                        "signature_stable": len(distinct) <= 1,
+                        "values_stable": len(values) <= 1})
+        summary["nondeterministic"] = summary["nondeterministic"] or len(distinct) > 1 or len(values) > 1
+    return summary
 
 
 def file_issue(repository, record, bundle):
@@ -700,6 +769,9 @@ def run_once(args, extra):
         "event_ring":args.event_ring,"extra":extra,"clock_mask":args.clock_mask,"stock":args.stock,
         "repeat":args.repeat,"wall_clock":args.wall_clock}
     manifest["environment"] = environment_identity(repository)
+    # Provenance is recorded before anything can fail, so even a run that dies
+    # during setup names its commit (or says why it cannot).
+    manifest["provenance"] = archive.provenance(repository)
     dump(bundle / "manifest.json", manifest)
     report, exit_code = {"comparisons": {}}, 2
     try:
@@ -707,6 +779,7 @@ def run_once(args, extra):
         outputs = [Path(args.runs_root), index_path(args.runs_root),
                    archive_root(args.runs_root) / "inputs-store"]
         manifest["source"], diff = git_identity(repository, outputs)
+        manifest["provenance"] = archive.provenance(repository, manifest["source"])
         (bundle / "source.diff").write_bytes(diff)
         manifest["source_untracked"] = archive_untracked_sources(repository, bundle, manifest["source"])
         stock = tree_identity(repository / args.stock)
@@ -940,8 +1013,14 @@ def run_once(args, extra):
             frontier = expected_regression.get("frontier")
             current = report.get("comparisons",{}).get(frontier["comparison"],{}) if frontier else {}
             fixed = bool(frontier and (current.get("equal") is True or current.get("record",0) > frontier["record"]))
+            prior_prefix = frontier["record"] - 1 if frontier and isinstance(frontier.get("record"), int) else None
+            current_prefix, _ = archive.comparison_progress(current) if frontier else (None, None)
+            # A shorter matched prefix than the frozen frontier is a regression
+            # even though the comparison as a whole fails either way.
             report["regression_check"] = {"source_run_id":expected_regression["run_id"],"passed":fixed,
-                "full_parity":manifest["status"] == "completed","prior_frontier":frontier}
+                "full_parity":manifest["status"] == "completed","prior_frontier":frontier,
+                "prior_matched_prefix":prior_prefix,"matched_prefix":current_prefix,
+                "regressed":bool(prior_prefix is not None and current_prefix is not None and current_prefix < prior_prefix)}
         if manifest["status"] != "completed":
             report["native_prefixes"] = {label:native_prefix(bundle / "runtime" / name) for label,name in
                 (("filtered","runtime.calllog"),("unfiltered","runtime-all.calllog"))}
@@ -963,11 +1042,14 @@ def run(args, extra):
         status, bundle, manifest, report = run_once(args, extra)
         iterations.append((status, bundle, manifest, report))
         exit_code = exit_code or status
-    flake = (
-        flake_summary([manifest.get("status") for _, _, manifest, _ in iterations])
-        if args.repeat > 1
-        else None
-    )
+    flake = None
+    if args.repeat > 1:
+        recorded = [index_record(bundle, manifest, report) for _, bundle, manifest, report in iterations]
+        flake = flake_summary([manifest.get("status") for _, _, manifest, _ in iterations],
+                              [record["first_mismatch_signature"] for record in recorded],
+                              [record["first_mismatch_values_signature"] for record in recorded])
+        if args.flake_check and flake["nondeterministic"]:
+            exit_code = 3
     last = iterations[-1]
     for index, (_, bundle, manifest, report) in enumerate(iterations):
         manifest["flake"] = {**flake, "iteration": index + 1} if flake else manifest.get("flake")
@@ -975,7 +1057,7 @@ def run(args, extra):
         if flake:
             dump(bundle / "report.json", report)
             dump(bundle / "manifest.json", manifest)
-        record = index_record(bundle, manifest, report)
+        record = index_record(bundle, manifest, report, args.runs_root)
         if flake:
             record["flake"] = manifest["flake"]
         append_index(args.runs_root, record)
@@ -987,7 +1069,7 @@ def run(args, extra):
         report["pruned"] = prune(args.runs_root, args.prune_keep)
         dump(bundle / "report.json", report)
     if exit_code != 0 and args.file_issue:
-        record = index_record(bundle, manifest, report)
+        record = index_record(bundle, manifest, report, args.runs_root)
         command = file_issue(repository, record, bundle)
         if args.file_issue == "dry-run":
             report["issue_command"] = command
@@ -1051,7 +1133,7 @@ def bundle_manifest(bundle):
     }
 
 
-def index_bundle(bundle):
+def index_bundle(bundle, runs_root=None):
     """Build an index record from a finished bundle already on disk."""
     bundle = Path(bundle).resolve()
     manifest = bundle_manifest(bundle)
@@ -1063,55 +1145,69 @@ def index_bundle(bundle):
         report["error"] = json.loads(end_path.read_text()).get("error")
     if "status" not in report:
         report["status"] = manifest.get("status")
-    return index_record(bundle, manifest, report)
+    return index_record(bundle, manifest, report, runs_root)
 
 
-def index_missing(runs_root, rebuild=False):
-    """Index every bundle that has no record; `rebuild` rewrites the whole file."""
+def index_missing(runs_root, rebuild=False, dry_run=False, source=None):
+    """Index every bundle that has no record.
+
+    `rebuild` replaces the whole index through `archive.rebuild_index`: the old
+    file is backed up, the new one is written and verified beside it, and only
+    then swapped in. Bundles are only ever read. `dry_run` stops before the swap.
+    """
     root = Path(runs_root).resolve()
-    path = index_path(runs_root)
+    if rebuild:
+        result = archive.rebuild_index(root, index_bundle, REPO, apply=not dry_run, source=source)
+        if not result["verified"]:
+            raise ValueError("index rebuild failed verification; index left unchanged: "
+                             + "; ".join(result["problems"]))
+        return result
     known = set()
-    if path.exists() and not rebuild:
-        known = {record.get("bundle") for record in read_index(runs_root)}
+    if index_path(root).exists():
+        for record in archive.read_lines(index_path(root)):
+            known.add(record.get("run_id"))
+            resolved = resolve_record(record, root)
+            if resolved is not None:
+                known.add(resolved.name)
     added, skipped = [], []
     for child in sorted(root.iterdir()):
         if not child.is_dir():
             continue
         bundle = child.resolve()
-        if str(bundle) in known:
+        if bundle.name in known:
             continue
         try:
-            record = index_bundle(bundle)
+            record = index_bundle(bundle, root)
         except (OSError, ValueError) as error:
             skipped.append({"bundle": str(bundle), "reason": str(error)})
             continue
         added.append(record)
-    if rebuild and path.exists():
-        path.unlink()
     for record in added:
         append_index(runs_root, record)
     return {"added": len(added), "skipped": skipped, "records": added}
 
 
 def read_index(runs_root):
-    path = index_path(runs_root)
-    if not path.exists():
-        return []
-    records = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            records.append(json.loads(line))
+    """Every record, oldest first, with `bundle_path` resolved when it exists.
+
+    `bundle_path` is added in memory for the caller; it is never written back.
+    """
+    records = archive.read_lines(index_path(runs_root))
     # The file is appended in whatever order bundles were discovered. Chronology
     # is what "latest" and "outstanding" mean, so order by start time and fall
     # back to the directory's mtime for bundles whose wrapper never started.
     def started(record):
         return record.get("started") or ""
     def mtime(record):
+        path = record.get("bundle_path")
         try:
-            return Path(record["bundle"]).stat().st_mtime
-        except (OSError, KeyError):
+            return Path(path).stat().st_mtime if path else 0.0
+        except OSError:
             return 0.0
-    records = list({record.get("bundle"): record for record in records}.values())
+    for record in records:
+        resolved = resolve_record(record, runs_root)
+        record["bundle_path"] = str(resolved) if resolved else None
+    records = list({(record.get("run_id") or record.get("bundle")): record for record in records}.values())
     records.sort(key=lambda record: (started(record), mtime(record)))
     return records
 
@@ -1129,12 +1225,42 @@ def query_index(runs_root, status=None, source_commit=None, since=None, limit=No
     return records
 
 
+def status_lines(status):
+    """The status as short text lines: one per commit trend, REGRESSION first."""
+    lines = []
+    shown = status.get("regressions", [])[-10:]
+    if len(status.get("regressions", [])) > len(shown):
+        lines.append(f"... {len(status['regressions']) - len(shown)} older regressions omitted (see `regressions` in the JSON)")
+    for item in shown:
+        lines.append(f"REGRESSION run {item['run_id']} commit {item['commit'][:12]} matched prefix "
+                     f"{item['matched_prefix']} < {item['best_prior_prefix']} "
+                     f"(best ancestor run {item['best_prior_run']} at {item['best_prior_commit'][:12]}; "
+                     f"lost {item['lost_records']} records)")
+    for entry in status.get("trend", []):
+        lines.append(f"commit {entry['commit'][:12]} runs={entry['runs']} best_prefix={entry['best']} "
+                     f"latest_prefix={entry['latest']} (run {entry['latest_run']})")
+    if status.get("unknown_commit_runs"):
+        lines.append(f"{status['unknown_commit_runs']} runs have an unknown commit and are excluded from the trend")
+    return lines
+
+
 def bundle_status(runs_root):
-    """Latest bundle per state, with the newest failing bundle called out."""
-    records = read_index(runs_root)
+    """Latest bundle per state, the newest failure, and matched-prefix progress.
+
+    `trend` is the best/latest matched prefix per commit; `regressions` lists runs
+    whose prefix is shorter than the best earlier run of the same case at an
+    ancestor commit. Hook records are reported apart: they gate commits, not parity.
+    """
+    everything = read_index(runs_root)
+    hooks = [record for record in everything if record.get("kind") == "hook"]
+    records = [record for record in everything if record.get("kind") != "hook"]
+    hook_failed = [record for record in hooks if record.get("status") != "completed"]
+    hook_summary = {"records": len(hooks), "latest": hooks[-1] if hooks else None,
+                    "latest_failed": hook_failed[-1] if hook_failed else None}
     if not records:
-        return {"records": 0, "latest": None, "latest_failed": None,
-                "outstanding": [], "note": "no indexed bundles"}
+        return {"records": 0, "latest": None, "latest_failed": None, "outstanding": [],
+                "note": "no indexed bundles", "trend": [], "regressions": [], "hooks": hook_summary,
+                "lines": []}
     latest = records[-1]
     failed = [record for record in records if record.get("status") != "completed"]
     # A failure is outstanding unless a later completed run exists for the same case.
@@ -1145,9 +1271,228 @@ def bundle_status(runs_root):
                    and later.get("started", "") > record.get("started", "")
                    for later in records):
             outstanding.append(record)
-    return {"records": len(records), "latest": latest,
-            "latest_failed": failed[-1] if failed else None,
-            "outstanding": outstanding}
+    progress = archive.trend_and_regressions(records, REPO)
+    result = {"records": len(records), "latest": latest,
+              "latest_failed": failed[-1] if failed else None,
+              "outstanding": outstanding, **progress, "hooks": hook_summary,
+              "unknown_commit_runs": sum(1 for record in records
+                                         if record.get("source_commit") in (None, archive.UNKNOWN))}
+    result["lines"] = status_lines(result)
+    return result
+
+
+DIGEST_SCHEMA = 1
+DIGEST_CHAIN = 20
+DIGEST_BYTES = 48 * 1024
+DIGEST_SCAN_BYTES = 1024 * 1024
+DIGEST_STRING = 240
+
+
+def find_bundle(target, runs_root):
+    """A bundle directory from a path, a run ID or a unique run-ID prefix."""
+    path = Path(target)
+    if path.is_dir():
+        return path.resolve()
+    root = Path(runs_root)
+    roots = [root, *archive.legacy_roots(REPO)]
+    if index_path(root).exists():
+        matches = [record for record in read_index(root) if (record.get("run_id") or "").startswith(str(target))]
+        if len(matches) > 1:
+            raise ValueError(f"run ID prefix is ambiguous: {target} ({len(matches)} matches)")
+        if matches and matches[0].get("bundle_path"):
+            return Path(matches[0]["bundle_path"])
+    for candidate_root in roots:
+        if (candidate_root / str(target)).is_dir():
+            return (candidate_root / str(target)).resolve()
+        if candidate_root.is_dir():
+            near = [child for child in candidate_root.iterdir() if child.is_dir() and child.name.startswith(str(target))]
+            if len(near) == 1:
+                return near[0].resolve()
+    raise ValueError(f"no bundle or run ID matches {target!r} under {root}")
+
+
+def clip(value, limit=DIGEST_STRING):
+    """Bound any JSON value: long strings are cut and say how much was lost."""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + f"...[+{len(value) - limit} chars]"
+    if isinstance(value, (list, tuple)):
+        return [clip(item, limit) for item in value[:16]] + ([f"...[+{len(value) - 16} items]"] if len(value) > 16 else [])
+    if isinstance(value, dict):
+        return {str(key): clip(item, limit) for key, item in list(value.items())[:24]}
+    return value
+
+
+def event_summary(event):
+    kind = event.get("kind") if isinstance(event.get("kind"), dict) else {"event": event.get("kind")}
+    context = event.get("context") or {}
+    native = context.get("native") or {}
+    return {"sequence": event.get("sequence"), "category": kind.get("category") or kind.get("event"),
+            "fields": clip(kind.get("fields", [])), "thread": context.get("thread_name"),
+            "script": (context.get("location") or {}).get("label"),
+            "native": {key: native.get(key) for key in ("call_id", "class", "name")} if native else None}
+
+
+def tail_events(path, count, scan_bytes):
+    """The last `count` complete events of a stream, reading at most `scan_bytes`.
+
+    Returns (events, truncated). A crashed writer leaves a partial final line;
+    it is dropped, never guessed at. `truncated` says earlier events exist.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return [], False
+    size = path.stat().st_size
+    with path.open("rb") as source:
+        source.seek(max(0, size - scan_bytes))
+        data = source.read()
+    lines = data.split(b"\n")
+    complete = size - len(data) == 0
+    if size > scan_bytes:
+        lines = lines[1:]  # first line is cut mid-record
+        complete = False
+    lines = lines[:-1] if lines and lines[-1] != b"" else lines  # partial tail from a killed writer
+    events = []
+    for line in lines:
+        if line.strip():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # a torn record is skipped, never repaired
+    return events[-count:], (not complete) or len(events) > count
+
+
+def digest(target, runs_root, chain=DIGEST_CHAIN, max_bytes=DIGEST_BYTES, scan_bytes=DIGEST_SCAN_BYTES):
+    """A size-bounded summary of one bundle for an agent. Reads; never executes.
+
+    Works on complete, failed and unfinished bundles: every section that cannot
+    be read becomes an entry in `errors` rather than a failure. Every cut
+    (events, strings, bytes scanned, the runtime's own ring) sets a flag under
+    `truncated`, so a short answer is never mistaken for a complete one.
+    """
+    bundle = find_bundle(target, runs_root)
+    errors, truncated = [], {}
+    def guarded(label, function, default=None):
+        try:
+            return function()
+        except Exception as error:
+            errors.append({"section": label, "error": f"{type(error).__name__}: {error}"})
+            return default
+    manifest = guarded("manifest", lambda: bundle_manifest(bundle), {})
+    report_path = bundle / "report.json"
+    report = {}
+    if report_path.is_file():
+        if report_path.stat().st_size > 64 * 1024 * 1024:
+            truncated["report"] = f"report.json is {report_path.stat().st_size} bytes; not loaded"
+        else:
+            report = guarded("report", lambda: json.loads(report_path.read_text()), {})
+    record = guarded("index_record", lambda: index_record(bundle, manifest, report, Path(runs_root)), {}) or {}
+    comparisons = report.get("comparisons") or manifest.get("comparisons") or {}
+    mismatch_value = next(((label, value) for label, value in comparisons.items() if value.get("equal") is False), None)
+    mapped = (report.get("divergence_context") or {}).get("comparison")
+    if mapped in comparisons:
+        mismatch_value = (mapped, comparisons[mapped])
+    first = None
+    if mismatch_value:
+        label, value = mismatch_value
+        first = {"comparison": label, "kind": value.get("kind"), "record": value.get("record"),
+                 "expected": clip(value.get("expected")), "actual": clip(value.get("actual")),
+                 "expected_records": value.get("expected_records"), "actual_records": value.get("actual_records"),
+                 "signature": record.get("first_mismatch_signature")}
+    event = (report.get("divergence_context") or {}).get("event")
+    native = ((event or {}).get("context") or {}).get("native")
+    streams = stream_dir(bundle)
+    if event:
+        history = (report["divergence_context"].get("preceding_events") or [])[-(chain - 1):] + [event]
+        chain_events, cut = history, len((report["divergence_context"].get("preceding_events") or [])) > chain - 1
+    else:
+        chain_events, cut = guarded("events", lambda: tail_events(streams / "events.jsonl", chain, scan_bytes), ([], False))
+    truncated["causal_chain"] = bool(cut)
+    failure = None
+    failure_path = streams / "failure.json"
+    if failure_path.is_file():
+        value = guarded("failure", lambda: json.loads(failure_path.read_text()), None)
+        if isinstance(value, dict):
+            stats = value.get("diagnostics") or {}
+            ring = value.get("recent_events") or []
+            failure = {"present": True, "message": clip(value.get("message") or value.get("failure"), 600),
+                       "location": value.get("location"), "phase": value.get("phase"),
+                       "backtrace": clip(value.get("backtrace"), 1500),
+                       "ring": {"capacity": stats.get("capacity"), "events_total": stats.get("events_total"),
+                                "retained": stats.get("ring_retained"), "evicted": stats.get("ring_evicted"),
+                                "returned": min(len(ring), chain), "ring_truncated": bool(stats.get("ring_evicted")),
+                                "output_truncated": len(ring) > chain},
+                       "recent_events": [event_summary(item) for item in ring[-chain:]]}
+            truncated["failure_ring"] = bool(stats.get("ring_evicted")) or len(ring) > chain
+    if failure is None:
+        failure = {"present": False}
+    crash_path = streams / "crash.json"
+    crash = guarded("crash", lambda: json.loads(crash_path.read_text()), None) if crash_path.is_file() else None
+    prefixes = None
+    if manifest.get("status") in (None, "running") or not comparisons:
+        prefixes = {label: {key: value for key, value in native_prefix(streams / name, scan_bytes).items() if key != "recent_records"}
+                    for label, name in (("filtered", "runtime.calllog"), ("unfiltered", "runtime-all.calllog"))}
+        truncated["native_prefixes"] = any(value.get("truncated") for value in prefixes.values())
+    runs = Path(runs_root)
+    quoted = lambda path: json.dumps(str(path))
+    commands = {"replay_from": f"python3 re/boot-diagnose.py --runs-root {runs} --replay-from {bundle}",
+                "check_regression": f"python3 re/boot-diagnose.py --runs-root {runs} --check-regression {bundle}",
+                "analyze": f"python3 re/boot-diagnose.py analyze {bundle}",
+                "digest": f"python3 re/boot-diagnose.py digest {bundle} --json"}
+    result = {"schema_version": DIGEST_SCHEMA, "run_id": manifest.get("run_id"), "bundle": str(bundle),
+              "embedding": manifest.get("embedding", "slr-boot"), "kind": record.get("kind", "run"),
+              "status": manifest.get("status"), "finished": manifest.get("finished"),
+              "reconstructed": manifest.get("reconstructed"), "error": clip(report.get("error") or manifest.get("error"), 600),
+              "provenance": {key: record.get(key) for key in ("source_commit", "source_commit_reason",
+                             "source_commit_basis", "branch", "worktree", "session", "source_dirty",
+                             "source_diff_sha256", "binary_sha256")},
+              "progress": {"matched_prefix": record.get("matched_prefix"), "records_total": record.get("records_total"),
+                           "first_mismatch_signature": record.get("first_mismatch_signature")},
+              "first_mismatch": first,
+              "native_call": ({key: native.get(key) for key in ("call_id", "class", "name", "signature")} if native else None),
+              "causal_chain": [event_summary(item) for item in chain_events],
+              "failure": failure,
+              "crash": clip(crash, 400) if crash else None,
+              "native_prefixes": prefixes,
+              "targeted_rerun": record.get("targeted_rerun"),
+              "commands": commands, "errors": errors,
+              "limits": {"chain_events": chain, "max_bytes": max_bytes, "string_chars": DIGEST_STRING,
+                         "scan_bytes": scan_bytes},
+              "truncated": truncated}
+    result["bytes"] = 0
+    def size():
+        # Include the bytes field itself and the CLI's trailing newline.
+        while result["bytes"] != len(digest_json(result).encode()):
+            result["bytes"] = len(digest_json(result).encode())
+        return result["bytes"]
+    # Last resort for a pathological bundle: shed the oldest chain entries,
+    # then the ring, until the answer fits; each cut is declared.
+    while size() > max_bytes and result["causal_chain"]:
+        result["causal_chain"] = result["causal_chain"][len(result["causal_chain"]) // 4 + 1:]
+        result["truncated"]["causal_chain"] = True
+        result["truncated"]["output"] = True
+    while size() > max_bytes and result["failure"].get("recent_events"):
+        result["failure"]["recent_events"] = result["failure"]["recent_events"][len(result["failure"]["recent_events"]) // 4 + 1:]
+        result["failure"]["ring"]["output_truncated"] = True
+        result["failure"]["ring"]["returned"] = len(result["failure"]["recent_events"])
+        result["truncated"]["failure_ring"] = True
+        result["truncated"]["output"] = True
+    # Small budgets may not hold even an empty chain and ring. Explicitly
+    # omit optional sections rather than return an oversized digest.
+    for section in ("commands", "crash", "targeted_rerun", "native_prefixes", "provenance",
+                    "native_call", "first_mismatch", "failure", "error", "errors", "bundle",
+                    "run_id", "progress", "reconstructed", "finished", "embedding", "kind", "status"):
+        if size() <= max_bytes:
+            break
+        result[section] = None
+        result["truncated"]["output"] = True
+        result["truncated"].setdefault("sections", []).append(section)
+    size()
+    return result
+
+
+def digest_json(result):
+    """The exact serialization whose UTF-8 size the digest reports."""
+    return json.dumps(result, indent=2, sort_keys=True, default=str) + "\n"
 
 
 def main(argv=None):
@@ -1155,29 +1500,80 @@ def main(argv=None):
     if argv[:1] in (["index"], ["list"], ["query"], ["status"], ["prune"]):
         command, rest = argv[0], argv[1:]
         parser = argparse.ArgumentParser(prog=f"boot-diagnose.py {command}")
-        parser.add_argument("--runs-root", default=str(REPO / "re/out/boot/runs"))
+        parser.add_argument("--runs-root", default=None,
+                            help="runs directory (default: $SLR_RUNS_ROOT/boot/runs, else the permanent "
+                                 "archive, else a repository-local re/out/boot/runs that already has history)")
         parser.add_argument("--status")
         parser.add_argument("--commit")
         parser.add_argument("--since")
         parser.add_argument("--limit", type=int)
         parser.add_argument("--keep", type=int)
         parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--source", help="index --rebuild: read bundles (and the old index) from this existing "
+                                             "runs directory, read-only, and write the new index under --runs-root")
+        parser.add_argument("--kind", default="run", choices=["run", "hook"], help="prune: which records to retire")
         parser.add_argument("--rebuild", action="store_true",
-                            help="index: discard the existing index and rebuild it")
+                            help="index: one-time safe rebuild from the bundles on disk (backup, verify "
+                                 "in a new file, then atomic swap; bundles are never modified)")
         parser.add_argument("--json", action="store_true")
+        parser.add_argument("--text", action="store_true", help="status: print the trend lines, not JSON")
         options = parser.parse_args(rest)
+        options.runs_root = str(archive.reader_runs_root(options.runs_root, REPO) if command != "prune"
+                                else (options.runs_root or archive.default_runs_root()))
         if command == "prune":
             if options.keep is None:
                 parser.error("prune needs --keep N")
-            result = prune(options.runs_root, options.keep, options.dry_run)
+            result = prune(options.runs_root, options.keep, options.dry_run, options.kind)
         elif command == "index":
-            result = index_missing(options.runs_root, options.rebuild)
+            result = index_missing(options.runs_root, options.rebuild, options.dry_run, options.source)
         elif command == "status":
             result = bundle_status(options.runs_root)
+            if options.text:
+                print("\n".join(result["lines"]) or "no matched-prefix history")
+                return 0
         else:
             result = query_index(options.runs_root, options.status, options.commit,
                                  options.since, options.limit)
         print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0
+    if argv[:1] == ["fixtures"]:
+        parser = argparse.ArgumentParser(prog="boot-diagnose.py fixtures",
+                                         description="Provenance and staleness of the local re/out test fixtures.")
+        parser.add_argument("action", choices=["status", "lock", "snapshot"])
+        parser.add_argument("--repository", default=str(REPO))
+        parser.add_argument("--manifest")
+        parser.add_argument("--lock")
+        parser.add_argument("--json", action="store_true")
+        options = parser.parse_args(argv[1:])
+        registry = fixtures.load_manifest(options.repository, options.manifest)
+        lock_file = fixtures.lock_path(options.repository, registry, options.lock)
+        if options.action == "lock":
+            written = fixtures.lock(options.repository, registry, lock_file)
+            print(json.dumps({"lock": str(lock_file), "locked": len(written)}) if options.json
+                  else f"locked {len(written)} fixtures in {lock_file}")
+            return 0
+        if options.action == "snapshot":
+            print(json.dumps(fixtures.snapshot(options.repository, registry), indent=2, sort_keys=True))
+            return 0
+        results = fixtures.evaluate(options.repository, registry, fixtures.load_lock(lock_file))
+        if options.json:
+            print(json.dumps({"fixtures": results, "lines": fixtures.status_lines(results)}, indent=2))
+        else:
+            print("\n".join(fixtures.status_lines(results)))
+        return 1 if fixtures.fatal(results) else 0
+    if argv[:1] == ["digest"]:
+        parser = argparse.ArgumentParser(prog="boot-diagnose.py digest",
+                                         description="Bounded JSON summary of one bundle; never runs the game.")
+        parser.add_argument("target", help="bundle directory, run ID or unique run-ID prefix")
+        parser.add_argument("--runs-root", default=None)
+        parser.add_argument("--json", action="store_true", help="accepted for clarity; output is always JSON")
+        parser.add_argument("--chain", type=int, default=DIGEST_CHAIN)
+        parser.add_argument("--max-bytes", type=int, default=DIGEST_BYTES)
+        options = parser.parse_args(argv[1:])
+        if options.chain < 1 or options.max_bytes < 2048:
+            parser.error("--chain must be positive and --max-bytes at least 2048")
+        runs_root = archive.reader_runs_root(options.runs_root, REPO)
+        print(digest_json(digest(options.target, runs_root, options.chain, options.max_bytes)), end="")
         return 0
     if argv[:1] == ["analyze"]:
         parser = argparse.ArgumentParser()
@@ -1199,7 +1595,9 @@ def main(argv=None):
     parser.add_argument("--repository", default=str(REPO))
     parser.add_argument("--stock", default="stock")
     parser.add_argument("--native-api", default="re/out/native_api.tsv")
-    parser.add_argument("--runs-root", default=str(REPO / "re/out/boot/runs"))
+    parser.add_argument("--runs-root", default=str(archive.default_runs_root("boot")),
+                        help="where new bundles go (default: $SLR_RUNS_ROOT/boot/runs, else "
+                             "~/.local/share/street-legal/boot/runs)")
     parser.add_argument("--binary", default="target/debug/slr-boot")
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("SLR_BOOT_SECONDS", "120")))
     parser.add_argument("--no-build", action="store_true")
@@ -1218,6 +1616,9 @@ def main(argv=None):
                         help="add a monotonic wall-clock field to every event")
     parser.add_argument("--repeat", type=int, default=1,
                         help="run the same case N times and record the flake rate")
+    parser.add_argument("--flake-check", type=int, metavar="N", default=None,
+                        help="opt-in determinism check: run the case N times, compare first-mismatch "
+                             "signatures, record the flake summary; exit 3 when runs disagree")
     parser.add_argument("--keep", dest="prune_keep", type=int, default=None,
                         help="after the run, retain only the newest N bundles")
     parser.add_argument("--file-issue", nargs="?", const="create", choices=["create", "dry-run"],
@@ -1247,6 +1648,10 @@ def main(argv=None):
     if args.clock_mask is None: args.clock_mask = "strict" if args.replay else "legacy"
     if args.timeout <= 0 or args.event_ring <= 0 or args.frames is not None and args.frames < 0:
         parser.error("timeout/event-ring must be positive and frames nonnegative")
+    if args.flake_check is not None:
+        if args.flake_check < 2:
+            parser.error("--flake-check needs at least 2 runs")
+        args.repeat = args.flake_check
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
     if args.prune_keep is not None and args.prune_keep < 1:

@@ -813,21 +813,20 @@ fn frame_body(
         return Ok(());
     }
     let c = camera(m);
-    let hit = host.pick(
-        m,
-        [
-            b + 0xa4,
-            c + 0x74,
-            c + 0x6c,
-            c + 0x4c,
-            c + 0x58,
-            c + 0x64,
-            c + 0x48,
-            c,
-            c + 0xc,
-            c + 0x68,
-        ],
-    )?;
+    let arguments = [
+        b + 0xa4,
+        c + 0x74,
+        c + 0x6c,
+        c + 0x4c,
+        c + 0x58,
+        c + 0x64,
+        c + 0x48,
+        c,
+        c + 0xc,
+        c + 0x68,
+    ];
+    let hit =
+        crate::native_stack::call(m, 0x46034e, &arguments, None, |m| host.pick(m, arguments))?;
     for i in 0..3 {
         m.w32(
             b + 0x164 + i * 4,

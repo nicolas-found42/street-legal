@@ -7,49 +7,128 @@ This file is the handoff. Update it at every milestone; do not keep a second cop
 
 ## Current state (authoritative; supersedes every section below)
 
-### 2026-10-26: strict 331-frame replay matches 7,001 records
+### 2026-10-27: full-port campaign resumed
 
-On `claude/native-vm-raw-runtime-f0ad55`, the strict clock replay
-(`--frames 331 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`)
-matches 7,001 unfiltered / 4,892 filtered records with no ABI-guard
-rejections. Its first divergence is a latched clock-context mismatch at
-unfiltered #7002: the tape expects a `THRD-RUNVMI Dummy.handleEvent`
-(`java.render.Group`) callback where the port runs `Osd.animate`. That is
-consistent with the skipped car native drive `0x454500` (below), which the
-original runs at frame 31. The four stock integration tests pass. Changes:
+The user resumed end-to-end implementation with full-send authorization. The
+completion contract is unchanged: every P01–P30 feature and every G/S gate must
+pass its executable requirements. No P01–P30 feature is accepted. A default
+report-only run is not an acceptance run; bounded supporting results such as S8
+do not close the feature or whole-game obligations.
+The old stopped-state checkpoint below is historical, not the current frontier.
 
-- **Record 647 was a queue regression, not the ABI guard.** The raw-native
-  checkpoint made `sched::run_callback` destroy a finished void callback at
-  once. The original clock tape (request 6224) shows the driver cursor on a
-  STOPPED `THRD-RUNVMI Controller.setcontrol` thread: the original keeps
-  finished void callbacks queued until the driver kills and reaps them, as
-  `main` did. Finished void callbacks now stay queued and the reaper retires
-  them. A latched replay divergence now leads the failure text.
-- **Audited nested-native admission** (`native_nested.rs`). Inside a script
-  callback entered from a validated 425a90 wrapper CALL (return PC 427111
-  animate, 426da3 control or 447c41 car add-part, with its fixed argument
-  words, nothing entered since), the ABI guard admits only natives whose
-  production implementation is audited not to touch native memory:
-  `Input.lastKey`, `System.currentTime`, `System.arraycopy`,
-  `GameRef.getScriptInstance`, `RenderRef.setMatrix(Vector3;Ypr)`,
-  `Vector3.length`, `String.length`, `String.append(I)`,
-  `ResourceRef.newNative/set/cache/destroy`, `Text.update/changeColor` and
-  `SfxRef.nplay`. The car add-part port now makes the original CALL from
-  447c3c. Every other nested native stays rejected.
-- **Unported native class callbacks are skipped as on main** and recorded as
-  `native-callback-skipped`: the car drive `0x454500` and the raw cursor's
-  animate pick (461d20 through 4fdc40/516c20), which needs renderer/camera
-  lists headless boot does not construct.
+Integrated foundations on `main`:
 
-Not modelled by the admission: the original's 0x530 bytes of wrapper,
-4255e0/41fbc0 interpreter and native-wrapper frames between the 425a90 entry
-and the native CALL, and the admitted natives' own stack scratch writes. This
-is call-log and result parity for those natives, not ABI-exact execution. The
-raw runtime (`native_vm_*`) remains unwired in production (#110).
+- #123, merge `02d2340`: SDAT resource/slot footer reconstruction, repaired to
+  register unseen archive paths in original order with case-insensitive reuse.
+- #124, merge `acfed65`: permanent diagnostic archive, provenance, hook/fixture
+  records and digest. Digest output and unfinished-log reads now obey their
+  explicit bounds; old archive bundles were not adopted or deleted.
+- #126, merge `5104a11`: per-obligation validator registry and discovered tests.
+  The extracted boot endpoint constant and evidence-prefix confinement are
+  repaired. New validators belong in registry modules, not the removed shared
+  `acceptance/validators.py` dispatch.
 
-New diagnostics (`docs/diagnostics.md`): `frame-phase`, `scheduler-decision`,
-`script-callback-enter`/`-return`, `native-abi-boundary`,
-`native-nested-admitted` and `native-callback-skipped`.
+PR #128 merged as `951b4cf`. Its declared-platform input
+component freshly matches 17 original Unicorn scenarios / 1,657 operations;
+1,157 workspace tests pass with required oracle fixtures. The collector records
+500 passing comparison rows, including 14 input entry points, and rejects absent
+input data without changing prior evidence. Those are component
+results, not ControlSet/device/whole-game acceptance. The original input
+worktree remains preserved.
+
+| Frontier | Current source / state | Next implementation boundary |
+|---|---|---|
+| Native VM / strict boot (#110, #40; S1/G3/P01) | The original `242fbc8` branch is preserved. `codex/native-runtime-integration` combines current foundations and native recovery work. This campaign reproduced the strict 331-frame failure at unfiltered record 7,002, after 7,001 matching records. Raw runtime remains unwired. | Construct the original renderer/camera lists, finish nonempty world-ray traversal and native callbacks, then rerun strict replay. A menu smoke and the bounded ray proof do not establish strict boot equality. |
+| Saves/config (#71/#72; S8/G9) | #123 merged; #127 (`claude/saves-sdat-e2e-c4b04b`) supplies registry-based S8/G9 and unhooked original manager registration/descriptor lookup. Fresh native-level S8 proof compares 26 sessions / 542 operations / 10 files with seven cross-load sessions. | Finish original-script career/config sessions and JPEG companion production/byte comparisons. G9 remains blocked; the native-level result closes no P-row. |
+| Input (#70; S7/G8/P29) | #128 publishes the device component. Its capture encoder now preserves original negative zero; tests reject dropped/extra/mispaired captured rows and mark missing captures unexecuted. | Wire the layer into host/device input and unchanged ControlSet scripts, add live S7/G8 validators and physical-device observations. |
+| Physics / float (G4/G11) | #122 at `4a2ab4b` plus preserved uncommitted tyre/transcendental work. | Migrate validators onto #126; keep approximate Pacejka diagnostics separate from exact passing evidence. Resolve untrusted operations, remaining natives and all-car/part scenarios without tolerance-based approval. |
+| Render (S5/G6) | `claude/render-d3d9-stream-d4e159` has preserved uncommitted capture/canonicalization/comparison work. | Migrate validators; integrate stream emission before the window branch; finish missing transform/material/state behavior and named-scene comparisons. |
+| Window / video (S9/P30; #65/#66/#104) | `claude/window-s9-ee2f0f` has preserved display, resize/fullscreen and Prime playback work. | Resolve shared `slr-d3d9` edits after render, prove original mode/video sequences, exercise the native display path. |
+| Audio (S6/G7; #67–#69) | `claude/audio-dsound-417509` has preserved software device/stream/comparator work. | Finish original-backed library/scenario comparison, CoreAudio output and per-item listening evidence; add registry validators. |
+| Formats / production shape (G2/S3) | `claude/formats-scx-ef41ee` has preserved material/census work and old-dispatch validator edits. | Migrate G2; replace exploratory checks with assertions, prove the whole stock corpus and production shape pipeline. |
+| Remaining acceptance machinery | Original acceptance worktree has uncommitted composition/denominator/review/row validators; its composition positive test still needs repair. | Validate fresh evidence and producer coverage; implement remaining row scenarios. S12 requires genuine human receipts and S13 an independent frozen-revision pass. |
+
+Native integration repairs retain completed script-creation threads for the
+reaper, restore snapshot verification through the registry core helper, and
+regenerate installation and Osd/ABI observations from fresh original captures.
+The prior captures remain preserved; no producer receipt was relabeled.
+Twenty-two installation tests, nine genuine Osd tests and the ABI-kernel test
+pass against those regenerated inputs.
+
+Original49e3d0 ray setup, hit ownership and hit-coordinate conversion now match
+50 authored original scenarios. The first genuine48d450/49e3d0 cursor-pick graph
+also matches all retained changes: 14 observed pages, three ray queries and
+1,353 original instructions. It exposed real caller-argument reuse at 48d5ba and
+48d673, now modeled through the actual cdecl call. A finite noninteger ray
+regression fixes the source's required Y²+Z²-before-X² summation order.
+Nonempty49e710 tree traversal remains an explicit error. This proves retained
+data for the stated graph, not complete register/FPU/scratch ABI behavior.
+
+The first genuine original car-drive call executes 1,062 instructions, changes
+the vehicle flag word and a reused caller argument, and makes no script call.
+Its omission alone has not been shown to cause the record 7,002 divergence.
+Original cursor picking does traverse renderer cameras and invoke world-ray
+queries; its live renderer-list construction and animation integration remain
+unfinished. The historical attribution below is not a causal proof.
+
+All dirty worktrees were preserved before integration under ignored
+`re/out/checkpoints/full-send-20261027T033306Z/`. Do not discard their contents or
+close M-vs-P issues as duplicates: implementation tickets and feature acceptance
+have different completion criteria. The required fmt/Clippy/workspace-test gate
+is retained; the historical proposal to weaken it has not been adopted.
+
+`tools/link-worktree.sh` shares stock/reference and immutable local fixtures.
+Its default local output roots are `boot`, `menu`, and `acceptance`; run archives, input stores
+and indexes remain local. It refuses pre-existing shared output symlinks instead
+of writing through them. Inspect older archives through their explicit
+`--runs-root`; the helper does not import them into a worker's mutable outputs.
+The explicit `acceptance/check.py --evidence-root MAIN_CHECKOUT` option accepts
+only existing evidence paths confined to the same sanctioned prefix of this
+repository's declared checkout. Final verification still needs source-bound,
+fresh execution and complete retained evidence.
+
+### Historical campaign coordination (2026-10-26; superseded)
+
+
+Baseline on main `7d203a7` (fresh, this day): `python3 acceptance/check.py --table`
+reports **0 of 54 passing** (1 failed, 2 not run, 51 unsupported). Strict boot replay
+still fails at filtered record 620 of 6,508 (unfiltered 909 of 9,209) with the
+`THRD-RUNVMI Dummy.getInfo` / `THRD-INSTVAR-INI java.game.parts.Part` thread-order
+mismatch. The four `stock_*` integration tests pass. Logs live in the canonical
+evidence archive `~/Documents/street-legal-evidence/` (outside every worktree).
+
+**Work was deliberately stopped at the user's request on 2026-10-26.** All frontier
+sessions are stopped; none of this is complete and no obligation moved. Each
+frontier below keeps its own worktree under `.claude/worktrees/`, with unfinished
+work uncommitted in some of them (hooks were not run on it). Resume by reopening
+that session or reading its worktree diff; do not discard worktrees.
+
+| Frontier | Obligations | Owner crates | Branch / state when stopped | Remaining work |
+|---|---|---|---|---|
+| Native-VM raw runtime and strict replay (serial) | #110, S1, G3, P01 | `slr-boot`, `slr-vm` | `claude/native-vm-raw-runtime-f0ad55` at `97af621`: 4 hook-passed commits on the recovered raw-runtime branch (adds scheduler/callback repair and audited nested natives; PR draft claims strict replay 7,001/9,209 unfiltered and 4,892/6,508 filtered, not reproduced by the coordinator). One uncommitted `main.rs` hunk is left (planned commit 6). No PR opened. | Commit 6, reproduce the replay numbers in a fresh worktree, open the PR for #110, then the `0x454500` car native drive (replay frame 31), then the rest of the native command/installation graph to reach the 6,508-record endpoint with 300 idle frames. |
+| Diagnostics archive/provenance fixes 1-6 | G10 | `re/boot-diagnose.py`, `slr-telemetry` | `claude/diagnostics-archive-provenance-eeda20`, 17 uncommitted files | Finish, run the hook, PR. |
+| Saves/config SDAT end to end | G9, S8 | `slr-fmt-sdat`, `slr-io` | `claude/saves-sdat-e2e-c4b04b`, 8 uncommitted files (`re/oracle/save_session.py`, `slr-io` edits) | Scripted-session byte identity vs the headless original, cross-load, G9/S8 validator. |
+| Input / ControlSet / DirectInput stream | G8, S7 | `slr-input` | `claude/input-controlset-9f0338`, started only (`re/oracle/input_device_rig.py`) | Original DirectInput call-stream capture, port equivalence, G8/S7 validator. |
+| D3D9-equivalent stream harness | G6, S5 | `slr-d3d9`, `slr-render-natives` | `claude/render-d3d9-stream-d4e159`, started only (`crates/slr-d3d9/src/stream/`) | Shared call-stream schema, port emission, first-divergence tool, M5-01 inventory, validator. |
+| Float and physics level 1 | G11, G4 | `slr-x87`, `slr-physics` | `claude/physics-x87-parity-cc5912` at `2064c59` (committed: fresh per-operation x87 trust table, exact fscale, Intel-hardware kit) plus 11 uncommitted files | Remaining non-bit-exact x87 operations need evidence or a user decision (ADR 0007); G4 differential rows marked `ported (no test yet)`; G11/G4 validators. |
+| Issue triage | planning only | GitHub | 10 blocked-by edges applied (e.g. #40, #57, #67 blocked by #13); labels and comments not yet posted | Post comments/labels, dependency-ordered wave list, proposed closures of M-vs-P duplicates. |
+| Not started | G7/S6 audio, G2/S3 formats and production SCX pipeline, S9 window, S12 human reviews, validators for all other obligations, S10 slice removal, S13 frozen independent verification | | | Everything not listed above. |
+
+Open decision for the user: the 22-minute pre-commit hook is dominated by one
+`slr-boot` unit-test binary (`native_vm_bootstrap` tests) on the raw-runtime branch.
+A tiered gate (fmt and clippy in pre-commit, slow tests in pre-push and CI) is
+proposed, not applied.
+
+Worktrees reach the git-ignored `stock/`, `reference/` and `re/out/` through
+`tools/link-worktree.sh` (read-only entries; a worktree-local `re/out/boot`).
+Acceptance validators refuse evidence reached through symlinks, so the final
+`acceptance/check.py` run, including S13, must happen in a checkout whose `re/out`
+is a real directory. Only S1, S10, S11 and part of G1 have validators today; every
+other obligation needs a checked-in validator before it can pass.
+
+Recovery if interrupted: `git worktree list`, `gh pr list`, the session list, then
+re-run `python3 acceptance/check.py --table` in the main checkout and the strict
+replay command below with `--runs-root ~/Documents/street-legal-evidence/runs`.
 
 Last updated: 2026-10-24, garage room on `codex/garage-room-rendering`.
 
@@ -2590,4 +2669,50 @@ Everything below this block is dated history. It is retained for the reasoning
 and the oracle addresses, but its "current frontier" claims are superseded and
 must not be cited as present state. New work updates *this* block and leaves
 the history where it is.
+
+
+
+## Historical native-branch checkpoint (requires integration rerun)
+
+On `claude/native-vm-raw-runtime-f0ad55`, the strict clock replay
+(`--frames 331 --replay re/out/headless/clock-investigation/menu1800M/clock-inputs.jsonl`)
+matches 7,001 unfiltered / 4,892 filtered records with no ABI-guard
+rejections. Its first divergence is a latched clock-context mismatch at
+unfiltered #7002: the tape expects a `THRD-RUNVMI Dummy.handleEvent`
+(`java.render.Group`) callback where the port runs `Osd.animate`. That is
+consistent with the skipped car native drive `0x454500` (below), which the
+original runs at frame 31. The four stock integration tests pass. Changes:
+
+- **Record 647 was a queue regression, not the ABI guard.** The raw-native
+  checkpoint made `sched::run_callback` destroy a finished void callback at
+  once. The original clock tape (request 6224) shows the driver cursor on a
+  STOPPED `THRD-RUNVMI Controller.setcontrol` thread: the original keeps
+  finished void callbacks queued until the driver kills and reaps them, as
+  `main` did. Finished void callbacks now stay queued and the reaper retires
+  them. A latched replay divergence now leads the failure text.
+- **Audited nested-native admission** (`native_nested.rs`). Inside a script
+  callback entered from a validated 425a90 wrapper CALL (return PC 427111
+  animate, 426da3 control or 447c41 car add-part, with its fixed argument
+  words, nothing entered since), the ABI guard admits only natives whose
+  production implementation is audited not to touch native memory:
+  `Input.lastKey`, `System.currentTime`, `System.arraycopy`,
+  `GameRef.getScriptInstance`, `RenderRef.setMatrix(Vector3;Ypr)`,
+  `Vector3.length`, `String.length`, `String.append(I)`,
+  `ResourceRef.newNative/set/cache/destroy`, `Text.update/changeColor` and
+  `SfxRef.nplay`. The car add-part port now makes the original CALL from
+  447c3c. Every other nested native stays rejected.
+- **Unported native class callbacks are skipped as on main** and recorded as
+  `native-callback-skipped`: the car drive `0x454500` and the raw cursor's
+  animate pick (461d20 through 4fdc40/516c20), which needs renderer/camera
+  lists headless boot does not construct.
+
+Not modelled by the admission: the original's 0x530 bytes of wrapper,
+4255e0/41fbc0 interpreter and native-wrapper frames between the 425a90 entry
+and the native CALL, and the admitted natives' own stack scratch writes. This
+is call-log and result parity for those natives, not ABI-exact execution. The
+raw runtime (`native_vm_*`) remains unwired in production (#110).
+
+New diagnostics (`docs/diagnostics.md`): `frame-phase`, `scheduler-decision`,
+`script-callback-enter`/`-return`, `native-abi-boundary`,
+`native-nested-admitted` and `native-callback-skipped`.
 

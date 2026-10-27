@@ -32,13 +32,13 @@ def digest(path):
 
 
 def producer_files():
-    return [Path(__file__).resolve(), REPO / "re/oracle/oracle.py", REPO / "acceptance/validators.py", *sorted((REPO / "re/headless").glob("*.py"))]
+    return [Path(__file__).resolve(), REPO / "re/oracle/oracle.py", REPO / "acceptance/validators/core.py", *sorted((REPO / "re/headless").glob("*.py"))]
 
 
 def stock_identity():
     # Reuse the canonical strict verifier, including every stock file hash.
     import importlib.util
-    spec = importlib.util.spec_from_file_location("snapshot_acceptance_validators", REPO / "acceptance/validators.py")
+    spec = importlib.util.spec_from_file_location("snapshot_acceptance_validators", REPO / "acceptance/validators/core.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verified = module.stock_identity(REPO / "stock")
@@ -121,6 +121,7 @@ def dump(host, uc, name, function, args_count):
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("name")
     ap.add_argument("--function", type=lambda v: int(v, 0), required=True)
@@ -128,7 +129,10 @@ def main():
     ap.add_argument("--after-native", type=int, default=0)
     ap.add_argument("--args", type=int, default=6, help="stack words to record")
     ap.add_argument("--limit", type=int, default=3_000_000_000)
+    ap.add_argument("--output-root", type=Path, default=OUT, help="snapshot page and metadata directory")
+    ap.add_argument("--run-root", type=Path, help="isolated headless run directory")
     a = ap.parse_args()
+    OUT = a.output_root.resolve()
 
     import startup as S
 
@@ -148,14 +152,15 @@ def main():
 
     S.Startup._on_block = block
     headless = REPO / "re/out/headless"
+    run_root = a.run_root.resolve() if a.run_root else headless / "snapshot-run"
     sys.argv = [
         sys.argv[0],
         "--media-profile", str(headless / "hypothetical-cd-toc.json"),
         "--graphics-profile", str(headless / "boot/graphics-profile.json"),
         "--desktop-profile", str(headless / "window-transcript-native/hypothetical-seven-notifications-declared-handle-profile.json"),
         "--platform-profile", str(headless / "boot/platform-profile.json"),
-        "--observe-dir", str(headless / "snapshot-run/observed"),
-        "--out", str(headless / "snapshot-run/boot.json"),
+        "--observe-dir", str(run_root / "observed"),
+        "--out", str(run_root / "boot.json"),
         "--event-limit", "100000", "--event-ring", "5000", "--fast-count",
         "--limit", str(a.limit),
     ]

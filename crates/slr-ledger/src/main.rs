@@ -80,6 +80,10 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-input", "device_oracle", vec![(
+            "device_layer_matches_the_original_scenarios",
+            vec!["FUN_00556550", "FUN_00556150", "FUN_005565a0", "FUN_00556710", "FUN_00556bc0", "FUN_00556e00", "FUN_00556ec0", "FUN_00557430", "FUN_00557990", "FUN_005579f0", "FUN_00557aa0", "FUN_00558100", "FUN_00558130", "FUN_00556b10"],
+        )]),
         ("slr-boot", "bin:slr-boot", vec![
             // Complete caller endpoints with the named domain collaborators.
             // These do not establish production startup or callback admission.
@@ -702,9 +706,8 @@ fn collect_suites() -> Vec<Suite> {
                 ),
             ],
         ),
-        // Every cfg keyword handler the stock+modded corpus actually exercises
-        // (`eof` has no handler; the other 54 table keywords never appear in the
-        // corpus, so they get no evidence row). See `docs/physics.md` (`#50`).
+        // Every cfg keyword handler: the ones the stock+modded corpus exercises, and (through
+        // the synthetic leaf vectors) the rest. `eof` has no handler. See `docs/physics.md`.
         (
             "slr-physics",
             "cfg_handlers_oracle",
@@ -764,6 +767,84 @@ fn collect_suites() -> Vec<Suite> {
                     "FUN_0046d330",
                     "FUN_0046d8a0",
                     "FUN_0046d970",
+                ],
+            ),
+            // Synthetic cfg files (random + edge vectors) for the keywords the corpus never
+            // exercises, run through the exe's own dispatch (`cfg_handler_vectors.py gen
+            // leaves`): 1,108 rows, every handler word-for-word.
+            (
+                "cfg_leaves_match_unicorn_vectors",
+                vec![
+                    "FUN_004432b0",
+                    "FUN_00443390",
+                    "FUN_004435b0",
+                    "FUN_00443690",
+                    "FUN_004437a0",
+                    "FUN_004439b0",
+                    "FUN_00443ef0",
+                    "FUN_00443f50",
+                    "FUN_004440e0",
+                    "FUN_00444200",
+                    "FUN_004442b0",
+                    "FUN_00444310",
+                    "FUN_00444570",
+                    "FUN_00444710",
+                    "FUN_00444a60",
+                    "FUN_00444ae0",
+                    "FUN_00444e00",
+                    "FUN_00444e80",
+                    "FUN_00444f20",
+                    "FUN_00444fc0",
+                    "FUN_00445060",
+                    "FUN_004450e0",
+                    "FUN_00445120",
+                    "FUN_004451b0",
+                    "FUN_00445260",
+                    "FUN_00445310",
+                    "FUN_004453c0",
+                    "FUN_00445470",
+                    "FUN_00445520",
+                    "FUN_004455b0",
+                    "FUN_00445640",
+                    "FUN_004456d0",
+                    "FUN_00445760",
+                    "FUN_00445890",
+                    "FUN_004459c0",
+                    "FUN_00445af0",
+                    "FUN_00445b80",
+                    "FUN_00445c10",
+                    "FUN_00445d50",
+                    "FUN_00445f00",
+                    "FUN_00445fc0",
+                    "FUN_00446000",
+                    "FUN_00446050",
+                    "FUN_00446100",
+                    "FUN_0046c1a0",
+                    "FUN_0046c4e0",
+                    "FUN_0046ca70",
+                    "FUN_0046cb90",
+                    "FUN_0046ccd0",
+                    "FUN_0046cf10",
+                    "FUN_0046cfb0",
+                    "FUN_0046cff0",
+                    "FUN_0046d130",
+                    "FUN_0046d400",
+                    "FUN_0046d470",
+                    "FUN_0046d7a0",
+                    "FUN_0046d840",
+                    "FUN_0046da30",
+                ],
+            ),
+            // The non-keyword cfg helpers called directly on garbage-filled cells (`gen direct`).
+            (
+                "cfg_leaves_direct_match_unicorn_vectors",
+                vec![
+                    "FUN_00428fd0",
+                    "FUN_00429130",
+                    "FUN_004776f0",
+                    "FUN_00551c60",
+                    "FUN_00551c70",
+                    "FUN_005d7190",
                 ],
             )],
         ),
@@ -1010,6 +1091,7 @@ fn collect(root: &std::path::Path) {
             } else if matches!(
                 target,
                 "rand_oracle"
+                    | "device_oracle"
                     | "value_oracle"
                     | "sdat_oracle"
                     | "oracle"

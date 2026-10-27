@@ -118,6 +118,27 @@ fn counted(m: &mut Space, link: u32, target: u32) {
 
 /// exe: FUN_0048d450
 pub fn pick(m: &mut Space, a: [u32; 10], host: &mut dyn Host) -> Result<u32, String> {
+    crate::native_stack::function_cdecl(m, &a, |m| {
+        let arguments = crate::native_stack::sp(m) + 4;
+        crate::native_stack::alloc(m, 0x40);
+        for r in [
+            crate::native_stack::Reg::Ebx,
+            crate::native_stack::Reg::Ebp,
+            crate::native_stack::Reg::Esi,
+            crate::native_stack::Reg::Edi,
+        ] {
+            crate::native_stack::push_reg(m, r);
+        }
+        pick_body(m, a, arguments, host)
+    })
+}
+
+fn pick_body(
+    m: &mut Space,
+    a: [u32; 10],
+    arguments: u32,
+    host: &mut dyn Host,
+) -> Result<u32, String> {
     // Read the input position lazily, after each callback, as the original
     // does. Output arguments may alias ordinary caller-owned state.
     if a[1] != 0 {
@@ -156,6 +177,11 @@ pub fn pick(m: &mut Space, a: [u32; 10], host: &mut dyn Host) -> Result<u32, Str
         );
         if inside(x) && inside(y) {
             let mut camera = first(m, viewport, 0x2c, 0x3c)?;
+            if camera != 0 {
+                // Original48d5ba reuses its saved output-reference argument
+                // for normalized negative Y. EBX retains the reference itself.
+                m.w32(arguments + 4, y ^ 0x80000000);
+            }
             while camera != 0 {
                 let neg_y = y ^ 0x80000000;
                 let far = unproject(m, camera, [x, neg_y, 0x3f800000])
@@ -164,7 +190,10 @@ pub fn pick(m: &mut Space, a: [u32; 10], host: &mut dyn Host) -> Result<u32, Str
                     .map(|v| st(f(v).mul(f(0x3dcccccd), PC, RC)));
                 let ray = [far[0], far[1], far[2], near[0], near[1], near[2]];
                 let mut limit = 0x3f800000;
+                // Original48d673 also reuses argument three for ray distance.
+                m.w32(arguments + 8, limit);
                 let result = host.ray(m, ray, camera + 0x658, &mut limit)?;
+                m.w32(arguments + 8, limit);
                 if result != 0 {
                     if a[1] != 0 {
                         crate::native_part::bind_reference(m, a[1], m.r32(0x6435b8));

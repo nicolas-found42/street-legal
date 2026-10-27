@@ -522,9 +522,9 @@ pub fn run_created(
     match result {
         Ok(()) => {
             with_threads(|h| h.queues_mut().get_mut(id).flags = thread.flags);
-            if thread.flags & (slr_vm::interp::flags::STOPPED | slr_vm::interp::flags::DEAD) == 0
-                && flow == Flow::Stay
-            {
+            // Completed script creation threads remain queued until the
+            // driver reaps them and retires their machine/owned state.
+            if flow == Flow::Stay {
                 INTERP.with(|m| m.borrow_mut().insert(id, thread));
             }
             Ok(())
@@ -1069,6 +1069,30 @@ mod callback_wrapper_tests {
         let events = vm.machine_trace().pending(usize::MAX);
         assert!(events.iter().any(|e| matches!(e.event,
             Event::ThreadRetire { identity, .. } if identity == void_identity)));
+        assert!(INTERP.with(|threads| threads.borrow().is_empty()));
+        assert!(with_threads(|host| host.queues().run_order().is_empty()));
+
+        run_created(&mut vm, "THRD-CREATE lifecycle", class, 0, "finish", &[]).unwrap();
+        let created = with_threads(|host| *host.queues().run_order().last().unwrap());
+        assert!(INTERP.with(|threads| threads.borrow().contains_key(&created)));
+        let creation_identity = vm
+            .machine_trace()
+            .pending(usize::MAX)
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::ThreadOrigin { identity, name, .. } if name == "THRD-CREATE lifecycle" => {
+                    Some(*identity)
+                }
+                _ => None,
+            })
+            .unwrap();
+        Pump::new().tick(&mut vm).map_err(|f| f.error).unwrap();
+        assert!(vm
+            .machine_trace()
+            .pending(usize::MAX)
+            .iter()
+            .any(|e| matches!(e.event,
+            Event::ThreadRetire { identity, .. } if identity == creation_identity)));
         assert!(INTERP.with(|threads| threads.borrow().is_empty()));
         assert!(with_threads(|host| host.queues().run_order().is_empty()));
     }

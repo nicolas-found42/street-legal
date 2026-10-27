@@ -141,7 +141,7 @@ pub fn snapshot(vm: &VmHost, phase: &str, failure: Option<&str>) -> Result<(), S
         "recent_events":if failure.is_some(){serde_json::to_value(diagnostics::recent()).unwrap_or(Value::Null)}else{Value::Null}});
     slr_telemetry::write_state(&value)?;
     if failure.is_some() {
-        slr_telemetry::write_artifact("failure.json", &value)?;
+        slr_telemetry::write_failure(&value)?;
     }
     Ok(())
 }

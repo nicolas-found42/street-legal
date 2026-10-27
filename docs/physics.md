@@ -436,16 +436,27 @@ are excluded — **42,635 replayed, 42,635 word-for-word identical**. The replay
 `slr-ledger collect` as a `unicorn` suite, so the 53 annotated handler rows read `passing` in
 `docs/fidelity.md`.
 
-**Keyword coverage.** The table has **107** `[keyword, handler]` pairs. The corpus exercises **53** of
-them; the port has all 107. The other **54** never appear in any stock or modded cfg, so they have no
-oracle rows (they are ported and annotated, hence `ported (no test yet)` in the ledger): `arm`, `bolt`,
-`center`, `cheat_control`, `clutch`, `deform`, `drag`, `driver`, `flapsfx`, `friction`, `handbrake`,
-`hub`, `instant_center`, `key`, `light`, `logo`, `mass`, `nodriver`, `osd_abs`, `osd_asr`, `osd_damage`,
-`osd_damage_slot`, `osd_emergency`, `osd_gauge`, `osd_gear`, `osd_hbrake`, `osd_mileage`, `osd_nos`,
-`osd_nospin`, `osd_rpm`, `osd_rpmpin`, `osd_spdpin`, `osd_speed`, `osd_turbo`, `pitch`, `roll`,
-`rpm_idle`, `sfx_engine_down`, `sfx_engine_up`, `sfx_exhaust`, `sfx_gearbox_fwd`, `sfx_gearbox_rev`,
-`sfx_gearchange`, `sfx_wreck`, `shadow`, `skid`, `slotflags`, `slotmove`, `steeringradius`, `sw_radius`,
-`torque`, `turn`, `velfactor`, `wheeldeform`.
+**Keyword coverage.** The table has **107** `[keyword, handler]` pairs. The stock and modded corpus
+exercises **53** of them; the port has all 107. The other **54** never appear in any cfg, so they are
+covered by synthetic cfg files instead (`cfg_handler_vectors.py gen leaves`): for each keyword, edge and
+seeded-fuzz argument vectors, a preamble where the handler needs record state (`type`, `slot`, `body`,
+`flap`), a duplicate-key re-entry and an overflow block for the bounded record lists, run through the
+exe's own dispatch (car table `0x60e0f8`, part table `0x611368`) under the same Unicorn oracle, once with
+the stack zeroed and once with `0xCC` to expose reads of uninitialised stack (those rows are re-applied,
+not compared). The non-keyword helpers (`list_head_ctor`, `list_node_ctor`, `vec3_zero`, `vec3_set`,
+`ref_release`, `stricmp_eq`) are called directly on garbage-filled cells (`gen direct`). Result on the
+current tree: `cfg_leaves_oracle: exercised=1108 matched=1108`, `cfg_leaves_direct_oracle: matched=116
+bad=0`, so every `slr-physics` ledger row reads `passing`. These vectors found one real port bug: the
+part-table keyword `skinned` (`FUN_0046d840`) zeroed cells whose value did not convert, where the exe
+scans straight into the car object and leaves them alone; fixed with a regression unit test. Fixture
+recipe: `SLR_CFG_VECTORS_OUT=DIR ~/slr-oracle-venv/bin/python re/oracle/cfg_handler_vectors.py gen all`
+(about 70 s, deterministic except the `date` stamp of the direct rows), replayed with
+`SLR_CFG_HANDLER_VECTORS=DIR cargo test -p slr-physics --test cfg_handlers_oracle`. Nothing derived from
+the exe is committed. `acceptance/g4.py` (`check.py --execute G4`) regenerates all of it into an
+isolated bundle and classifies every physics native (`passing`, `blocked_by_g11`, `no_test`,
+`unimplemented`); the 122 physics natives of `WheelRef`, `Part`, `Chassis`, `GroundRef`, `DynoData`,
+`SfxTable` and `Vehicle` without a ledger row are `unimplemented` in the port today (capture-only in
+`slr-boot`), which keeps G4 open.
 
 **The 14 skipped rows** are one `body` line each — line 2 of seven cfg files, in both corpora (7 × 2):
 `frontend/scripts/mask.cfg`, `frontend/scripts/navigator_click.cfg`,

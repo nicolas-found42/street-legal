@@ -1396,7 +1396,7 @@ pub fn refresh_dynamics(m: &mut Space, record: u32) {
 /// Original45dbc0: transpose-rotation vector product, including its distinct
 /// operand order and temporary outputs when input and output alias.
 /// exe: FUN_0045dbc0
-fn transpose_vector(m: &mut Space, out: u32, rotation: u32, vector: u32) {
+pub(crate) fn transpose_vector(m: &mut Space, out: u32, rotation: u32, vector: u32) {
     let mut fp = crate::native_fpu::Fpu::new();
     let mut result = [0; 3];
     for (i, terms) in [

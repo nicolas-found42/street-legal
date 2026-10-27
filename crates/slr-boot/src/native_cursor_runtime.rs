@@ -128,21 +128,31 @@ impl native_cursor::Host for Runtime<'_> {
 }
 
 /// Picking traverses the actual retained renderer/camera lists before asking
-/// the world for a ray hit. The missing49e3d0 body cannot be replaced by an
-/// invented no-hit result, even when the cursor is only driving a menu.
+/// the world for a ray hit. Original49e3d0 runs; its nonempty49e710 tree
+/// collaborator retains an explicit boundary until implemented.
 struct WorldRay;
 impl crate::native_cursor_pick::Host for WorldRay {
     fn ray(
         &mut self,
-        _m: &mut Space,
-        _ray: [u32; 6],
-        _selection: u32,
-        _limit: &mut u32,
+        m: &mut Space,
+        ray: [u32; 6],
+        selection: u32,
+        limit: &mut u32,
     ) -> Result<u32, String> {
-        Err(
-            "NativeCursorPickBoundary: original49e3d0 world ray traversal is not implemented"
-                .into(),
+        crate::native_world_ray::query(
+            m,
+            m.r32(0x617650),
+            ray,
+            selection,
+            Some(limit),
+            &mut WorldTree,
         )
+    }
+}
+struct WorldTree;
+impl crate::native_world_ray::Host for WorldTree {
+    fn traverse(&mut self, _m: &mut Space, _world: u32, _tree: u32) -> Result<u32, String> {
+        Err("NativeCursorPickBoundary: original49e710 nonempty world tree traversal is not implemented".into())
     }
 }
 

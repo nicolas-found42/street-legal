@@ -23,8 +23,9 @@ pub mod stock;
 
 pub use file::{
     bridge, install, register, reset, with_files, FileHost, FileObject, IoBinding, IoEvent,
-    FILE_CLOSE, FILE_NATIVE_BINDINGS, FILE_OPEN, FILE_READ_FLOAT, FILE_READ_INT, FILE_READ_STRING,
-    FILE_WRITE_FLOAT, FILE_WRITE_INT, FILE_WRITE_STRING, SDAT_HEADER, SDAT_VERSION,
+    LoadRequest, FILE_CLOSE, FILE_NATIVE_BINDINGS, FILE_OPEN, FILE_READ_FLOAT, FILE_READ_INT,
+    FILE_READ_STRING, FILE_WRITE_FLOAT, FILE_WRITE_INT, FILE_WRITE_STRING, SDAT_HEADER,
+    SDAT_VERSION,
 };
 pub use findfile::{
     accepts, is_dot_entry, pattern_match, reset_finds, split_pattern, with_finds, FindEntry,

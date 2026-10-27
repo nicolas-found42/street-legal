@@ -20,6 +20,6 @@ if [ "$1" = "--win32" ]; then
 else
     # -arch x86_64: Rosetta 2 translates the process; the x87 blocks execute
     # in the translated image, which is the third oracle ADR 0008 names.
-    clang -arch x86_64 -O1 -I "$HERE" -o "$OUT_DIR/probe-rosetta" "$HERE/probe.c"
+    clang -arch x86_64 -O1 -I "${VECTORS_DIR:-$HERE}" -I "$HERE" -o "$OUT_DIR/probe-rosetta" "$HERE/probe.c"
     file "$OUT_DIR/probe-rosetta"
 fi

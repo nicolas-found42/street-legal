@@ -4,6 +4,10 @@
 //! state and records the same native result into the ordered headless stream.
 //! Device acquisition and live DirectInput semantics remain M6-04 work; this
 //! backend emits native calls, not synthetic DirectInput reports.
+pub mod device;
+mod key_names;
+pub mod scripted;
+
 pub use slr_io::input::{all_stubs, reset_input, with_input, InputHost};
 use slr_vm::host::{CallInfo, VmHost};
 

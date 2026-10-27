@@ -14,8 +14,17 @@ if [ -d "reference/raw" ] && [ -w "reference/raw/StreetLegal_Redline.exe" ]; the
 fi
 
 # 3. Rust formatting, linting, and tests
+# Same three commands, in the same order, with the same flags. hook-run.py adds
+# a fixture preflight (a stale re/out fixture stops the hook in seconds, not
+# after the 22-minute test run), a start/end fixture digest (fixtures changed
+# mid-run fail the hook), and a durable `kind: hook` record of each step's output
+# and exit status in the run index. Any failing step still fails the hook.
 if [ -f "Cargo.toml" ]; then
-  cargo fmt --all -- --check
-  cargo clippy --workspace --all-targets -- -D warnings
-  cargo test --workspace
+  if [ -f "re/hook-run.py" ] && command -v python3 >/dev/null 2>&1; then
+    python3 re/hook-run.py
+  else
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+  fi
 fi

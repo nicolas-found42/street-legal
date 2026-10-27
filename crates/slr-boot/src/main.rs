@@ -44,6 +44,7 @@ mod native_nested;
 mod native_notifications;
 mod native_part;
 mod native_player;
+mod native_world_ray;
 // Unwired raw-runtime modules (#110): oracle-tested, but production does not
 // yet install the raw Runtime, so only tests reach most of their items. Each
 // allow goes when its caller is wired; see docs/boot-status.md (2026-10-26).
@@ -419,7 +420,11 @@ thread_local! {pub(crate) static RES: RefCell<Resources> = RefCell::new(Resource
 fn resolve(_: &mut VmHost, package: Option<&str>, id: u32) -> Result<u32, VmError> {
     RES.with(|r| r.borrow_mut().resolve(package, id))
         .map_err(|e| {
-            eprintln!("RESOURCE STOP {e}");
+            slr_telemetry::log::eprintln(
+                slr_telemetry::log::Level::Error,
+                "boot.resource",
+                &format!("RESOURCE STOP {e}"),
+            );
             VmError::Unsupported(0x100e)
         })
 }
@@ -1221,7 +1226,7 @@ fn run(
             engine::sample_replayed_animation_time();
         }
         frame_phase(frame, "animate-pass", "enter");
-        engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        engine::animate_pass(vm).map_err(|e| animate_error(frame, e))?;
         frame_phase(frame, "animate-pass", "exit");
         frame_phase(frame, "resource-cleanup", "enter");
         factory::cleanup(vm).map_err(|e| format!("resource cleanup frame {frame}: {e}"))?;
@@ -1592,6 +1597,17 @@ fn execute() -> Result<(), String> {
     })
 }
 
+/// The error a failed animate pass reports; `STOP animate frame N: ...` is parsed
+/// by the runner and by tests, so this text is pinned (see `tests`).
+fn animate_error(frame: impl std::fmt::Display, error: impl std::fmt::Display) -> String {
+    format!("animate frame {frame}: {error}")
+}
+
+/// The final stderr line of a failed boot (`STOP <error>`); parsed, so pinned.
+fn stop_line(error: impl std::fmt::Display) -> String {
+    format!("STOP {error}")
+}
+
 fn main() {
     // Supervise normal window launches so UI failures and hard exits still leave
     // an indexed bundle. Headless parity execution keeps its existing path.
@@ -1610,7 +1626,11 @@ fn main() {
         match status {
             Ok(s) => std::process::exit(s.code().unwrap_or(1)),
             Err(e) => {
-                eprintln!("SessionRunnerBoundary: {e}");
+                slr_telemetry::log::eprintln(
+                    slr_telemetry::log::Level::Error,
+                    "boot.session",
+                    &format!("SessionRunnerBoundary: {e}"),
+                );
                 std::process::exit(1)
             }
         }
@@ -1620,7 +1640,7 @@ fn main() {
         std::env::var("SLR_SESSION_RUN_ID"),
     ) {
         if let Err(e) = slr_telemetry::journal::configure(Path::new(&root), &run_id) {
-            eprintln!("{e}");
+            slr_telemetry::log::eprintln(slr_telemetry::log::Level::Error, "boot.session", &e);
             std::process::exit(1);
         }
     }
@@ -1635,7 +1655,11 @@ fn main() {
         execute()
     };
     if let Err(error) = outcome {
-        eprintln!("STOP {error}");
+        slr_telemetry::log::eprintln(
+            slr_telemetry::log::Level::Error,
+            "boot.stop",
+            &stop_line(&error),
+        );
         std::process::exit(1);
     }
 }
@@ -1643,6 +1667,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_and_animate_failure_text_is_byte_stable() {
+        // The runner records stderr verbatim and its readers match these
+        // exact strings; the structured logging layer must never change them.
+        assert_eq!(
+            stop_line(animate_error(
+                7,
+                "NativeFrameBoundary: player state missing"
+            )),
+            "STOP animate frame 7: NativeFrameBoundary: player state missing"
+        );
+        assert_eq!(stop_line("RuntimePanic: boom"), "STOP RuntimePanic: boom");
+        let mut sink = Vec::new();
+        slr_telemetry::log::write_line(&mut sink, &stop_line(animate_error(0, "x"))).unwrap();
+        assert_eq!(sink, b"STOP animate frame 0: x\n");
+    }
 
     #[test]
     fn viewport_backend_and_driver_overrides_each_record_exactly_once() {
