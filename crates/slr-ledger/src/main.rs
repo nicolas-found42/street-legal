@@ -80,6 +80,10 @@ type Suite = (&'static str, &'static str, Vec<SuiteTest>);
 
 fn collect_suites() -> Vec<Suite> {
     vec![
+        ("slr-input", "device_oracle", vec![(
+            "device_layer_matches_the_original_scenarios",
+            vec!["FUN_00556550", "FUN_00556150", "FUN_005565a0", "FUN_00556710", "FUN_00556bc0", "FUN_00556e00", "FUN_00556ec0", "FUN_00557430", "FUN_00557990", "FUN_005579f0", "FUN_00557aa0", "FUN_00558100", "FUN_00558130", "FUN_00556b10"],
+        )]),
         ("slr-boot", "bin:slr-boot", vec![
             ("native_query::tests::instance_routing_and_registration_match_original_mutating_graphs", vec!["FUN_00426470"]),
             ("native_car_update::tests::original_force_update_resource_guards_and_target_match", vec!["LAB_0043e320"]),
@@ -1006,6 +1010,7 @@ fn collect(root: &std::path::Path) {
             } else if matches!(
                 target,
                 "rand_oracle"
+                    | "device_oracle"
                     | "value_oracle"
                     | "sdat_oracle"
                     | "oracle"
