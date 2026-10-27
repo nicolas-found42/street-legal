@@ -6,7 +6,7 @@ Normal window launches now run under the session supervisor automatically:
 cargo run -p slr-boot -- stock --window
 ```
 
-The terminal prints the bundle location under `re/out/menu/runs/`. Python 3 is
+The terminal prints the bundle location under the archive's `menu/runs/` (`$SLR_RUNS_ROOT/menu/runs`, default `~/.local/share/street-legal/menu/runs`; `SLR_RUNS_ROOT=$PWD/re/out` restores `re/out/menu/runs/`). Python 3 is
 required alongside the native binary. For a window launch, `--output PATH`
 selects a new **bundle directory**; streams are inside `PATH/runtime/`. A direct
 headless invocation retains its existing `--output` runtime-directory semantics.
@@ -137,7 +137,7 @@ prefix; the tool refuses to invent a complete replay tape.
 The existing archive index can also list these bundles:
 
 ```sh
-python3 re/boot-diagnose.py list --runs-root re/out/menu/runs
+python3 re/boot-diagnose.py list --runs-root "${SLR_RUNS_ROOT:-$HOME/.local/share/street-legal}/menu/runs"
 ```
 
 Interactive reports explicitly say parity was not evaluated. They do not change
