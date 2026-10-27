@@ -44,14 +44,14 @@ mod native_nested;
 mod native_notifications;
 mod native_part;
 mod native_player;
-mod native_player_command;
-mod native_player_device;
 // Unwired raw-runtime modules (#110): oracle-tested, but production does not
 // yet install the raw Runtime, so only tests reach most of their items. Each
 // allow goes when its caller is wired; see docs/boot-status.md (2026-10-26).
 #[cfg_attr(not(test), allow(dead_code))]
-mod native_player_runtime;
+mod native_player_command;
 #[cfg_attr(not(test), allow(dead_code))]
+mod native_player_device;
+mod native_player_runtime;
 mod native_postparse;
 mod native_query;
 mod native_query_frame;
@@ -73,10 +73,12 @@ mod native_shape_v4;
 mod native_spatial;
 mod native_spring;
 mod native_stack;
-mod native_vm_abi;
-mod native_vm_alu;
 // Unwired raw-runtime modules (#110), as above: tested against the original
 // but not yet called by production. Remove each allow when it is wired.
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_abi;
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_vm_alu;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_array_class;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -103,29 +105,27 @@ mod native_vm_jvm;
 mod native_vm_live;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_lookup;
-#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_metadata;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_namespace;
 mod native_vm_pool;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_resource;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_root;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_signature;
-#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(test)]
-#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_test_store;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_thread_lifecycle;
+#[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_thread_run;
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_vm_values;
-#[cfg_attr(not(test), allow(dead_code))]
 mod native_world;
-#[cfg_attr(not(test), allow(dead_code))]
 mod part_render;
 mod parts;
 mod presentation;
@@ -521,7 +521,6 @@ pub(crate) fn script_stop(vm: &VmHost, thread: &Thread, phase: &str, error: VmEr
     )
 }
 
-fn live_native_boundary(
 /// Bracket one main-loop phase. A phase without its exit failed inside.
 fn frame_phase(frame: u64, phase: &str, edge: &str) {
     telemetry::detail(
@@ -534,6 +533,7 @@ fn frame_phase(frame: u64, phase: &str, edge: &str) {
     );
 }
 
+fn live_native_boundary(
     context: &slr_vm::host::NativeContext<'_>,
     info: &CallInfo<'_>,
 ) -> Result<(), String> {
@@ -1203,7 +1203,10 @@ fn run(
             break;
         }
         telemetry::detail("frame-enter", vec![("frame".into(), frame.to_string())]);
+        frame_phase(frame, "engine-step", "enter");
         engine::step(vm).map_err(|e| format!("engine frame {frame}: {e}"))?;
+        frame_phase(frame, "engine-step", "exit");
+        frame_phase(frame, "scheduler-tick", "enter");
         pump.tick(vm).map_err(|f| {
             script_stop(
                 vm,
@@ -1212,30 +1215,27 @@ fn run(
                 f.error,
             )
         })?;
+        frame_phase(frame, "scheduler-tick", "exit");
         sched::advance_ms(1000.0 / 60.0);
-        frame_phase(frame, "engine-step", "enter");
         if sched::replaying() {
-        frame_phase(frame, "engine-step", "exit");
-        frame_phase(frame, "scheduler-tick", "enter");
             engine::sample_replayed_animation_time();
         }
+        frame_phase(frame, "animate-pass", "enter");
         engine::animate_pass(vm).map_err(|e| format!("animate frame {frame}: {e}"))?;
+        frame_phase(frame, "animate-pass", "exit");
+        frame_phase(frame, "resource-cleanup", "enter");
         factory::cleanup(vm).map_err(|e| format!("resource cleanup frame {frame}: {e}"))?;
+        frame_phase(frame, "resource-cleanup", "exit");
         //428d91/428da0: the declared successful headless device frame
         //increments the same generation that GfxEngine.flush advances.
         slr_render_natives::with_render(|render| render.advance_frame_generation());
         engine::notify_render_waiters(vm)
-        frame_phase(frame, "scheduler-tick", "exit");
             .map_err(|e| format!("render notify frame {frame}: {e}"))?;
         if let Some(seconds) = sched::replayed_frame_dt(frame + 1)? {
             engine::set_frame_dt(seconds);
         }
-        frame_phase(frame, "animate-pass", "enter");
         telemetry::detail("frame-exit", vec![("frame".into(), frame.to_string())]);
-        frame_phase(frame, "animate-pass", "exit");
-        frame_phase(frame, "resource-cleanup", "enter");
         if std::env::var_os("SLR_SESSION_CAPTURE").is_none() || frame % 60 == 0 {
-        frame_phase(frame, "resource-cleanup", "exit");
             telemetry::snapshot(vm, "frame-end", None)?;
         }
         if frame % 60 == 0 {
@@ -1553,6 +1553,14 @@ fn execute() -> Result<(), String> {
         format!("{:#?}", vm.constructor_calls),
     )
     .map_err(|e| format!("ConstructorTraceBoundary: {e}"))?;
+    // A latched clock-replay divergence precedes any later failure in the
+    // same frame; report it first instead of the downstream symptom.
+    let outcome = match (outcome, sched::replay_error()) {
+        (Err(error), Some(replay)) if !error.contains(&replay) => Err(format!(
+            "ClockReplayBoundary (first divergence): {replay}; later failure: {error}"
+        )),
+        (outcome, _) => outcome,
+    };
     if let Err(error) = &outcome {
         telemetry::snapshot(&vm, "failure", Some(error))?;
         if presentation::enabled() {
@@ -1584,14 +1592,6 @@ fn execute() -> Result<(), String> {
     })
 }
 
-    // A latched clock-replay divergence precedes any later failure in the
-    // same frame; report it first instead of the downstream symptom.
-    let outcome = match (outcome, sched::replay_error()) {
-        (Err(error), Some(replay)) if !error.contains(&replay) => Err(format!(
-            "ClockReplayBoundary (first divergence): {replay}; later failure: {error}"
-        )),
-        (outcome, _) => outcome,
-    };
 fn main() {
     // Supervise normal window launches so UI failures and hard exits still leave
     // an indexed bundle. Headless parity execution keeps its existing path.
