@@ -68,6 +68,16 @@ class EvidenceRootTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             check.local_file("re/out/hop/x.json", check.evidence_root(self.main))
 
+    def test_declared_prefix_cannot_itself_escape_the_evidence_root(self):
+        for prefix, entry in (("re/out", "re/out/run/a.json"), ("stock", "stock/.slr-manifest")):
+            with self.subTest(prefix=prefix):
+                directory = self.main / prefix
+                relocated = self.outside / directory.name
+                directory.rename(relocated)
+                directory.symlink_to(relocated)
+                with self.assertRaises(ValueError):
+                    check.local_file(entry, check.evidence_root(self.main))
+
     def test_evidence_root_must_be_a_checkout_of_this_repository(self):
         other = self.tmp / "other"
         other.mkdir()

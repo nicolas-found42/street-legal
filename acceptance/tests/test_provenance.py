@@ -5,6 +5,52 @@ from validators.ledger import native_registration_rows
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_complete_boot_verification_reaches_the_pinned_node_endpoint(self):
+        # Synthetic verifier inputs exercise the successful path; these mocks
+        # provide no stock-parity evidence or executable completion credit.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            bundle = root / "bundle"
+            inputs = bundle / "inputs"
+            inputs.mkdir(parents=True)
+            source_run = root / "re/out/headless/menu-continuation/menu-final/accepted/source-run.json"
+            source_run.parent.mkdir(parents=True)
+            source_run.write_text(json.dumps({"exe_sha256": core.ORIGINAL_EXE, "oracle": "unicorn"}))
+            hashes = {**BOOT_ORACLE, "profile0": boot.BOOT_NODES, "native_api": "api"}
+            for name in hashes:
+                (inputs / name).write_text("")
+            (inputs / "profile0").write_text("\n".join(json.dumps({
+                "ic": count, "c": "test.Class", "m": "run", "n": index, "o": 1, "i": 0
+            }) for index, count in enumerate((1759995995, 1759995996))) + "\n")
+            (bundle / "runtime.stdout.txt").write_text("BOOT MainMenu dialog complete at frame 31; idle frames=300\n")
+            (bundle / "runtime.stderr.txt").write_text("STEP test.Class.run()V idx=0 op=0001 imm=0 line=0\n")
+            manifest = {
+                "source": {"commit": "candidate"}, "configuration": {"stock": "stock"},
+                "stock_inputs_sha256": "stock", "comparison_policy": {"masked_clock_results": []},
+                "build": {"returncode": 0}, "binary": {"path": str(bundle / "target/debug/slr-boot")},
+                "inputs": {name: {"snapshot": name, "sha256": digest} for name, digest in hashes.items()},
+                "status": "completed",
+            }
+            filtered = [(0, "test.Class")] * 6508
+            unfiltered = filtered + [(0, "java.render.Test")] * 2701
+            tool = SimpleNamespace(
+                bundle_manifest=lambda _: manifest, verify_artifacts=lambda *_: None,
+                tree_identity=lambda _: {"sha256": "stock"}, MASK_POLICY={},
+                load_records=lambda path: filtered if path.name == "oracle_filtered" else unfiltered,
+                oracle_descriptors=lambda *_: [None] * 9209, signatures=lambda _: {},
+                compare=lambda *_: {"equal": True}, analyze=lambda _: {"has_capture_end_event": True},
+            )
+            def digest(path):
+                return boot.BOOT_SOURCE_RUN if path == source_run else hashes[path.name]
+            with patch.object(core, "ROOT", root), patch.object(core, "boot_tools", return_value=tool), \
+                    patch.object(core, "digest", side_effect=digest), \
+                    patch.object(core, "candidate_source_matches", return_value=True), \
+                    patch.object(core, "stock_identity", return_value={}):
+                observed = boot_result(bundle, live_execution=True)
+            self.assertEqual(observed["result"], "passed", observed)
+            self.assertTrue(observed["node_observation"]["equal"])
+            self.assertEqual(observed["node_observation"]["original_nodes"], 1)
+
     def test_node_observation_rejects_prefix_empty_malformed_and_changed_nodes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

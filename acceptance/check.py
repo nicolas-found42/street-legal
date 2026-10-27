@@ -71,7 +71,9 @@ def local_file(entry: object, declared_root: Path | None = None) -> Path:
         # a linked-worktree entry under LINKED_PREFIXES that stays inside the same
         # prefix of the declared evidence root.
         prefix = next((p for p in LINKED_PREFIXES if relative.parts[:len(p)] == p), None)
-        if declared_root is None or prefix is None or not resolved.is_relative_to((declared_root / Path(*prefix)).resolve()):
+        # Keep the sanctioned prefix lexical within the resolved checkout:
+        # resolving the prefix itself could authorize a symlink outside it.
+        if declared_root is None or prefix is None or not resolved.is_relative_to(declared_root.resolve() / Path(*prefix)):
             raise ValueError(f"evidence escapes repository through symlink: {entry!r}")
     if not path.is_file():
         raise ValueError(f"evidence file missing: {entry!r}")
