@@ -117,6 +117,11 @@ refs `0x485141`/`0x4850f6`) are JFIF JPEGs (`FF D8 FF E0`), one per JPEG slot
   savers and the list plumbing (the real exe code runs `0x45d910`, `0x42ab50`,
   strcmp, sprintf and sscanf). All 8 stock vehicle saves (and the 9 modded) end
   with exactly the version-2 footer the port produces.
+- Read path: `File.open` (mode 0) scans the footer and rebuilds both tables
+  (`[slot count][slot triples (id, kind, size[, blob])][resource count]{(id, len,
+  path)}*`, `0x485190` / `0x485655`); kind 5 requests the companion `<name>.<id>`,
+  kind 7 an inline blob or `sourcefile <name>.<id>`. Whole-session evidence
+  (original natives vs port, cross-load): `docs/saves-e2e.md`.
 Not covered: `File.readString` (`0x486060`), `readResID` (`FUN_00485ea0`),
 `write(String)` / `write(ResourceRef)` (`0x485fd0`, `FUN_00485c60`), the CRT
 `fwrite` slot table under the file layer, and the SDAT header writer / open path.
