@@ -280,6 +280,7 @@ fn leaf_handler(addr: u32) -> Option<Handler> {
         0x46d400 => logo,
         0x46d470 => mesh2,
         0x46d7a0 => lods2,
+        0x46d840 => skinned,
         0x46da30 => stockpart2,
         _ => return None,
     };
