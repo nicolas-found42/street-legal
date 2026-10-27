@@ -38,6 +38,7 @@ mod ffi;
 pub mod trans;
 
 mod fscale;
+mod special;
 #[cfg(test)]
 mod tests;
 

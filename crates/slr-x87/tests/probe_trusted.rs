@@ -820,7 +820,20 @@ fn trusted_probes_match_bit_for_bit() {
                             .and_modify(|m| *m = (*m).max(d))
                             .or_insert(d);
                         *approx_n.entry(op).or_insert(0) += 1;
-                        if approx.within_tolerance_of(uref) {
+                        // Unicorn's FPATAN is itself approximate: an exact special
+                        // result (such as pi for +0/-1) may differ from its f64
+                        // reference even when the port's own error claim is zero.
+                        let reference_tolerance = if op == "fpatan" {
+                            approx.ulp_err_64.max(tolerance::ATAN_ULP)
+                        } else {
+                            approx.ulp_err_64
+                        };
+                        if (Approx {
+                            value: approx.value,
+                            ulp_err_64: reference_tolerance,
+                        })
+                        .within_tolerance_of(uref)
+                        {
                             bump(op, v.pc, v.rc, 0);
                         } else {
                             bump(op, v.pc, v.rc, 1);

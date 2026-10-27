@@ -3284,9 +3284,10 @@ mod tests {
             bits(Vec3::new(1.0, 2.0, 3.0).rotate_axis(Vec3::new(f32::INFINITY, 0.0, 0.0), 1.0)),
             [0xffc0_0000, 0xffc0_0000, 0xffc0_0000]
         );
+        // The original's FSIN/FCOS of an infinite angle yield negative indefinite.
         assert_eq!(
             bits(Vec3::new(1.0, 2.0, 3.0).rotate_axis(Vec3::new(0.0, 0.0, 1.0), f32::INFINITY)),
-            [0x7fc0_0000, 0x7fc0_0000, 0x7fc0_0000]
+            [0xffc0_0000, 0xffc0_0000, 0xffc0_0000]
         );
     }
 
