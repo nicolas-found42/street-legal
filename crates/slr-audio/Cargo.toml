@@ -3,3 +3,11 @@ name = "slr-audio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+
+[[bin]]
+name = "slr-audio-diff"
+path = "src/bin/slr-audio-diff.rs"
