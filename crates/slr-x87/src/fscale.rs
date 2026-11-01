@@ -25,7 +25,7 @@ fn is_zero_class(exp: u16, sig: u64) -> bool {
 }
 
 /// x87 NaN propagation for two operands, at least one of which is a NaN.
-fn propagate_nan(a: X87, b: X87) -> X87 {
+pub(crate) fn propagate_nan(a: X87, b: X87) -> X87 {
     let (sa, ea) = a.sign_exp();
     let (sb, eb) = b.sign_exp();
     let (ga, gb) = (a.significand(), b.significand());

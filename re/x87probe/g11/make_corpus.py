@@ -27,7 +27,7 @@ def edge_points():
         C.f80(0, 0x3FFF, 1 << 63), C.f80(1, 0x3FFF, 1 << 63), C.f80(0, 0x4000, 1 << 63), C.f80(0, 0x400E, 0x8000000000000000),
         C.f80(0, 0x400F, 0x8000000000000000), C.f80(1, 0x400E, 0xC000000000000000), C.f80(0, 0x4013, 0x8000000000000000),
     ]
-    return words + specials
+    return words + specials, specials
 
 
 def build(n):
@@ -37,13 +37,13 @@ def build(n):
         data = C.corpus(op, cls, n, 5000 + i, lo, hi, lo2, hi2)
         index.append(dict(spec=f"{op}-{cls}-{lo}_{hi}", op=op, first=len(out) // 21, rows=n))
         out += data
-    pts = edge_points()
+    pts, specials = edge_points()
     one = C.f80(0, 0x3FFF, 1 << 63)
     for name, opc in C.OPS.items():
         first = len(out) // 21
         for a in pts:
             if name in C.BINARY:
-                for b in pts[:12]:
+                for b in pts[:12] + specials:
                     out += bytes([opc]) + a + b
             else:
                 out += bytes([opc]) + a + bytes(10)

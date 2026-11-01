@@ -568,9 +568,12 @@ class G4Tests(unittest.TestCase):
         self.assertEqual(got["FUN_00000010"], "passing")
 
     def test_a_ledger_claim_is_not_enough_without_the_observed_test(self):
-        got = self.verdicts({("a", "t_exact")})
-        self.assertEqual(got["LAB_00000003"], "no_test")
+        got = self.verdicts({("a", "t_trig")})
+        self.assertEqual(got["LAB_00000002"], "no_test")
         self.assertEqual(got["FUN_00000010"], "no_test")
+        # a transcendental-dependent row stays blocked by G11 whether or not its test ran
+        self.assertEqual(got["LAB_00000003"], "blocked_by_g11")
+        self.assertEqual(self.verdicts(set())["LAB_00000003"], "blocked_by_g11")
 
     def test_fixture_without_rows_for_the_address_cannot_pass(self):
         observed = {("a", "t_exact"), ("slr-physics", "t_cfg")}

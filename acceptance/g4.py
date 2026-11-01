@@ -84,6 +84,9 @@ def classify(natives: list[dict], ledger: dict[str, dict], physics_rows: set[str
         entry = {**function}
         if row is None:
             entry.update(verdict="unimplemented", reason="no ledger row: not ported, or capture-only")
+        elif any(source in approx for source in row["sources"]):
+            entry.update(verdict="blocked_by_g11", sources=row["sources"], tests=[f"{c}::{n}" for c, n in row["tests"]],
+                         reason="implementation calls an APPROX transcendental; zero-ulp needs G11 pinned (ledger: " + row["status"] + ")")
         elif not row["status"].startswith("passing"):
             entry.update(verdict="no_test", reason=row["status"], sources=row["sources"])
         elif fixtures is not None and function["address"] in physics_rows and function["address"] not in fixtures:
@@ -92,9 +95,6 @@ def classify(natives: list[dict], ledger: dict[str, dict], physics_rows: set[str
         elif not row["tests"] or any(test not in observed for test in row["tests"]):
             missing = [f"{crate}::{name}" for crate, name in row["tests"] if (crate, name) not in observed]
             entry.update(verdict="no_test", sources=row["sources"], reason="named tests not observed passing this run: " + ", ".join(missing or ["none named"]))
-        elif any(source in approx for source in row["sources"]):
-            entry.update(verdict="blocked_by_g11", sources=row["sources"], tests=[f"{c}::{n}" for c, n in row["tests"]],
-                         reason="implementation calls an APPROX transcendental; zero-ulp needs G11 pinned")
         else:
             entry.update(verdict="passing", sources=row["sources"], tests=[f"{c}::{n}" for c, n in row["tests"]],
                          oracles=row["oracles"], reason="differential test observed passing")

@@ -42,11 +42,12 @@ REQUIRED = {
     "fucom": ("game", "probe"), "fucomi": ("game", "probe"),
     "fsin": ("game", "stream"), "fcos": ("game", "stream"), "fpatan": ("game", "stream"),
     "f2xm1": ("game", "stream"), "fscale": ("game", "stream"), "frndint": ("game", "stream"),
+    "fsincos": ("game", "stream"),
     "fyl2x": ("crt", "stream"), "fptan": ("crt", "stream"), "fprem": ("crt", "probe-pair"),
     "fxam": ("crt", "unprobed"), "ftst": ("crt", "unprobed"),
 }
 STREAM_OPS = {"fsin": "fsin", "fcos": "fcos", "fpatan": "fpatan", "f2xm1": "f2xm1",
-              "fscale": "fscale", "frndint": "frndint", "fyl2x": "fyl2x", "fptan": "fptan"}
+              "fscale": "fscale", "frndint": "frndint", "fyl2x": "fyl2x", "fptan": "fptan", "fsincos": "fsincos"}
 # frndint and fscale are RC-sensitive; PC is checked through the control words below.
 CONTROL_WORDS = ("007f", "047f", "087f", "0c7f", "027f", "037f")
 
@@ -136,8 +137,15 @@ def probe_verdict(op: str, totals: dict) -> dict:
 
 def multi_word_verdict(op: str, adjudications: dict, legs_by_word: dict) -> dict:
     """RC-sensitive ops must be pinned under every control word; rows and reasons are merged."""
-    entries = [transcendental_verdict(op, adjudications[word]["by_op"].get(STREAM_OPS[op], {}), legs_by_word[word])
-               for word in sorted(adjudications)]
+    def merged(word):
+        by_op = adjudications[word]["by_op"]
+        total: dict = {}
+        for key in (STREAM_OPS[op], STREAM_OPS[op] + ":special"):
+            for name, value in by_op.get(key, {}).items():
+                total[name] = total.get(name, 0) + value
+        return total
+
+    entries = [transcendental_verdict(op, merged(word), legs_by_word[word]) for word in sorted(adjudications)]
     bad = [entry for entry in entries if entry["verdict"] != "pinned_bit_exact"]
     rows = sum(entry.get("rows", 0) for entry in entries)
     if bad:
@@ -155,7 +163,12 @@ def trust_table(probe_stdout: str, adjudications: dict, legs_by_word: dict, fpre
         elif source == "stream" and op in ("fscale", "frndint"):
             entry = multi_word_verdict(op, adjudications, legs_by_word)
         elif source == "stream":
-            entry = transcendental_verdict(op, adjudications["007f"]["by_op"].get(STREAM_OPS[op], {}), legs_by_word["007f"])
+            by_op = adjudications["007f"]["by_op"]
+            entry = transcendental_verdict(op, by_op.get(STREAM_OPS[op], {}), legs_by_word["007f"])
+            # zeros, infinities and NaNs are fixed by the SDM tables: reported apart so progress shows
+            special = transcendental_verdict(op, by_op.get(STREAM_OPS[op] + ":special", {}), legs_by_word["007f"])
+            entry["special_operands"] = special["verdict"]
+            entry["special_rows"] = special.get("rows", 0)
         elif source == "probe-pair":
             entry = fprem
         else:
@@ -311,6 +324,7 @@ def g11_result(output_root: Path, bochs: Path | None, hardware: Path | None = No
         elif blocked:
             verdict = result("partial", f"{len(blocked)} of {len(table)} required x87 operations are not pinned bit-exact: " + ", ".join(row["op"] for row in blocked),
                              bundle=str(bundle), trust_table=summary, blocked={row["op"]: row["reason"] for row in blocked},
+                             special_operands={row["op"]: row["special_operands"] for row in table if "special_operands" in row},
                              hardware_observed=hardware_identity is not None)
         else:
             verdict = result("passed", "Every required x87 operation is pinned bit-exact across independent legs, slr-x87 and the supplied Intel observation.",

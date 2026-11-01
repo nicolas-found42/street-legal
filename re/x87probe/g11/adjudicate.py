@@ -41,6 +41,14 @@ def to_f32_bits(rec):
     return (sign << 31) | ((exp + 127) << 23) | (q & 0x7FFFFF)
 
 
+BINARY_OPS = {"fpatan", "fyl2x", "fyl2xp1", "fscale"}
+
+
+def _special(sig, se):
+    exp = se & 0x7FFF
+    return exp == 0x7FFF or (exp == 0 and sig == 0)
+
+
 def split_records(buf, rows, name):
     if len(buf) != rows * 22:
         raise ValueError(f"{name}: expected {rows} records of 22 bytes, got {len(buf) / 22}")
@@ -55,18 +63,26 @@ def compare(meta, corpus, legs):
         op = spec["op"]
         for k in range(spec["first"], spec["first"] + spec["rows"]):
             a_sig, a_se = struct.unpack("<QH", corpus[k * 21 + 1:k * 21 + 11])
-            # SDM-undefined operand domain: F2XM1 needs |x| <= 1, FYL2X needs x > 0. Reported apart.
-            ood = (op == "f2xm1" and (a_se & 0x7FFF) >= 0x3FFF and (a_se & 0x7FFF, a_sig) != (0x3FFF, 1 << 63)) \
-                or (op in ("fyl2x",) and (a_se >> 15 or a_se & 0x7FFF == 0x7FFF))
-            cell = report.setdefault(op + (":out-of-domain" if ood else ""), collections.Counter())
+            # SDM-undefined operand domain: F2XM1 needs |x| <= 1 (x < 0 for FYL2X is defined: invalid)
+            a_exp = a_se & 0x7FFF
+            a_nan = a_exp == 0x7FFF and (a_sig << 1) & (2**64 - 1) != 0
+            # the SDM defines F2XM1 only on [-1, 1]; infinities are outside it (Rosetta returns -0.5 for
+            # -inf, Bochs -1, and the SDM table does not settle it), so they make no claim
+            ood = (op == "f2xm1" and a_exp >= 0x3FFF and (a_exp, a_sig) != (0x3FFF, 1 << 63) and not a_nan)
+            # zeros, infinities and NaNs have SDM-fixed results; finite operands are the open class
+            b_sig, b_se = struct.unpack("<QH", corpus[k * 21 + 11:k * 21 + 21])
+            special = _special(a_sig, a_se) or (op in BINARY_OPS and _special(b_sig, b_se))
+            tag = ":out-of-domain" if ood else ":special" if special else ""
+            cell = report.setdefault(op + tag, collections.Counter())
             cell["rows"] += 1
-            spec_cell = by_spec.setdefault(spec["spec"] + (":out-of-domain" if ood else ""), collections.Counter())
+            spec_cell = by_spec.setdefault(spec["spec"] + tag, collections.Counter())
             spec_cell["rows"] += 1
             for a, b in itertools.combinations(sorted(legs), 2):
                 x, y = legs[a][k], legs[b][k]
                 c2 = (x[20] | x[21] << 8) & 0x400 == (y[20] | y[21] << 8) & 0x400
+                width = 20 if op in ("fsincos", "fptan") else 10  # both results of the two-result ops
                 for tgt in (cell, spec_cell):
-                    tgt[f"{a}=={b}:ext80"] += x[:10] == y[:10]
+                    tgt[f"{a}=={b}:ext80"] += x[:width] == y[:width]
                     tgt[f"{a}=={b}:f32"] += to_f32_bits(x) == to_f32_bits(y)
                     tgt[f"{a}=={b}:c2"] += c2
     return {"by_op": {op: dict(c) for op, c in report.items()},
